@@ -20,6 +20,11 @@ final class Toolchain {
     private(set) var running = false
     /// El python3 que usarán los builds (el elegido o el primero >= 3.12).
     private(set) var python: String?
+    /// Un Python del sistema >= 3.12 con el que crear el entorno de la app.
+    private(set) var baseCandidate: String?
+    private(set) var missingModules: [String] = []
+    private(set) var nszMissing = false
+    private(set) var metalToolchainMissing = false
     private(set) var gpuArchitecture: String = ""
     private(set) var repoStatus: String = ""
 
@@ -48,24 +53,36 @@ final class Toolchain {
 
         // Python >= 3.12: el script lo exige para leer la RomFS por rangos.
         python = nil
-        let candidates = prefs.pythonPath.isEmpty ? Preferences.pythonCandidates : [prefs.pythonPath]
+        baseCandidate = nil
+        // El entorno de la app primero: es el que tiene los módulos.
+        let candidates = prefs.pythonPath.isEmpty ? [PythonEnv.python] + Preferences.pythonCandidates : [prefs.pythonPath]
         var pyDetail = "No se encontró python3 >= 3.12 (brew install python)."
         for c in candidates where FileManager.default.isExecutableFile(atPath: c) {
             let r = await Shell.run(c, ["-c", "import sys;print('%d.%d.%d'%sys.version_info[:3])"])
             let v = r.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
             let parts = v.split(separator: ".").compactMap { Int($0) }
             if r.ok, parts.count >= 2, (parts[0], parts[1]) >= (3, 12) {
+                if c != PythonEnv.python, baseCandidate == nil { baseCandidate = c }
+                if python != nil { continue }
                 python = c
                 pyDetail = "\(v) · \(c)"
-                break
+                continue
             }
-            pyDetail = "\(c) es \(v.isEmpty ? "ilegible" : v); hace falta 3.12 o más."
+            if python == nil { pyDetail = "\(c) es \(v.isEmpty ? "ilegible" : v); hace falta 3.12 o más." }
         }
         out.append(Check(id: "python", title: "Python", status: python == nil ? .failure : .ok, detail: pyDetail))
         if let python {
-            let nsz = await Shell.run(python, ["-c", "import nsz"])
-            out.append(Check(id: "nsz", title: "nsz (NSZ/XCZ)", status: nsz.ok ? .ok : .info,
-                             detail: nsz.ok ? "instalado" : "Solo hace falta para .nsz/.xcz: \(python) -m pip install nsz"))
+            // Lo que pide check_prereqs() del script: sin esto el build se
+            // para en la primera etapa.
+            missingModules = await PythonEnv.missingPackages(python)
+            out.append(Check(id: "modules", title: "Módulos de Python",
+                             status: missingModules.isEmpty ? .ok : .failure,
+                             detail: missingModules.isEmpty ? "lz4, capstone, fonttools, zstd"
+                                 : "Faltan \(missingModules.joined(separator: ", ")). Pulsa «Preparar Python» abajo."))
+            let nsz = await PythonEnv.missingPackages(python, includeOptional: true).contains("nsz")
+            nszMissing = nsz
+            out.append(Check(id: "nsz", title: "nsz (NSZ/XCZ)", status: nsz ? .info : .ok,
+                             detail: nsz ? "Solo hace falta para .nsz/.xcz." : "instalado"))
         }
 
         // Xcode y el compilador de Metal contra el que se probó la cadena.
@@ -76,7 +93,16 @@ final class Toolchain {
         let repo = NXRepository(root: prefs.repositoryURL)
         let metal = await Shell.run("/usr/bin/xcrun", ["-sdk", "macosx", "metal", "--version"])
         let metalLine = metal.stdout.split(separator: "\n").first.map(String.init) ?? ""
-        if let wanted = repo.chainLockValues()["metal_macosx"] {
+        // Desde Xcode 26 el compilador de Metal es un componente aparte: sin
+        // él, xcrun encuentra el «metal» de Xcode pero no puede ejecutarlo.
+        metalToolchainMissing = !metal.ok && (metal.stderr + metal.stdout).contains("Metal Toolchain")
+        if metalToolchainMissing {
+            out.append(Check(id: "metal", title: "Compilador de Metal", status: .failure,
+                             detail: "Falta el Metal Toolchain de Xcode (unos cientos de MB de Apple). Pulsa «Descargar Metal Toolchain» abajo, o: xcodebuild -downloadComponent MetalToolchain"))
+        } else if !metal.ok {
+            out.append(Check(id: "metal", title: "Compilador de Metal", status: .failure,
+                             detail: "xcrun metal no se ejecuta: \(metal.stderr.trimmingCharacters(in: .whitespacesAndNewlines))"))
+        } else if let wanted = repo.chainLockValues()["metal_macosx"] {
             let same = metalLine == wanted
             out.append(Check(id: "metal", title: "Compilador de Metal", status: same ? .ok : .warning,
                              detail: same ? metalLine
