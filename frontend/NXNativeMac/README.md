@@ -18,12 +18,26 @@ nxnative cambia esa interfaz, el punto de contacto está en `Sources/NXCore`.
 | Pantalla | Qué hay |
 |---|---|
 | **Biblioteca** | Las apps de juego empaquetadas (`DMTitleID` en su `Info.plist`). Jugar / detener, ajustes por juego, log en vivo, copias de las partidas guardadas, interruptores avanzados. |
-| **Carpetas NSP** | Una carpeta por juego, con base, actualizaciones y DLC agrupados por title ID. Dice si nxnative tiene perfil. Construye una app de Mac, una IPA o un build de desarrollo, con todas las opciones del script. Benchmark (`scripts/bench.py`) cuando el perfil tiene ruta. |
+| **Juegos en disco** | Base, actualizaciones y DLC agrupados por title ID, estén en una carpeta por juego o todos juntos con los DLC en subcarpetas. Dice si nxnative tiene perfil y avisa de un XCI que trae la actualización en el cartucho. Construye una app de Mac, una IPA o un build de desarrollo, con todas las opciones del script. Benchmark (`scripts/bench.py`) cuando el perfil tiene ruta. |
 | **Construcciones** | Cola de builds de uno en uno, con etapas, progreso, ETA y la consola del script. Cancelar manda SIGINT (el script sale con 130 y deja lo reutilizable). |
 | **Compatibilidad** | La tabla de `dm/games/README.md` cruzada con lo que tienes. Cada juego enlaza a su nota en el checkout. |
 | **Entorno** | Comprobaciones reales: Apple silicon, Metal 4 y arquitectura de la GPU, Python ≥ 3.12, `nsz`, Xcode, versión del compilador de Metal contra `dmsh_chain.lock`, permisos de `prod.keys`, espacio libre. Clonar o actualizar nxnative (`git pull --ff-only`). Mandos que ve macOS. |
 
 ### Detalles que importan
+
+- **Bibliotecas planas.** El script exige una carpeta por juego. Si los
+  archivos de un juego comparten carpeta con otros o están repartidos, la app
+  crea `<carpeta de juegos>/_nxnative/<nombre> [<title ID>]/` con **enlaces
+  simbólicos**: no mueve ni renombra nada y no ocupa espacio. El nombre del
+  enlace lleva `[title ID][vN]`, que es lo que lee el script cuando no hay
+  ticket. Se pone al día antes de cada build. Comprobado contra el script
+  real: la busca por el ticket y `nx_extract` abre el destino del enlace.
+- **Title ID sin claves.** De un NSP/NSZ se lee el ticket de su PFS0 (gana a
+  la etiqueta del nombre, como en `title_of()`). Un XCI lo guarda en NCAs
+  cifrados, así que sin claves solo se sabe por el nombre; si no lo lleva, la
+  app sugiere uno por nombre desde la tabla de compatibilidad y el jugador lo
+  confirma. De un XCI sí se lee sin claves cuántos contenidos trae su
+  partición `secure`: más de uno es un «1G+1U», y nxnative solo usa la base.
 
 - **Ajustes de juego**: se dibujan desde `Contents/Resources/dm/launcher.json`
   y se escriben en `~/Library/Application Support/nxnative/<title ID>/env.txt`,

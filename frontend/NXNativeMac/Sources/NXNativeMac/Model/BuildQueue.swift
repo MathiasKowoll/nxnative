@@ -16,6 +16,8 @@ final class BuildJob: Identifiable {
     let arguments: [String]
     /// La carpeta que enseñar al terminar (la salida, o los resultados).
     let resultDirectory: URL?
+    /// `<carpeta>/<title ID>_build/logs`, donde el script deja un log por paso.
+    let logsDirectory: URL?
     private(set) var status: Status = .queued
     private(set) var state = BuildState()
     private(set) var stderrTail = ""
@@ -25,11 +27,12 @@ final class BuildJob: Identifiable {
     private var process: Process?
     private var splitter = LineSplitter()
 
-    init(title: String, folder: URL, arguments: [String], resultDirectory: URL? = nil) {
+    init(title: String, folder: URL, arguments: [String], resultDirectory: URL? = nil, logsDirectory: URL? = nil) {
         self.title = title
         self.folder = folder
         self.arguments = arguments
         self.resultDirectory = resultDirectory
+        self.logsDirectory = logsDirectory
     }
 
     var isActive: Bool { status == .queued || status == .running }
@@ -38,12 +41,6 @@ final class BuildJob: Identifiable {
     var messages: [BuildMessage] { state.messages }
     var overallFraction: Double? { state.overallFraction }
     var lastError: String? { state.lastError }
-
-    /// La carpeta de logs del build: `<NSP>/<title ID>_build/logs`.
-    var logsDirectory: URL? {
-        NSPFolder.scan(root: folder, depth: 0).first?.buildDirectory?
-            .appendingPathComponent("logs", isDirectory: true)
-    }
 
     func start(python: String, repository: URL) {
         let p = Process()

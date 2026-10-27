@@ -11,7 +11,12 @@ final class AppModel {
     let runner = GameRunner()
 
     private(set) var games: [MacGameBundle] = []
-    private(set) var folders: [NSPFolder] = []
+    /// Los juegos en disco, agrupados por title ID base.
+    private(set) var library: [GameEntry] = []
+    /// Archivos sin title ID legible (un XCI sin etiqueta en el nombre).
+    private(set) var unidentified: [GameFile] = []
+    /// Carpetas ya preparadas con enlaces, por title ID.
+    private(set) var prepared: [TitleID: URL] = [:]
     private(set) var profiles: Set<TitleID> = []
     private(set) var compatibility: [CompatibilityEntry] = []
     private(set) var switches: [EnvSwitch] = []
@@ -27,53 +32,101 @@ final class AppModel {
         let repo = repository
         let gameRoots = prefs.gameRootURLs
         let appRoots = prefs.appRootURLs + gameRoots
-        // Recorrer discos puede tardar: fuera del hilo principal.
-        let (g, f, p, c, s) = await Task.detached {
-            (MacGameBundle.scan(roots: appRoots, depth: 2),
-             gameRoots.flatMap { NSPFolder.scan(root: $0, depth: 2) },
-             repo.profiles(), repo.compatibility(), repo.switches())
+        let assigned = prefs.assignedTitleIDs.compactMapValues { TitleID($0) }
+        // Recorrer discos y leer cabeceras puede tardar: fuera del hilo principal.
+        let (g, scans, prep, p, c, s) = await Task.detached {
+            let scans = gameRoots.map { root -> LibraryScan in
+                var scan = GameLibrary.group(GameLibrary.collect(root: root), assigned: assigned)
+                for i in scan.games.indices { scan.games[i].root = root }
+                return scan
+            }
+            var prep: [TitleID: URL] = [:]
+            for r in gameRoots { prep.merge(PreparedFolder.existing(root: r)) { a, _ in a } }
+            return (MacGameBundle.scan(roots: appRoots, depth: 3), scans, prep,
+                    repo.profiles(), repo.compatibility(), repo.switches())
         }.value
         games = g
-        folders = f.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        library = scans.flatMap(\.games)
+        unidentified = scans.flatMap(\.unidentified)
+        prepared = prep
         profiles = p
         compatibility = c
         switches = s
         await toolchain.refresh(prefs)
     }
 
-    enum ProfileState { case registered, unknown, noTitleID }
+    enum ProfileState { case registered, unknown }
 
-    func profileState(_ folder: NSPFolder) -> ProfileState {
-        guard let id = folder.baseTitleID else { return .noTitleID }
-        return profiles.contains(id) ? .registered : .unknown
+    func profileState(_ game: GameEntry) -> ProfileState {
+        profiles.contains(game.base) ? .registered : .unknown
     }
 
     func game(for id: TitleID) -> MacGameBundle? { games.first { $0.titleID.uppercased() == id.description } }
-    func folder(for id: TitleID) -> NSPFolder? { folders.first { $0.baseTitleID == id } }
+    func entry(for id: TitleID) -> GameEntry? { library.first { $0.base == id } }
+    func compat(for id: TitleID) -> CompatibilityEntry? { compatibility.first { $0.titleID == id } }
 
-    func defaultOptions(for folder: NSPFolder) -> BuildOptions? {
-        guard let keys = prefs.keysURL else { return nil }
-        var o = BuildOptions(nspFolder: folder.url, keys: keys)
-        o.macSign = prefs.macSignIdentity
-        return o
+    func name(for game: GameEntry) -> String { compat(for: game.base)?.name ?? game.displayName }
+
+    /// La carpeta que recibe el script: la del juego si la tiene para él solo,
+    /// si no la preparada con enlaces.
+    func buildFolder(for game: GameEntry) -> URL? { game.ownFolder ?? prepared[game.base] }
+
+    /// `<carpeta>/<title ID>_build`.
+    func buildDirectory(for game: GameEntry) -> URL? {
+        buildFolder(for: game)?.appendingPathComponent("\(game.base)_build", isDirectory: true)
+    }
+
+    /// Crea o pone al día los enlaces del juego. Se llama antes de cada build:
+    /// si aparece una actualización o un DLC nuevo, entra solo.
+    func prepare(_ game: GameEntry) throws -> URL {
+        if let own = game.ownFolder { return own }
+        guard let root = game.root else { throw NSError(domain: "NXNativeMac", code: 10) }
+        let dir = try PreparedFolder.sync(game, root: root, name: name(for: game))
+        prepared[game.base] = dir
+        return dir
+    }
+
+    func assign(_ id: TitleID, to file: GameFile) async {
+        prefs.assignedTitleIDs[file.url.path] = id.description
+        await refresh()
+    }
+
+    func outputs(for game: GameEntry) -> [URL] {
+        guard let dir = buildFolder(for: game) else { return [] }
+        let items = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil,
+                                                                  options: [.skipsHiddenFiles])) ?? []
+        return items.filter { ["ipa", "app"].contains($0.pathExtension.lowercased()) }
+    }
+
+    func defaultOptions(for game: GameEntry) -> Result<BuildOptions, Error> {
+        guard let keys = prefs.keysURL else {
+            return .failure(NSError(domain: "NXNativeMac", code: 11, userInfo: [NSLocalizedDescriptionKey: "Falta prod.keys: elígelo en Entorno."]))
+        }
+        return Result {
+            var o = BuildOptions(nspFolder: try prepare(game), keys: keys)
+            o.macSign = prefs.macSignIdentity
+            return o
+        }
     }
 
     /// Devuelve un error legible, o nil si el build quedó en cola.
-    func startBuild(_ options: BuildOptions, title: String) -> String? {
+    func startBuild(_ options: BuildOptions, game: GameEntry) -> String? {
         let output = options.output?.deletingLastPathComponent() ?? options.nspFolder
-        let job = BuildJob(title: title, folder: options.nspFolder,
+        let job = BuildJob(title: "\(options.platform.label) · \(name(for: game))", folder: options.nspFolder,
                            arguments: options.arguments(script: repository.buildScript),
-                           resultDirectory: output)
+                           resultDirectory: output,
+                           logsDirectory: options.nspFolder.appendingPathComponent("\(game.base)_build/logs"))
         return enqueue(job)
     }
 
     /// `scripts/bench.py <build>`: la ruta fija del perfil, con percentiles de
     /// tiempo de fotograma. Exige un build `--platform mac` previo.
-    func startBenchmark(_ folder: NSPFolder, runs: Int = 2) -> String? {
-        guard let build = folder.buildDirectory else { return "La carpeta no tiene title ID." }
-        let job = BuildJob(title: "Benchmark · \(folder.name)", folder: folder.url,
+    func startBenchmark(_ game: GameEntry, runs: Int = 2) -> String? {
+        guard let build = buildDirectory(for: game), let folder = buildFolder(for: game) else { return "El juego no tiene carpeta de build." }
+        let job = BuildJob(title: "Benchmark · \(name(for: game))", folder: folder,
                            arguments: [repository.benchScript.path, build.path, "--runs", "\(runs)"],
-                           resultDirectory: build.appendingPathComponent("bench", isDirectory: true))
+                           resultDirectory: build.appendingPathComponent("bench", isDirectory: true),
+                           logsDirectory: build.appendingPathComponent("bench", isDirectory: true))
         return enqueue(job)
     }
 
