@@ -1,0 +1,14 @@
+.build/
+build/
+.swiftpm/
+*.xcodeproj/
+DerivedData/
+.DS_Store
+# Nada de juegos, claves ni salidas de nxnative
+*.nsp
+*.nsz
+*.xci
+*.xcz
+*.ipa
+*.keys
+prod.keys
