@@ -1,0 +1,14 @@
+{"ev": "stage", "k": 1, "n": 3, "name": "extract v0", "step": "reading", "t": 1793103074.486}
+{"ev": "progress", "k": 1, "name": "extract v0", "step": "reading", "done": 0, "total": 5000000000, "unit": "B", "est": true, "note": "", "frac": 0.0, "eta": null, "elapsed": 0.0, "t": 1793103074.486}
+{"ev": "progress", "k": 1, "name": "extract v0", "step": "reading", "done": 2500000000, "total": 5000000000, "unit": "B", "est": true, "note": "", "frac": 0.5, "eta": null, "elapsed": 0.0, "t": 1793103074.486}
+{"ev": "say", "msg": "[12:00:00] note line", "t": 1793103074.486}
+{"ev": "stage_end", "k": 1, "name": "extract v0", "ok": true, "summary": "9,779 files, 5.0 GB", "elapsed": 0.0, "t": 1793103074.486}
+{"ev": "stage", "k": 2, "n": 3, "name": "rewrite", "step": "", "t": 1793103074.486}
+{"ev": "progress", "k": 2, "name": "rewrite", "step": "", "done": 0, "total": 3, "unit": "modules", "est": false, "note": "", "frac": 0.0, "eta": null, "elapsed": 0.0, "t": 1793103074.486}
+{"ev": "step", "k": 2, "name": "rewrite", "step": "main", "t": 1793103074.487}
+{"ev": "progress", "k": 2, "name": "rewrite", "step": "main", "done": 3, "total": null, "unit": "", "est": false, "note": "", "frac": null, "eta": null, "elapsed": 0.0, "t": 1793103074.487}
+{"ev": "stage_end", "k": 2, "name": "rewrite", "ok": true, "summary": "3 modules", "elapsed": 0.0, "t": 1793103074.487}
+{"ev": "stage", "k": 3, "n": 3, "name": "IPA pack", "step": "", "t": 1793103074.487}
+{"ev": "progress", "k": 3, "name": "IPA pack", "step": "", "done": null, "total": null, "unit": "", "est": false, "note": "", "frac": null, "eta": null, "elapsed": 0.0, "t": 1793103074.487}
+{"ev": "say", "msg": "[RED] something broke", "t": 1793103074.487}
+{"ev": "stage_end", "k": 3, "name": "IPA pack", "ok": false, "summary": "", "elapsed": 0.0, "t": 1793103074.487}
