@@ -7,7 +7,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .library: "Biblioteca"
-        case .folders: "Carpetas NSP"
+        case .folders: "Juegos en disco"
         case .builds: "Construcciones"
         case .compatibility: "Compatibilidad"
         case .environment: "Entorno"
@@ -17,7 +17,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .library: "gamecontroller"
-        case .folders: "folder"
+        case .folders: "externaldrive"
         case .builds: "hammer"
         case .compatibility: "checklist"
         case .environment: "stethoscope"
@@ -41,7 +41,7 @@ struct RootView: View {
         } detail: {
             switch selection ?? .library {
             case .library: LibraryView()
-            case .folders: FoldersView(onBuild: { selection = .builds })
+            case .folders: DiskGamesView(onBuild: { selection = .builds })
             case .builds: BuildsView()
             case .compatibility: CompatibilityView()
             case .environment: EnvironmentView(compact: false)
@@ -52,7 +52,7 @@ struct RootView: View {
     private func badge(for item: SidebarItem) -> Int {
         switch item {
         case .library: model.games.count
-        case .folders: model.folders.count
+        case .folders: model.library.count
         case .builds: model.builds.pendingCount
         case .environment: model.toolchain.checks.filter { $0.status == .failure }.count
         case .compatibility: 0
