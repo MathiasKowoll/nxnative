@@ -16,6 +16,8 @@ final class Preferences {
     /// Carpetas extra donde buscar apps de juego ya empaquetadas.
     var appRoots: [String] { didSet { defaults.set(appRoots, forKey: "appRoots") } }
     var macSignIdentity: String { didSet { defaults.set(macSignIdentity, forKey: "macSignIdentity") } }
+    /// Title IDs asignados a mano a archivos sin etiqueta, por ruta.
+    var assignedTitleIDs: [String: String] { didSet { defaults.set(assignedTitleIDs, forKey: "assignedTitleIDs") } }
 
     init() {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -25,6 +27,7 @@ final class Preferences {
         gameRoots = defaults.stringArray(forKey: "gameRoots") ?? []
         appRoots = defaults.stringArray(forKey: "appRoots") ?? ["\(home)/Applications", "/Applications"]
         macSignIdentity = defaults.string(forKey: "macSignIdentity") ?? ""
+        assignedTitleIDs = defaults.dictionary(forKey: "assignedTitleIDs") as? [String: String] ?? [:]
     }
 
     var repositoryURL: URL { URL(fileURLWithPath: (repositoryPath as NSString).expandingTildeInPath, isDirectory: true) }

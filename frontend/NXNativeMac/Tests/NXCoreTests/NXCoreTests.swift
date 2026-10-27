@@ -116,17 +116,160 @@ import Testing
         #expect(TitleID("nope") == nil)
     }
 
-    @Test func fileNames() {
-        let f = GameFile(url: URL(fileURLWithPath: "/x/Super Mario [010015100B514800][v327680].nsp"), size: 1)
-        #expect(f.titleID?.description == "010015100B514800")
-        #expect(f.version == 327680)
-        let folder = NSPFolder(url: URL(fileURLWithPath: "/x"), files: [
-            GameFile(url: URL(fileURLWithPath: "/x/M [010015100B514000][v0].nsp"), size: 1), f,
-            GameFile(url: URL(fileURLWithPath: "/x/M DLC [010015100B515001][v0].nsp"), size: 1),
-        ])
-        #expect(folder.baseTitleID?.description == "010015100B514000")
-        #expect(folder.packages == ["v327680", "v0"])
-        #expect(folder.addOns.count == 1)
+    @Test func fileNameVariants() {
+        func f(_ n: String) -> GameFile { GameFile(url: URL(fileURLWithPath: "/x/" + n), size: 1, readHeaders: false) }
+        let a = f("Super Mario [010015100B514800][v327680].nsp")
+        #expect(a.titleID?.description == "010015100B514800" && a.version == 327680 && a.source == .fileName)
+        let b = f("Crash_Team_Racing_Nitro-Fueled_0100F9F00C696000_v0_(site).nsp")
+        #expect(b.titleID?.description == "0100F9F00C696000" && b.version == 0)
+        let c = f("Crash 4 Skins DLC [010073401175f002].nsp")
+        #expect(c.titleID?.description == "010073401175F002" && c.titleID?.kind == .addOn)
+        let d = f("Crash Team Racing[0100F9F00C696800][US][v983040].nsp")
+        #expect(d.titleID?.kind == .update && d.version == 983040)
+        let e = f("Mario Kart 8 Deluxe (World) (En,Ja,Fr).xci")
+        #expect(e.titleID == nil && e.version == nil)
+    }
+
+    @Test func cleanAndSuggest() {
+        #expect(GameLibrary.cleanName("The_Legend_of_Zelda_Breath_of_the_Wild_[01007EF00011E000][v0][site]") == "The Legend of Zelda Breath of the Wild")
+        let table = [CompatibilityEntry(name: "The Legend of Zelda: Tears of the Kingdom", titleID: TitleID("0100F2C0115B6000")!, build: "", sdk: "", engine: "", graphics: ""),
+                     CompatibilityEntry(name: "Mario Kart 8 Deluxe", titleID: TitleID("0100152000022000")!, build: "", sdk: "", engine: "", graphics: "")]
+        let totk = GameFile(url: URL(fileURLWithPath: "/x/The_Legend_of_Zelda_Tears_of_the_Kingdom.xci"), size: 1, readHeaders: false)
+        #expect(GameLibrary.suggest(for: totk, in: table)?.titleID.description == "0100F2C0115B6000")
+        let mk = GameFile(url: URL(fileURLWithPath: "/x/Mario Kart 8 Deluxe (World) (En,Ja).xci"), size: 1, readHeaders: false)
+        #expect(GameLibrary.suggest(for: mk, in: table)?.name == "Mario Kart 8 Deluxe")
+        let other = GameFile(url: URL(fileURLWithPath: "/x/Luigi's Mansion 3 (Europe).xci"), size: 1, readHeaders: false)
+        #expect(GameLibrary.suggest(for: other, in: table) == nil)
+    }
+}
+
+/// Contenedores fabricados aquí, con la disposición de switchbrew: sin datos
+/// de ningún juego, solo cabeceras.
+enum Synth {
+    static func le32(_ v: UInt32) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
+    static func le64(_ v: UInt64) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
+
+    static func strings(_ names: [String]) -> (Data, [UInt32]) {
+        var d = Data(); var offs: [UInt32] = []
+        for n in names { offs.append(UInt32(d.count)); d.append(Data(n.utf8)); d.append(0) }
+        while d.count % 4 != 0 { d.append(0) }
+        return (d, offs)
+    }
+
+    static func pfs0(_ names: [String]) -> Data {
+        let (strs, offs) = strings(names)
+        var d = Data("PFS0".utf8) + le32(UInt32(names.count)) + le32(UInt32(strs.count)) + le32(0)
+        for (i, _) in names.enumerated() { d += le64(UInt64(i)) + le64(1) + le32(offs[i]) + le32(0) }
+        return d + strs + Data(repeating: 0, count: names.count)
+    }
+
+    static func hfs0(_ files: [(String, Data)]) -> Data {
+        let (strs, offs) = strings(files.map(\.0))
+        var d = Data("HFS0".utf8) + le32(UInt32(files.count)) + le32(UInt32(strs.count)) + le32(0)
+        var off: UInt64 = 0
+        for (i, f) in files.enumerated() {
+            d += le64(off) + le64(UInt64(f.1.count)) + le32(offs[i]) + le32(0) + le64(0) + Data(repeating: 0, count: 0x20)
+            off += UInt64(f.1.count)
+        }
+        d += strs
+        for f in files { d += f.1 }
+        return d
+    }
+
+    static func xci(secure: [String], keyArea: Bool = false) -> Data {
+        let secureData = hfs0(secure.map { ($0, Data(repeating: 0xAB, count: 4)) })
+        let root = hfs0([("update", hfs0([])), ("normal", hfs0([])), ("secure", secureData)])
+        var header = Data(repeating: 0, count: 0x200)
+        header.replaceSubrange(0x100..<0x104, with: Data("HEAD".utf8))
+        // La dirección es relativa al inicio de la tarjeta: un volcado con
+        // el área de claves delante (0x1000) no la cambia.
+        let prefix = keyArea ? 0x1000 : 0
+        header.replaceSubrange(0x130..<0x138, with: le64(0x200))
+        return Data(repeating: 0, count: prefix) + header + root
+    }
+}
+
+@Suite struct ContainerTests {
+    let dir: URL = {
+        let d = FileManager.default.temporaryDirectory.appendingPathComponent("nxcore-\(UUID().uuidString)", isDirectory: true)
+        try! FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }()
+
+    func write(_ name: String, _ data: Data, in sub: String = "") throws -> URL {
+        let d = sub.isEmpty ? dir : dir.appendingPathComponent(sub, isDirectory: true)
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        let u = d.appendingPathComponent(name)
+        try data.write(to: u)
+        return u
+    }
+
+    /// El ticket gana a la etiqueta del nombre, como en `title_of()`.
+    @Test func ticketWins() throws {
+        let u = try write("Juego [0100AAAA00000001][v0].nsp",
+                          Synth.pfs0(["0123.nca", "0100AAAA000000000000000000000004.tik", "0100AAAA000000000000000000000004.cert"]))
+        let f = GameFile(url: u, size: 100)
+        #expect(f.titleID?.description == "0100AAAA00000000")
+        #expect(f.source == .ticket)
+    }
+
+    @Test(arguments: [false, true]) func cartridge(keyArea: Bool) throws {
+        let u = try write("Cart.xci", Synth.xci(secure: ["a.nca", "b.cnmt.nca", "c.nca", "d.cnmt.nca"], keyArea: keyArea))
+        let x = try #require(Containers.xciInfo(u))
+        #expect(x.headerOffset == (keyArea ? 0x1000 : 0))
+        #expect(x.partitions == ["update", "normal", "secure"])
+        #expect(x.contentMetaCount == 2)
+        #expect(x.carriesMoreThanBase)
+    }
+
+    @Test func garbageIsNil() throws {
+        let u = try write("roto.xci", Data("HEAD esto no es un cartucho".utf8))
+        #expect(Containers.xciInfo(u) == nil)
+        let n = try write("roto.nsp", Data("PFS0\u{FF}\u{FF}\u{FF}\u{7F}".utf8))
+        #expect(Containers.pfs0Names(n) == nil)
+    }
+
+    /// Una biblioteca plana: varios juegos en la raíz, DLC en subcarpetas, un
+    /// XCI sin etiqueta y un NSP sin etiqueta que se identifica por su ticket.
+    @Test func flatLibraryAndPreparedFolder() throws {
+        _ = try write("Juego A [0100AAAA00000000][v0].xci", Synth.xci(secure: ["x.cnmt.nca"]))
+        _ = try write("Juego A [0100AAAA00000800][v65536].nsp", Synth.pfs0(["u.nca"]))
+        _ = try write("Juego A DLC [0100AAAA00001001][v0].nsp", Synth.pfs0(["d.nca"]), in: "DLCs A")
+        _ = try write("Juego B.nsp", Synth.pfs0(["0100BBBB000000000000000000000000.tik"]))
+        _ = try write("Juego C (World).xci", Synth.xci(secure: ["y.cnmt.nca"]))
+        _ = try write("vacio [0100CCCC00000000].nsp", Data())
+        let solo = try write("Juego D [0100DDDD00000000][v0].nsp", Synth.pfs0([]), in: "Juego D")
+
+        let scan = GameLibrary.group(GameLibrary.collect(root: dir))
+        #expect(scan.games.map(\.base.description).sorted() == ["0100AAAA00000000", "0100BBBB00000000", "0100DDDD00000000"])
+        #expect(scan.unidentified.map(\.url.lastPathComponent) == ["Juego C (World).xci"])
+        let a = try #require(scan.games.first { $0.base.description == "0100AAAA00000000" })
+        #expect(a.baseFiles.count == 1 && a.updates.count == 1 && a.addOns.count == 1)
+        #expect(a.ownFolder == nil)
+        #expect(a.packages == ["v65536", "v0"])
+        let d = try #require(scan.games.first { $0.base.description == "0100DDDD00000000" })
+        #expect(d.ownFolder?.standardizedFileURL == solo.deletingLastPathComponent().standardizedFileURL)
+
+        // Asignar el XCI sin etiqueta lo saca de «sin identificar».
+        let c = scan.unidentified[0]
+        let again = GameLibrary.group(GameLibrary.collect(root: dir), assigned: [c.url.path: TitleID("0100CCCC00000000")!])
+        #expect(again.unidentified.isEmpty)
+
+        // La carpeta preparada: enlaces con [TID][vN], y nada se mueve.
+        let folder = try PreparedFolder.sync(a, root: dir, name: "Juego A")
+        let links = try FileManager.default.contentsOfDirectory(atPath: folder.path).sorted()
+        #expect(links == ["Juego A DLC [0100AAAA00001001][v0].nsp", "Juego A [0100AAAA00000000][v0].xci", "Juego A [0100AAAA00000800][v65536].nsp"])
+        for n in links {
+            #expect(FileManager.default.fileExists(atPath: folder.appendingPathComponent(n).path))
+            #expect((try? FileManager.default.destinationOfSymbolicLink(atPath: folder.appendingPathComponent(n).path)) != nil)
+        }
+        #expect(PreparedFolder.existing(root: dir)[a.base] != nil)
+        // Volver a escanear no cuenta los enlaces como juegos nuevos.
+        #expect(GameLibrary.group(GameLibrary.collect(root: dir)).games.count == 3)
+        // Un archivo normal dentro de la carpeta preparada no se toca.
+        try Data("mío".utf8).write(to: folder.appendingPathComponent("notas.txt"))
+        try PreparedFolder.sync(a, root: dir, name: "Juego A")
+        #expect(FileManager.default.fileExists(atPath: folder.appendingPathComponent("notas.txt").path))
     }
 }
 

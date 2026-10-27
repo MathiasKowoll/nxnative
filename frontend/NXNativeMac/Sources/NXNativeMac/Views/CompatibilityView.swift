@@ -47,7 +47,7 @@ struct CompatibilityView: View {
     private var rows: [Row] {
         model.compatibility.map { e in
             let mine = model.game(for: e.titleID) != nil ? "App lista"
-                : model.folder(for: e.titleID) != nil ? "NSP" : ""
+                : model.entry(for: e.titleID) != nil ? "En disco" : ""
             return Row(entry: e, mine: mine)
         }
         .filter { !onlyMine || !$0.mine.isEmpty }
