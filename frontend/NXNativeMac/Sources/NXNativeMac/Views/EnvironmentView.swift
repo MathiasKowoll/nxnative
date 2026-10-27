@@ -21,6 +21,14 @@ struct EnvironmentView: View {
                             Text(c.detail).foregroundStyle(.secondary).textSelection(.enabled)
                         }
                     }
+                    if model.toolchain.metalToolchainMissing {
+                        HStack {
+                            Spacer()
+                            if model.downloadingMetal { ProgressView().controlSize(.small) }
+                            Button("Descargar Metal Toolchain") { Task { await model.downloadMetalToolchain() } }
+                                .disabled(model.downloadingMetal)
+                        }
+                    }
                 } header: {
                     HStack {
                         Text("Comprobaciones")
@@ -46,8 +54,33 @@ struct EnvironmentView: View {
             }
 
             Section {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Entorno de Python de la app")
+                        Spacer()
+                        if model.settingUpPython { ProgressView().controlSize(.small) }
+                        Button("Preparar Python") { Task { await model.setUpPython(includeOptional: false) } }
+                            .disabled(model.settingUpPython)
+                        if model.toolchain.nszMissing {
+                            Button("Añadir nsz") { Task { await model.setUpPython(includeOptional: true) } }
+                                .disabled(model.settingUpPython)
+                        }
+                    }
+                    Text("El Python de Homebrew no deja instalar paquetes con pip. La app crea uno propio en \(PythonEnv.directory.path) con lz4, capstone y fonttools, y lo usa para los builds.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    ForEach(Array(model.pythonLog.enumerated()), id: \.offset) { _, line in
+                        Text(line).font(.caption.monospaced())
+                            .foregroundStyle(BuildEventParser.isError(line) ? .red : .secondary)
+                            .textSelection(.enabled)
+                    }
+                }
+            } header: {
+                Text("Python")
+            }
+
+            Section {
                 PathRow(label: "prod.keys", path: $prefs.keysPath, directory: false)
-                PathRow(label: "python3", path: $prefs.pythonPath, directory: false, placeholder: "automático (>= 3.12)")
+                PathRow(label: "python3", path: $prefs.pythonPath, directory: false, placeholder: "automático: el entorno de la app, si no uno >= 3.12")
             } header: {
                 Text("Claves y herramientas")
             } footer: {

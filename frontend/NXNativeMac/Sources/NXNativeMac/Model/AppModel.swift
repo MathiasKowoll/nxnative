@@ -137,6 +137,42 @@ final class AppModel {
         return nil
     }
 
+    // MARK: - Python
+
+    private(set) var settingUpPython = false
+    private(set) var pythonLog: [String] = []
+
+    /// Crea el entorno virtual de la app e instala los módulos del script.
+    func setUpPython(includeOptional: Bool) async {
+        guard let base = toolchain.baseCandidate ?? toolchain.python else {
+            pythonLog = ["[RED] No hay un python3 >= 3.12 con el que crear el entorno (brew install python)."]
+            return
+        }
+        settingUpPython = true
+        pythonLog = []
+        let ok = await PythonEnv.setUp(base: base, includeOptional: includeOptional) { line in
+            await MainActor.run { self.pythonLog.append(line) }
+        }
+        // Que los builds usen el entorno, aunque se hubiera elegido otro Python.
+        if ok, prefs.pythonPath != PythonEnv.python { prefs.pythonPath = "" }
+        settingUpPython = false
+        await toolchain.refresh(prefs)
+    }
+
+    private(set) var downloadingMetal = false
+
+    /// `xcodebuild -downloadComponent MetalToolchain`: lo descarga Apple, la
+    /// app solo lo lanza cuando el jugador pulsa el botón.
+    func downloadMetalToolchain() async {
+        downloadingMetal = true
+        notice = "Descargando el Metal Toolchain de Apple…"
+        let r = await Shell.run("/usr/bin/xcodebuild", ["-downloadComponent", "MetalToolchain"])
+        notice = r.ok ? "Metal Toolchain instalado."
+                      : "La descarga falló: \(String(r.stderr.suffix(600)))"
+        downloadingMetal = false
+        await toolchain.refresh(prefs)
+    }
+
     // MARK: - El checkout de nxnative
 
     static let upstream = "https://github.com/MathiasKowoll/nxnative.git"
