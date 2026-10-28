@@ -588,3 +588,26 @@ enum Synth {
         #expect(try FileManager.default.attributesOfItem(atPath: font.path)[.modificationDate] as? Date == before)
     }
 }
+
+@Suite struct GlobalDefaultsTests {
+    @Test func nothingByDefault() {
+        #expect(GlobalDefaults().environment(userEnv: EnvFile()) == [:])
+    }
+
+    @Test func appliesToEveryGame() {
+        let g = GlobalDefaults(fullscreen: true, filter: "bicubic", sharpen: 0.5)
+        #expect(g.environment(userEnv: EnvFile()) == ["DM_FULLSCREEN": "1", "DM_PRESENT_FILTER": "bicubic", "DM_PRESENT_SHARPEN": "0.50"])
+    }
+
+    /// La elección propia del juego (su env.txt) gana: no se pisa con el entorno.
+    @Test func aGamesOwnChoiceWins() {
+        let g = GlobalDefaults(fullscreen: true, filter: "lanczos", sharpen: 1)
+        let env = EnvFile(text: "DM_FULLSCREEN=0\nDM_PRESENT_FILTER=sharp\n")
+        #expect(g.environment(userEnv: env) == ["DM_PRESENT_SHARPEN": "1.00"])
+    }
+
+    @Test func rejectsUnknownFilterAndClampsSharpen() {
+        let g = GlobalDefaults(fullscreen: false, filter: "magic", sharpen: 7)
+        #expect(g.environment(userEnv: EnvFile()) == ["DM_PRESENT_SHARPEN": "1.00"])
+    }
+}

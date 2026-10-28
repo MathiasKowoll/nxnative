@@ -102,6 +102,30 @@ struct EnvironmentView: View {
             }
 
             Section {
+                Toggle("Pantalla completa al arrancar", isOn: $prefs.globalFullscreen)
+                Picker("Filtro de escalado", selection: $prefs.globalFilter) {
+                    Text("El de cada juego").tag("")
+                    ForEach(GlobalDefaults.filters, id: \.value) { Text($0.label).tag($0.value) }
+                }
+                Toggle("Nitidez para todos", isOn: Binding(get: { model.prefs.globalSharpen >= 0 },
+                                                           set: { model.prefs.globalSharpen = $0 ? 0.5 : -1 }))
+                if model.prefs.globalSharpen >= 0 {
+                    LabeledContent("Cantidad") {
+                        HStack {
+                            Slider(value: Binding(get: { max(0, model.prefs.globalSharpen) },
+                                                  set: { model.prefs.globalSharpen = (($0 * 20).rounded() / 20) }), in: 0...1)
+                            Text("\(Int((max(0, model.prefs.globalSharpen) * 100).rounded())) %").monospacedDigit().frame(width: 48, alignment: .trailing)
+                        }
+                    }
+                }
+            } header: {
+                Text("Todos los juegos")
+            } footer: {
+                Text("Se aplican al jugar desde esta app. Un juego con su propia elección en Ajustes se queda con la suya. El filtro y la nitidez necesitan el juego construido con esta versión de nxnative; la pantalla completa vale ya. Bicúbico con nitidez 50 % es la combinación que más se acercó a la imagen real en las pruebas.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section {
                 PathRow(label: "Copias de partidas", path: $prefs.backupsPath, directory: true,
                         placeholder: SaveVault.defaultRoot.path)
                 Toggle("Copia automática al jugar y al reconstruir", isOn: $prefs.autoBackup)

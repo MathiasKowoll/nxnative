@@ -24,6 +24,11 @@ final class Preferences {
     var backupsPath: String { didSet { defaults.set(backupsPath, forKey: "backupsPath") } }
     /// Copia automática antes de jugar y antes de reconstruir un juego.
     var autoBackup: Bool { didSet { defaults.set(autoBackup, forKey: "autoBackup") } }
+    /// Valores para todos los juegos (GlobalDefaults): pantalla completa al
+    /// arrancar, filtro de escalado ("" = cada juego) y nitidez (<0 = cada juego).
+    var globalFullscreen: Bool { didSet { defaults.set(globalFullscreen, forKey: "globalFullscreen") } }
+    var globalFilter: String { didSet { defaults.set(globalFilter, forKey: "globalFilter") } }
+    var globalSharpen: Double { didSet { defaults.set(globalSharpen, forKey: "globalSharpen") } }
     /// Title IDs asignados a mano a archivos sin etiqueta, por ruta.
     var assignedTitleIDs: [String: String] { didSet { defaults.set(assignedTitleIDs, forKey: "assignedTitleIDs") } }
 
@@ -37,12 +42,19 @@ final class Preferences {
         macSignIdentity = defaults.string(forKey: "macSignIdentity") ?? ""
         backupsPath = defaults.string(forKey: "backupsPath") ?? ""
         autoBackup = defaults.object(forKey: "autoBackup") as? Bool ?? true
+        globalFullscreen = defaults.bool(forKey: "globalFullscreen")
+        globalFilter = defaults.string(forKey: "globalFilter") ?? ""
+        globalSharpen = defaults.object(forKey: "globalSharpen") as? Double ?? -1
         assignedTitleIDs = defaults.dictionary(forKey: "assignedTitleIDs") as? [String: String] ?? [:]
     }
 
     var repositoryURL: URL { URL(fileURLWithPath: (repositoryPath as NSString).expandingTildeInPath, isDirectory: true) }
     var keysURL: URL? {
         keysPath.isEmpty ? nil : URL(fileURLWithPath: (keysPath as NSString).expandingTildeInPath)
+    }
+    var globalDefaults: GlobalDefaults {
+        GlobalDefaults(fullscreen: globalFullscreen, filter: globalFilter.isEmpty ? nil : globalFilter,
+                       sharpen: globalSharpen < 0 ? nil : globalSharpen)
     }
     var backupsURL: URL {
         backupsPath.isEmpty ? SaveVault.defaultRoot
