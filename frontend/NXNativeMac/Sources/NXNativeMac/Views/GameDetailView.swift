@@ -108,6 +108,7 @@ struct SettingsFormView: View {
                     }
                 }
                 ButtonGlyphsSection(store: store)
+                HighRefreshSection(store: store)
                 Section {
                     HStack {
                         Text("Se guardan en \(store.game.userEnv.path) y valen también al abrir el juego desde Finder. Solo se escribe lo que difiere del valor probado.")
@@ -161,6 +162,30 @@ struct ButtonGlyphsSection: View {
     }
 }
 
+/// 120 Hz por juego: los cuatro interruptores de HighRefresh. Experimental
+/// porque depende de cómo mide el tiempo el motor del juego.
+struct HighRefreshSection: View {
+    @Bindable var store: GameSettingsStore
+
+    private var screenHz: Int { NSScreen.screens.map(\.maximumFramesPerSecond).max() ?? 60 }
+
+    var body: some View {
+        Section("120 Hz (experimental)") {
+            Toggle("Hasta 120 imágenes por segundo", isOn: Binding(get: { store.highRefresh }, set: { store.setHighRefresh($0) }))
+            if !store.highRefresh, !store.highRefreshConflicts.isEmpty {
+                Text("Este juego ya fija a mano \(store.highRefreshConflicts.joined(separator: ", ")) en su env.txt; encenderlo lo cambia.")
+                    .font(.caption).foregroundStyle(.orange)
+            }
+            if screenHz < 120 {
+                Text("Ninguna pantalla conectada pasa de \(screenHz) Hz: con este modo el juego no se verá a más de \(screenHz).")
+                    .font(.caption).foregroundStyle(.orange)
+            }
+            Text("Solo funciona en juegos cuyo motor mide el tiempo entre imágenes (Unreal y muchos de Unity; Batman: Arkham Knight llegó a 119,8 fps). Un juego con la lógica atada a 30 o 60 se queda en su tope o va acelerado: si pasa, apágalo. Pide el doble de GPU que 60 fps. Si se queda en 60, puede que haga falta reconstruir el juego con esta versión de nxnative. Vale desde el siguiente arranque.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+}
+
 struct SettingRow: View {
     @Bindable var store: GameSettingsStore
     let setting: Setting
@@ -169,6 +194,10 @@ struct SettingRow: View {
         let value = store.value(setting)
         VStack(alignment: .leading, spacing: 3) {
             control(value)
+                .disabled(store.ownedByHighRefresh(setting))
+            if store.ownedByHighRefresh(setting) {
+                Text("Lo controla el modo 120 Hz.").font(.caption).foregroundStyle(.secondary)
+            }
             HStack(spacing: 6) {
                 Text(setting.env).monospaced()
                 if store.isChanged(setting) {
@@ -234,56 +263,164 @@ struct SettingRow: View {
 
 // MARK: - Avanzado
 
+/// Interruptores sueltos del env.txt del jugador. Arriba lo que ya fija este
+/// juego, editable; debajo los conocidos (docs/env_switches.tsv) por grupos,
+/// con los valores que su propia descripción nombra. El archivo en bruto
+/// sigue a mano, plegado.
 struct AdvancedEnvView: View {
     @Environment(AppModel.self) private var model
     @Bindable var store: GameSettingsStore
-    @State private var text = ""
+    @State private var group: EnvSwitch.Group = .player
     @State private var search = ""
+    @State private var adding: EnvSwitch?
+    @State private var rawOpen = false
+    @State private var text = ""
 
     var body: some View {
-        HSplitView {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("env.txt del jugador").font(.headline)
-                Text("Una línea KEY=VALUE por variable; # comenta. Gana la primera aparición, y este archivo gana al dm/env.txt del bundle.")
-                    .font(.caption).foregroundStyle(.secondary)
-                TextEditor(text: $text)
-                    .font(.system(.body, design: .monospaced))
-                    .border(.separator)
-                HStack {
-                    Button("Descartar") { text = store.rawText }
-                    Spacer()
-                    Button("Guardar") { store.saveRaw(text) }
-                        .keyboardShortcut("s")
-                        .disabled(text == store.rawText)
+        Form {
+            Section {
+                if store.activeSwitches.isEmpty {
+                    Text("Ninguno. Los ajustes de la pestaña Ajustes también se guardan aquí.").foregroundStyle(.secondary)
                 }
+                ForEach(store.activeSwitches, id: \.key) { entry in
+                    ActiveSwitchRow(key: entry.key, value: entry.value, known: known(entry.key)) { v in store.setSwitch(entry.key, v) }
+                }
+            } header: {
+                Text("Activos en este juego")
+            } footer: {
+                Text("Valen desde el siguiente arranque, también al abrir el juego desde Finder. Un valor que pase la app al arrancar (por ejemplo los de «Todos los juegos») no pisa los de aquí.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
-            .padding()
-            .frame(minWidth: 320)
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Interruptores conocidos").font(.headline)
-                TextField("Buscar", text: $search).textFieldStyle(.roundedBorder)
-                List(filtered) { s in
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack {
+            Section {
+                Picker("Tipo", selection: $group) {
+                    ForEach(EnvSwitch.Group.allCases.filter(\.offered), id: \.self) { g in
+                        Text("\(g.title) (\(model.switches.filter { $0.group == g }.count))").tag(g)
+                    }
+                }
+                .pickerStyle(.segmented)
+                TextField("Buscar por nombre o descripción", text: $search)
+                if group == .diagnostic || group == .test {
+                    Label("Pensados para investigar fallos: pueden llenar el log, frenar el juego o cambiar cómo se comporta.", systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+                ForEach(filtered) { s in
+                    HStack(alignment: .top) {
+                        VStack(alignment: .leading, spacing: 3) {
                             Text(s.name).monospaced().font(.callout.weight(.medium))
-                            Text(s.kind).font(.caption2).foregroundStyle(.secondary)
-                            Spacer()
-                            Button("Añadir") { text += (text.isEmpty || text.hasSuffix("\n") ? "" : "\n") + "\(s.name)=\n" }
-                                .controlSize(.small)
+                            Text(s.formattedMeaning).font(.caption).foregroundStyle(.secondary).lineLimit(5)
                         }
-                        Text(s.meaning).font(.caption).foregroundStyle(.secondary).lineLimit(4)
+                        Spacer()
+                        if let v = store.activeSwitches.first(where: { $0.key == s.name })?.value {
+                            Text(v.isEmpty ? "(vacío)" : v).monospaced().font(.caption).padding(.horizontal, 6).padding(.vertical, 2)
+                                .background(.green.opacity(0.15), in: Capsule())
+                        } else {
+                            Button("Añadir…") { adding = s }.controlSize(.small)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+            } header: {
+                Text("Interruptores de nxnative")
+            } footer: {
+                Text("Las descripciones son las de nxnative (docs/env_switches.tsv). Las rutas no se ofrecen: las pone el lanzador con las carpetas de la app.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section {
+                DisclosureGroup("Editar el archivo a mano", isExpanded: $rawOpen) {
+                    TextEditor(text: $text)
+                        .font(.system(.body, design: .monospaced))
+                        .frame(minHeight: 140)
+                    HStack {
+                        Text("Una línea KEY=VALUE por variable; # comenta; gana la primera aparición.").font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Descartar") { text = store.rawText }
+                        Button("Guardar") { store.saveRaw(text) }.keyboardShortcut("s").disabled(text == store.rawText)
+                    }
+                }
+                .onChange(of: rawOpen) { if rawOpen { text = store.rawText } }
+            }
+        }
+        .formStyle(.grouped)
+        .sheet(item: $adding) { s in
+            AddSwitchSheet(sw: s) { value in store.setSwitch(s.name, value); adding = nil } cancel: { adding = nil }
+        }
+    }
+
+    private func known(_ key: String) -> EnvSwitch? { model.switches.first { $0.name == key } }
+
+    private var filtered: [EnvSwitch] {
+        model.switches.filter { s in
+            guard s.group.offered else { return false }
+            if !search.isEmpty { return s.name.localizedCaseInsensitiveContains(search) || s.meaning.localizedCaseInsensitiveContains(search) }
+            return s.group == group
+        }
+    }
+}
+
+/// Una variable que el env.txt ya fija: su valor, editable, y quitarla.
+struct ActiveSwitchRow: View {
+    let key: String
+    let value: String
+    let known: EnvSwitch?
+    var set: (String?) -> Void
+    @State private var draft = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Text(key).monospaced().font(.callout.weight(.medium))
+                Spacer()
+                if let options = known?.suggestedValues, options.count > 1, options.contains(value) || value.isEmpty {
+                    Picker("", selection: Binding(get: { value }, set: { set($0) })) {
+                        ForEach(options, id: \.self) { Text($0).tag($0) }
+                    }
+                    .labelsHidden().fixedSize()
+                } else {
+                    TextField("valor", text: $draft, prompt: Text(known?.placeholder ?? "valor"))
+                        .monospaced().frame(width: 140)
+                        .onSubmit { set(draft) }
+                }
+                Button { set(nil) } label: { Image(systemName: "minus.circle.fill") }
+                    .buttonStyle(.borderless).foregroundStyle(.red).help("Quitar del env.txt")
+            }
+            if let k = known { Text(k.formattedMeaning).font(.caption).foregroundStyle(.secondary).lineLimit(3) }
+            else { Text("No está en la lista de nxnative: puede ser de otra versión o un error al escribirlo.").font(.caption).foregroundStyle(.orange) }
+        }
+        .onAppear { draft = value }
+        .onChange(of: value) { draft = value }
+    }
+}
+
+/// Añadir un interruptor: los valores que nombra su descripción como botones,
+/// o el valor escrito.
+struct AddSwitchSheet: View {
+    let sw: EnvSwitch
+    var add: (String) -> Void
+    var cancel: () -> Void
+    @State private var value = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(sw.name).font(.title3.weight(.semibold)).monospaced()
+            Text(sw.formattedMeaning).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if !sw.suggestedValues.isEmpty {
+                Text("Valores que nombra la descripción").font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    ForEach(sw.suggestedValues, id: \.self) { v in
+                        Button(v) { add(v) }.monospaced()
                     }
                 }
             }
-            .padding()
-            .frame(minWidth: 320)
+            HStack {
+                TextField("Otro valor", text: $value, prompt: Text(sw.placeholder ?? "valor"))
+                    .monospaced().onSubmit { if !value.isEmpty { add(value) } }
+                Button("Añadir") { add(value) }.disabled(value.isEmpty).keyboardShortcut(.defaultAction)
+            }
+            HStack { Spacer(); Button("Cancelar", action: cancel).keyboardShortcut(.cancelAction) }
         }
-        .onAppear { text = store.rawText }
-    }
-
-    private var filtered: [EnvSwitch] {
-        search.isEmpty ? model.switches
-            : model.switches.filter { $0.name.localizedCaseInsensitiveContains(search) || $0.meaning.localizedCaseInsensitiveContains(search) }
+        .padding(20)
+        .frame(width: 520)
     }
 }
