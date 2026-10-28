@@ -64,6 +64,31 @@ final class GameSettingsStore {
         }
     }
 
+    // MARK: 120 Hz (experimental)
+
+    var highRefresh: Bool { HighRefresh.isOn(env) }
+    var highRefreshConflicts: [String] { HighRefresh.conflicts(env) }
+    /// Una variable que gobierna el modo 120 Hz: mientras está encendido, su
+    /// fila de ajustes no se toca por separado.
+    func ownedByHighRefresh(_ s: Setting) -> Bool { highRefresh && HighRefresh.values.contains { $0.key == s.env } }
+
+    func setHighRefresh(_ on: Bool) {
+        HighRefresh.set(on, in: &env)
+        save()
+    }
+
+    // MARK: interruptores sueltos (pestaña Avanzado)
+
+    /// Lo que el env.txt fija, en su orden: la primera aparición de cada
+    /// variable, que es la que vale para el lanzador.
+    var activeSwitches: [(key: String, value: String)] { env.keys.map { ($0, env[$0] ?? "") } }
+
+    /// Pone o quita (nil) una variable, dejando el resto del archivo como está.
+    func setSwitch(_ key: String, _ value: String?) {
+        env[key] = value
+        save()
+    }
+
     var rawText: String { env.text }
 
     func saveRaw(_ text: String) {

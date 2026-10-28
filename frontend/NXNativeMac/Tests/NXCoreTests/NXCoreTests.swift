@@ -611,3 +611,62 @@ enum Synth {
         #expect(g.environment(userEnv: EnvFile()) == ["DM_PRESENT_SHARPEN": "1.00"])
     }
 }
+
+@Suite struct HighRefreshTests {
+    @Test func onAndOff() {
+        var env = EnvFile(text: "DM_RUMBLE=0\n")
+        #expect(!HighRefresh.isOn(env))
+        HighRefresh.set(true, in: &env)
+        #expect(HighRefresh.isOn(env))
+        #expect(env["DM_PRESENT_LINK"] == "2" && env["DM_PRESENT_HZ"] == "120" && env["DM_PRESENT_INTERVAL"] == "display" && env["DM_FPS_TARGET"] == "0")
+        HighRefresh.set(false, in: &env)
+        #expect(env.text == "DM_RUMBLE=0\n")   // apagar deja el archivo como estaba
+    }
+
+    /// Un valor escrito a mano con otro valor no se quita al apagar, y se avisa antes de encender.
+    @Test func handSetValuesAreKept() {
+        var env = EnvFile(text: "DM_FPS_TARGET=60\nDM_PRESENT_HZ=90\n")
+        #expect(HighRefresh.conflicts(env) == ["DM_PRESENT_HZ=90", "DM_FPS_TARGET=60"])
+        HighRefresh.set(false, in: &env)
+        #expect(env["DM_FPS_TARGET"] == "60" && env["DM_PRESENT_HZ"] == "90")
+    }
+}
+
+@Suite struct EnvSwitchHintsTests {
+    func sw(_ name: String, _ kind: String, _ meaning: String) -> EnvSwitch { EnvSwitch(name: name, kind: kind, meaning: meaning) }
+
+    @Test func valuesFromTheDescription() {
+        #expect(sw("DM_FPS_HOLD", "player", "`on` / `off` overrides the profile's `fps_hold`: whether late frames may raise the hold").suggestedValues == ["on", "off"])
+        #expect(sw("DM_PRESENT_INTERVAL", "switch", "`display` presents one frame per display-link tick; `game` follows the game's present interval (default: the profile's `present_interval`)").suggestedValues == ["display", "game"])
+        #expect(sw("DM_ALLOW_OTHER_METAL", "switch", "`1` lets `own_compilers.py` build the shader libraries with a Metal compiler other than the one in `dmsh_chain.lock`").suggestedValues == ["1"])
+    }
+
+    @Test func placeholderForFreeValues() {
+        let s = sw("DM_AB", "diagnostic", "`=<frames>` splits the run into phases of that many frames and alternates every switch set to `ab`")
+        #expect(s.placeholder == "frames")
+        #expect(s.suggestedValues == ["ab"])
+    }
+
+    @Test func numbersAndRanges() {
+        #expect(sw("DM_RENDER_SCALE", "player", "`0.5` to `1.0`: fixes the game's 3D views at that fraction; `1.0` (the default) keeps it").suggestedValues == ["0.5", "1.0"])
+        let r = sw("DM_RUMBLE_MIN", "player", "`=0..0.9`: controller rumble levels below it stay silent (default 0)")
+        #expect(r.placeholder == "de 0 a 0.9" && r.suggestedValues.isEmpty)
+    }
+
+    @Test func groupsAndPaths() {
+        #expect(sw("DM_AOC_DIR", "path", "Folder of add-on content").group == .path)
+        #expect(!EnvSwitch.Group.path.offered && EnvSwitch.Group.player.offered)
+        #expect(sw("X", "switch", "").group == .setting)
+    }
+
+    /// Contra la tabla real del checkout: cada clase cae en un grupo, y ningún interruptor de jugador se queda sin forma de elegir valor.
+    @Test func realTable() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<5 { root.deleteLastPathComponent() }
+        let all = NXRepository(root: root).switches()
+        try #require(!all.isEmpty)
+        let player = all.filter { $0.group == .player }
+        #expect(player.count >= 15)
+        #expect(player.allSatisfy { !$0.suggestedValues.isEmpty || $0.placeholder != nil }, "\(player.filter { $0.suggestedValues.isEmpty && $0.placeholder == nil }.map(\.name))")
+    }
+}
