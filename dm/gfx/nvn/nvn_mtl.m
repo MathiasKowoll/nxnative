@@ -453,7 +453,7 @@ void mtl_init(void) {
     g_present_args = [g_dev newArgumentTableWithDescriptor:pad error:&ate];
     if (!g_present_args) MDIE("failed to create the present argument table: %s", ate.localizedDescription.UTF8String);
     for (int i = 0; i < 3; i++) {
-        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * 8 options:MTLResourceStorageModeShared];
+        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * 12 options:MTLResourceStorageModeShared];   // Crop: rect, edge, filter (present_filter)
         if (!g_present_uv[i]) MDIE("failed to create present UV buffer[%d]", i);
         res_add(g_present_uv[i]);
     }
@@ -10395,8 +10395,42 @@ static void present_pipeline(MTLPixelFormat format) {
             "#include <metal_stdlib>\nusing namespace metal;\n"
             "struct V { float4 p [[position]]; float2 uv; };\n"
             "vertex V vs(uint id [[vertex_id]]) { float2 uv = float2((id << 1) & 2, id & 2); V o; o.p = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); o.uv = uv; return o; }\n"
-            "struct Crop { float4 rect; float4 edge; };\n"
-            "fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant Crop& c [[buffer(0)]]) { return t.sample(s, clamp(in.uv * c.rect.zw + c.rect.xy, c.edge.xy, c.edge.zw)); }\n";
+            // f: the filter (0 bilinear, 1 Catmull-Rom bicubic, 2 Lanczos-3, 3 sharp pixels), the sharpening amount (0 off, up to 1) and the source texture's size (present_filter)
+            "struct Crop { float4 rect; float4 edge; float4 f; };\n"
+            // Every tap is clamped to the texel centres of the valid rectangle, as the bilinear present always was: no filter reads the black texels outside it
+            "static float4 tap(texture2d<float> t, sampler s, constant Crop& c, float2 uv) { return t.sample(s, clamp(uv, c.edge.xy, c.edge.zw)); }\n"
+            // Catmull-Rom in 9 bilinear taps: the two middle weights of each axis folded into one tap between their texels
+            "static float4 bicubic(texture2d<float> t, sampler s, constant Crop& c, float2 uv) {\n"
+            "  float2 sz = c.f.zw, p = uv * sz - 0.5, b = floor(p), f = p - b;\n"
+            "  float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f)), w1 = 1.0 + f * f * (-2.5 + 1.5 * f), w2 = f * (0.5 + f * (2.0 - 1.5 * f)), w3 = f * f * (-0.5 + 0.5 * f);\n"
+            "  float2 w12 = w1 + w2, t0 = (b - 0.5) / sz, t3 = (b + 2.5) / sz, t12 = (b + 0.5 + w2 / w12) / sz;\n"
+            "  float2 xs[3] = {float2(t0.x, w0.x), float2(t12.x, w12.x), float2(t3.x, w3.x)}, ys[3] = {float2(t0.y, w0.y), float2(t12.y, w12.y), float2(t3.y, w3.y)};\n"
+            "  float4 r = 0; for (int j = 0; j < 3; j++) for (int i = 0; i < 3; i++) r += tap(t, s, c, float2(xs[i].x, ys[j].x)) * (xs[i].y * ys[j].y);\n"
+            "  return r; }\n"
+            // Lanczos-3: 6x6 texel centres (a bilinear tap at a texel centre is that texel), weights normalised so a flat picture stays flat
+            "static float lz(float x) { x = abs(x); if (x < 1e-5) return 1.0; if (x >= 3.0) return 0.0; float px = M_PI_F * x; return 3.0 * sin(px) * sin(px / 3.0) / (px * px); }\n"
+            "static float4 lanczos(texture2d<float> t, sampler s, constant Crop& c, float2 uv) {\n"
+            "  float2 sz = c.f.zw, p = uv * sz - 0.5, b = floor(p), f = p - b; float wx[6], wy[6]; float sx = 0, sy = 0;\n"
+            "  for (int i = 0; i < 6; i++) { wx[i] = lz(f.x - (i - 2)); wy[i] = lz(f.y - (i - 2)); sx += wx[i]; sy += wy[i]; }   // 12 weights, not 36\n"
+            "  float4 r = 0; for (int j = 0; j < 6; j++) { float4 row = 0; for (int i = 0; i < 6; i++) row += tap(t, s, c, (b + float2(i - 2, j - 2) + 0.5) / sz) * wx[i]; r += row * wy[j]; }\n"
+            "  return r / (sx * sy); }\n"
+            // Sharp pixels: each texel a flat square, with a bilinear blend only in the last screen pixel of its edge (no shimmer at non-integer scales, no blur)
+            "static float4 sharp_pixels(texture2d<float> t, sampler s, constant Crop& c, float2 uv) {\n"
+            "  float2 sz = c.f.zw, tx = uv * sz, scale = max(1.0 / max(fwidth(tx), 1e-6), 1.0), fl = floor(tx), d = fract(tx) - 0.5, region = 0.5 - 0.5 / scale;\n"
+            "  return tap(t, s, c, (fl + (d - clamp(d, -region, region)) * scale + 0.5) / sz); }\n"
+            // Contrast-adaptive sharpening (AMD FidelityFX CAS's weighting): sharpen against the 4 neighbours in source texels, less where the neighbourhood is
+            // already near black or white, so edges gain contrast without halos
+            "static float4 cas(texture2d<float> t, sampler s, constant Crop& c, float2 uv, float4 m) {\n"
+            "  float2 d = 1.0 / c.f.zw; float3 n = tap(t, s, c, uv - float2(0, d.y)).rgb, so = tap(t, s, c, uv + float2(0, d.y)).rgb, w = tap(t, s, c, uv - float2(d.x, 0)).rgb, e = tap(t, s, c, uv + float2(d.x, 0)).rgb;\n"
+            "  float3 mn = min(m.rgb, min(min(n, so), min(w, e))), mx = max(m.rgb, max(max(n, so), max(w, e)));\n"
+            "  float3 wt = -sqrt(saturate(min(mn, 1.0 - mx) / max(mx, 1e-4))) / mix(8.0, 5.0, c.f.y);\n"
+            "  return float4(saturate((m.rgb + (n + so + w + e) * wt) / (1.0 + 4.0 * wt)), m.a); }\n"
+            // f.x 0 with f.y 0 is the bilinear present as it always was: the same expression, the same bytes
+            "fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant Crop& c [[buffer(0)]]) {\n"
+            "  float2 uv = in.uv * c.rect.zw + c.rect.xy; int mode = int(c.f.x); float4 m;\n"
+            "  if (mode == 1) m = bicubic(t, s, c, uv); else if (mode == 2) m = lanczos(t, s, c, uv); else if (mode == 3) m = sharp_pixels(t, s, c, uv); else m = tap(t, s, c, uv);\n"
+            "  if (mode == 1 || mode == 2) m = float4(saturate(m.rgb), m.a);   // the negative lobes can overshoot\n"
+            "  return c.f.y > 0 ? cas(t, s, c, uv, m) : m; }\n";
         NSError *e = nil;
         id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(src_msl) options:nil error:&e];
         if (!lib) MDIE("present shader compile failed %s", e.localizedDescription.UTF8String);
@@ -10409,6 +10443,32 @@ static void present_pipeline(MTLPixelFormat format) {
         MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear; sd.supportArgumentBuffers = YES;
         g_blit_samp = [g_dev newSamplerStateWithDescriptor:sd];
     }
+}
+// ---------- Present filter and sharpening (DM_PRESENT_FILTER, DM_PRESENT_SHARPEN) ----------
+// How the picture is scaled to its rectangle on the screen, and how much contrast-adaptive sharpening goes on top (the present shader above). Read once.
+// bilinear (the default) is the present as it always was, byte for byte; MetalFX (DM_PRESENT_UPSCALE) still scales first where it applies, and then the
+// picture is drawn 1:1, so only the sharpening reaches it.
+static const char *const present_filters[] = {"bilinear", "bicubic", "lanczos", "sharp"};
+static int g_pf_mode = -1; static float g_pf_sharpen;
+static void present_filter(int *mode, float *sharpen) {
+    if (g_pf_mode < 0) {
+        const char *e = getenv("DM_PRESENT_FILTER"); int m = 0;
+        if (e && *e) {
+            int found = -1; for (int i = 0; i < 4; i++) if (!strcmp(e, present_filters[i])) found = i;
+            if (found < 0) MLOG("[RED] DM_PRESENT_FILTER=%s: bilinear, bicubic, lanczos or sharp; keeping bilinear", e); else m = found;
+        }
+        const char *h = getenv("DM_PRESENT_SHARPEN"); float v = 0;
+        if (h && *h) { char *end; v = strtof(h, &end); if (*end || v != v) { MLOG("[RED] DM_PRESENT_SHARPEN=%s: a number from 0 to 1; keeping 0", h); v = 0; } }
+        g_pf_sharpen = v < 0 ? 0 : v > 1 ? 1 : v;
+        MLOG("present filter (DM_PRESENT_FILTER): %s; sharpening (DM_PRESENT_SHARPEN): %s%.2f", present_filters[m], g_pf_sharpen > 0 ? "CAS " : "off, ", g_pf_sharpen);
+        g_pf_mode = m;
+    }
+    *mode = g_pf_mode; *sharpen = g_pf_sharpen;
+}
+// The shader's Crop.f for a picture tw x th scaled into its rectangle; a picture drawn 1:1 (MetalFX's output) needs no filter, only the sharpening
+static void present_filter_constants(float f[4], NSUInteger tw, NSUInteger th, int one_to_one) {
+    int mode; float sharpen; present_filter(&mode, &sharpen);
+    f[0] = one_to_one ? 0 : (float)mode; f[1] = sharpen; f[2] = (float)tw; f[3] = (float)th;
 }
 // Present samples only the valid source rectangle declared by NVN; kept separate from the raw swapchain readback screenshot. Edges are clamped to the texel centers of the valid area, so bilinear does not read the black texels outside.
 // Present samples the raw bytes stored in the swapchain texture (the Switch's scan-out sends the stored bytes as they are): an sRGB source is replaced by a non-sRGB view of the same storage,
@@ -10466,8 +10526,9 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
     id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
     [en setViewport:vp];
     [en setRenderPipelineState:g_blit_pso]; [en setFragmentTexture:present_raw_src(src) atIndex:0]; [en setFragmentSamplerState:g_blit_samp atIndex:0];
-    float uv[8] = {(float)cx / src.width, (float)cy / src.height, (float)cw / src.width, (float)ch / src.height,
-                   (cx + 0.5f) / src.width, (cy + 0.5f) / src.height, (cx + cw - 0.5f) / src.width, (cy + ch - 0.5f) / src.height};
+    float uv[12] = {(float)cx / src.width, (float)cy / src.height, (float)cw / src.width, (float)ch / src.height,
+                    (cx + 0.5f) / src.width, (cy + 0.5f) / src.height, (cx + cw - 0.5f) / src.width, (cy + ch - 0.5f) / src.height};
+    present_filter_constants(uv + 8, src.width, src.height, 0);
     if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { uv[1] += uv[3]; uv[3] = -uv[3]; }   // lower-left origin: the window image is stored bottom-up
     [en setFragmentBytes:uv length:sizeof uv atIndex:0];
     [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
@@ -10565,6 +10626,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     float *uv = uvb.contents; NSUInteger tw = tex.width, th = tex.height, cx = r[0], cy = r[1], cw = r[2], ch = r[3];
     uv[0] = (float)cx / tw; uv[1] = (float)cy / th; uv[2] = (float)cw / tw; uv[3] = (float)ch / th;
     uv[4] = (cx + 0.5f) / tw; uv[5] = (cy + 0.5f) / th; uv[6] = (cx + cw - 0.5f) / tw; uv[7] = (cy + ch - 0.5f) / th;
+    present_filter_constants(uv + 8, tw, th, up != nil);
     if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { uv[1] += uv[3]; uv[3] = -uv[3]; }   // lower-left origin: the window image is stored bottom-up
     [g_present_args setAddress:uvb.gpuAddress atIndex:0];
     [en setViewport:vp]; [en setRenderPipelineState:g_blit_pso];

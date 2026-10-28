@@ -188,10 +188,12 @@ DM_PHONE_MOTION	switch	On iOS, whether the phone's own device motion drives play
 DM_PREEMPT	switch	`0` / `1` overrides the profile's `core_preempt`: also check already-runnable higher-priority peers on the caller's core after every thread SVC
 DM_PRELOAD	diagnostic	Set: on the Mac, runs the host's early background loading (`dm_host_preload_start`) as the iOS app does, to exercise that path
 DM_PRESENT_FIFO	switch	`0` makes the display link take the newest queued frame each tick, as before; by default it shows frames in order, at most one tick behind
+DM_PRESENT_FILTER	player	How the present scales the picture to its rectangle on the screen: `bilinear` (the default), `bicubic` (Catmull-Rom), `lanczos` (Lanczos-3, the sharpest and the most GPU time) or `sharp` (sharp pixels, for 2D games); MetalFX (`DM_PRESENT_UPSCALE`) scales first where it applies
 DM_PRESENT_HZ	switch	`=<N>`: the frequency of presentation pacing (default 60); `0` means no frame limit and is for performance profiling only
 DM_PRESENT_INTERVAL	switch	`display` presents one frame per display-link tick whatever interval the game sets; `game` follows the game's present interval (default: the profile's `present_interval`)
 DM_PRESENT_LATENCY	switch	`=<n>` (above 0): the display link's preferred frame latency in a window and in fullscreen (default 1 in a window, 2 in fullscreen)
 DM_PRESENT_LINK	switch	Present pacing: `0` acquires the drawable itself, `1` (the default) presents on a 60 Hz display link, `2` uses a 120 Hz display link with a frame every other tick
+DM_PRESENT_SHARPEN	player	`=<0 to 1>`: contrast-adaptive sharpening (CAS) on top of the present's scaling, MetalFX's included; `0` (the default) is off
 DM_PRESENT_SNAP	player	`=<n>`: present snapshots, a ring of n host textures (2 to 4; `1` = 2) the presents are copied to so the game's swapchain texture is free at once; `0` off (default: the profile's `present_snap`)
 DM_PRESENT_UPSCALE	player	`metalfx` scales a picture smaller than its rectangle on the screen through MetalFX's spatial scaler; `off` (the default) scales it bilinearly
 DM_PROBE	diagnostic	`=module:offset,…` (Mac only): puts a `brk` at each guest address and on every hit prints the thread, registers, strings they point to and a backtrace, then runs the original instruction

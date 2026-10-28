@@ -3,7 +3,7 @@
 The screen before the game starts shows the settings the game supports. A setting that only matters while another is on appears under it and disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. All settings are on one scrollable screen, under **Game**, **Controls** and **Performance**. Tap a menu or move a slider there; no settings page needs opening. **Upscaling** is in **Game**, beside **Console mode**. A Mac app shows the same settings in a [window of its own](#the-mac-settings-window).
 
 - [Tested defaults](#tested-defaults)
-- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game language](#game-language), [Frame-rate counter](#frame-rate-counter)
+- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Scaling filter](#scaling-filter), [Sharpening](#sharpening), [Game language](#game-language), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
@@ -49,6 +49,28 @@ Breath of the Wild renders 1280x720 in handheld mode. Docked it renders its worl
 - **When to change it:** turn it on if the picture looks soft and the device has GPU time to spare: on a Mac, or on an iPhone in handheld mode at 30 fps. For long sessions at 60 fps on an iPhone leave it at Standard.
 - **Cost:** more GPU time each frame, which can increase heat on an iPhone. [Breath of the Wild's measurements](../dm/games/01007EF00011E000/README.md#upscaling-current) cover Mac and iPhone; the matching iPhone Standard run and MetalFX's share of the thermal cost remain unmeasured. Nothing changes while the game's picture is as large as the screen. Unsupported devices and sizes use Standard scaling.
 - **On the Mac:** choose **MetalFX** under **Upscaling** in the [settings window](#the-mac-settings-window)'s Advanced settings, or set `DM_PRESENT_UPSCALE=metalfx` in its `env.txt` (off by default). It helps in a large window or on a 4K screen.
+
+### Scaling filter
+
+How the picture is scaled to the screen when MetalFX does not scale it (Upscaling on **Standard**, or a size MetalFX refuses). Measured on a synthetic scene scaled up 3x against the same scene drawn at full size (`dm/gfx/tests/t_present_filter.m`), and the GPU time of one present from 1280x720 to 3840x2160 on a Mac:
+
+| Filter | Sharpness | Closeness to the full-size picture | GPU time |
+|---|---|---|---|
+| **Bilinear** (the default) | 22.5 | 11.90 dB | 0.06 ms |
+| **Bicubic** | 26.1 | 12.23 dB | 0.16 ms |
+| **Lanczos** | 29.7 | 12.38 dB | 0.79 ms |
+| **Sharp pixels** | 28.7 | 12.01 dB | 0.08 ms |
+
+- **When to change it:** Bicubic is sharper and closer to the real picture than Bilinear at little cost; Lanczos is the sharpest and costs the most. Sharp pixels keeps each pixel a flat square, for 2D and pixel-art games, without the shimmer of plain nearest scaling at sizes that are not a whole multiple.
+- **In an `env.txt`:** `DM_PRESENT_FILTER=bilinear`, `bicubic`, `lanczos` or `sharp`.
+
+### Sharpening
+
+Contrast-adaptive sharpening (AMD FidelityFX CAS's weighting) on top of the scaling, MetalFX's included: edges and text gain contrast, less where they are already near black or white, so there are no halos. From 0 % (off, the default) to 100 %.
+
+- **When to change it:** for a soft picture. Around 50 % brought the scaled scene closest to the full-size one with every filter but Sharp pixels (Bicubic: 12.23 → 12.66 dB); higher values look crisper but drift from the real picture.
+- **Cost:** about 0.07 ms of GPU time a present at 4K.
+- **In an `env.txt`:** `DM_PRESENT_SHARPEN=0.5` (from 0 to 1).
 
 ### Game language
 
@@ -209,6 +231,8 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Rumble strength | `DM_RUMBLE_GAIN` | `0` to `3` |
 | Rumble cutoff | `DM_RUMBLE_MIN` | `0` to `0.9` |
 | Upscaling | `DM_PRESENT_UPSCALE` | `off`, `metalfx` |
+| Scaling filter | `DM_PRESENT_FILTER` | `bilinear`, `bicubic`, `lanczos`, `sharp` |
+| Sharpening | `DM_PRESENT_SHARPEN` | `0` to `1` |
 | Frame buffering | `DM_PRESENT_SNAP` | `1`, `0` |
 | Metal 4 pipelines | `DM_PSO_MTL4` | `1`, `0` |
 | Pipeline prebuild | `DM_PSO_PREBUILD` | `1`, `0` |
