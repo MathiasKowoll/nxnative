@@ -212,7 +212,7 @@ Turn off **Show this window at launch** to start the game at once with your choi
 
 ### Display mode
 
-**Window** or **Fullscreen**: how the game's window opens. ⌃⌘F or the green button changes it while you play. In an `env.txt`: `DM_FULLSCREEN=1` or `0`.
+**Window** or **Fullscreen**: how the game's window opens. ⌃⌘F or the green button changes it while you play. In an `env.txt`: `DM_FULLSCREEN=1` or `0`. In fullscreen the cursor hides after 2 seconds without a move and comes back when you move the mouse, which is still the touchscreen (`DM_CURSOR_HIDE=<seconds>`, `0` keeps it shown).
 
 ## Settings in a file
 

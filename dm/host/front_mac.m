@@ -210,10 +210,44 @@ static void pads_start(void) {
 
 // Mouse as a single-point touchscreen (front.h dm_touch_set): left button down / drag = finger 0, release = lifted. The content view takes the clicks,
 // not a window-wide event monitor, so clicks on the title bar, the window buttons and the resize edges still reach AppKit.
-@interface DmGameView : NSView @end
+// The cursor in fullscreen: hidden after DM_CURSOR_HIDE seconds without a move (2 by default, 0 never), back at the next move, as a video player does.
+// Hidden, not removed: the mouse is still the touchscreen, and a click where the cursor was hidden still touches there. A window keeps its cursor.
+@interface DmGameView : NSView
+- (void)scheduleCursorHide;
+- (void)showCursor;
+@end
 @implementation DmGameView
+static double cursor_hide_delay(void) {
+    static double d = -1;
+    if (d < 0) {
+        const char *e = getenv("DM_CURSOR_HIDE"); char *end = NULL; d = e && *e ? strtod(e, &end) : 2;
+        if (end && *end) { LOG("[RED] DM_CURSOR_HIDE=%s: seconds, 0 never; keeping 2", e); d = 2; } else if (d < 0) d = 0;
+        if (d > 0) LOG("front end: in fullscreen the cursor hides after %.1f s without a move (DM_CURSOR_HIDE)", d); else LOG("front end: the cursor stays shown in fullscreen (DM_CURSOR_HIDE=0)");
+    }
+    return d;
+}
+- (void)hideCursorIfIdle {
+    NSWindow *w = self.window;
+    if (w.isKeyWindow && (w.styleMask & NSWindowStyleMaskFullScreen)) [NSCursor setHiddenUntilMouseMoves:YES];   // AppKit shows it again at the next move
+}
+- (void)scheduleCursorHide {   // main thread: every move restarts the wait
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(hideCursorIfIdle) object:nil];
+    double d = cursor_hide_delay();
+    if (d > 0 && (self.window.styleMask & NSWindowStyleMaskFullScreen)) [self performSelector:@selector(hideCursorIfIdle) withObject:nil afterDelay:d];
+}
+- (void)updateTrackingAreas {   // the moves that restart the wait: only over the game, only while the window is key
+    for (NSTrackingArea *a in self.trackingAreas) [self removeTrackingArea:a];
+    [self addTrackingArea:[[NSTrackingArea alloc] initWithRect:NSZeroRect options:NSTrackingMouseMoved | NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect owner:self userInfo:nil]];
+    [super updateTrackingAreas];
+}
+- (void)mouseMoved:(NSEvent *)e { (void)e; [self scheduleCursorHide]; }
+- (void)showCursor {   // leaving fullscreen: nothing pending, and the cursor back
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(hideCursorIfIdle) object:nil];
+    [NSCursor setHiddenUntilMouseMoves:NO];
+}
 - (void)mouseDown:(NSEvent *)e { [self mouseDragged:e]; }
 - (void)mouseDragged:(NSEvent *)e {
+    [self scheduleCursorHide];
     if (!g_input_on) return;
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil]; NSSize b = self.bounds.size;
     double w = b.width, h = b.height;
@@ -303,10 +337,12 @@ void front_run(void (*guest)(void)) {
         [nc addObserverForName:NSWindowDidChangeScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; if (win.screen) { g_screen_fps = (int)win.screen.maximumFramesPerSecond; g_layer.contentsScale = win.backingScaleFactor; } screen_match_apply(); }];
         // Entering and leaving fullscreen: the layer is layer-backed, so its frame (and with it the drawable) follows the
         // content view by itself; only the scale factor has to be carried over to the screen the window ended up on. The screen's rate is matched in fullscreen only (screen_match_apply)
-        [nc addObserverForName:NSWindowDidEnterFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_fullscreen = 1; g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); }];
-        [nc addObserverForName:NSWindowDidExitFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_fullscreen = 0; g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); }];
+        [nc addObserverForName:NSWindowDidEnterFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_fullscreen = 1; g_layer.contentsScale = win.backingScaleFactor; screen_match_apply();
+            [(DmGameView *)win.contentView scheduleCursorHide]; }];   // fullscreen: the cursor goes after the usual wait, even if the mouse does not move again
+        [nc addObserverForName:NSWindowDidExitFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_fullscreen = 0; g_layer.contentsScale = win.backingScaleFactor; screen_match_apply();
+            [(DmGameView *)win.contentView showCursor]; }];
         [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); if (!win.miniaturized) dm_focus_set(2); }];
-        [nc addObserverForName:NSWindowDidBecomeKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_resume(); dm_focus_set(1); }];
+        [nc addObserverForName:NSWindowDidBecomeKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_resume(); dm_focus_set(1); [(DmGameView *)win.contentView scheduleCursorHide]; }];
         [nc addObserverForName:NSWindowDidMiniaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); dm_focus_set(3); dm_audio_suspend(1); dm_gfx_suspend(1); }];
         [nc addObserverForName:NSWindowDidDeminiaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_gfx_suspend(0); dm_audio_suspend(0); dm_focus_set(2); }];
         // Guest thread: 64 MiB stack (the Switch main thread stack is specified by npdm; the host gives plenty)
