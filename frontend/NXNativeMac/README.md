@@ -99,8 +99,11 @@ Necesita Xcode (Swift 6) en un Mac con Apple silicon.
 frontend/NXNativeMac/scripts/build_app.sh
 ```
 
-Deja `frontend/NXNativeMac/build/NXNativeMac.app`, firmada ad hoc. Con una identidad de firma:
-`scripts/build_app.sh "Developer ID Application: …"`.
+Compila, monta `frontend/NXNativeMac/build/NXNativeMac.app` con su icono
+(dibujado por `scripts/make_icon.swift`, con formas propias: ni SF Symbols ni
+marcas de terceros), la firma ad hoc y la copia a `/Applications` (o a
+`~/Applications` si no hay permiso). `--no-install` se salta la copia; con una
+identidad de firma: `scripts/build_app.sh "Developer ID Application: …"`.
 
 Durante el desarrollo:
 
