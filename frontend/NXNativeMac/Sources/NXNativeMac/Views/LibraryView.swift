@@ -32,6 +32,7 @@ struct LibraryView: View {
             .navigationTitle("Biblioteca")
             .navigationDestination(for: MacGameBundle.self) { GameDetailView(game: $0) }
             .toolbar {
+                AllSavesMenu()
                 Button { Task { await model.refresh() } } label: { Label("Escanear", systemImage: "arrow.clockwise") }
             }
         }

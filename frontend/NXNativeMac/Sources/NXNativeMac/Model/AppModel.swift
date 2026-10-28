@@ -150,10 +150,18 @@ final class AppModel {
 
     // MARK: - Partidas
 
-    var vault: SaveVault { SaveVault(root: prefs.backupsURL) }
+    /// Los perfiles: cada persona que juega en este Mac con sus partidas.
+    private(set) var profileBook = ProfileBook.load()
+    var activeProfile: Profile { profileBook.activeProfile }
+
+    /// La carpeta de partidas del perfil activo para este juego.
+    func saveDirectory(for game: MacGameBundle) -> URL { activeProfile.saveDirectory(support: game.supportDirectory) }
+
+    /// Las copias van separadas por perfil: restaurar nunca ofrece la partida de otro.
+    var vault: SaveVault { SaveVault(root: activeProfile.backupsRoot(base: prefs.backupsURL)) }
 
     func backup(_ game: MacGameBundle, kind: SaveVault.Kind) async throws -> URL? {
-        try await vault.backup(saveDir: game.saveDirectory, titleID: game.titleID, game: game.name,
+        try await vault.backup(saveDir: saveDirectory(for: game), titleID: game.titleID, game: game.name,
                                version: game.version, kind: kind)
     }
 
@@ -162,7 +170,7 @@ final class AppModel {
     func autoBackup(_ game: MacGameBundle) async {
         guard prefs.autoBackup else { return }
         do {
-            if let url = try await vault.autoBackup(saveDir: game.saveDirectory, titleID: game.titleID,
+            if let url = try await vault.autoBackup(saveDir: saveDirectory(for: game), titleID: game.titleID,
                                                      game: game.name, version: game.version) {
                 notice = "Copia automática de \(game.name): \(url.lastPathComponent)"
             }
@@ -171,11 +179,80 @@ final class AppModel {
         }
     }
 
+    func selectProfile(_ id: String) {
+        guard profileBook.profiles.contains(where: { $0.id == id }) else { return }
+        profileBook.active = id
+        saveProfiles()
+    }
+
+    @discardableResult
+    func addProfile(named name: String) -> Profile {
+        let p = profileBook.add(name: name)
+        saveProfiles()
+        return p
+    }
+
+    func renameProfile(_ id: String, to name: String) {
+        profileBook.rename(id, to: name)
+        saveProfiles()
+    }
+
+    /// Quita un perfil. Con `discardSaves`, sus partidas y sus copias van a la
+    /// Papelera (no se borran); sin él se quedan en disco, y un perfil nuevo
+    /// con el mismo nombre las vuelve a encontrar.
+    func removeProfile(_ id: String, discardSaves: Bool) {
+        guard let p = profileBook.profiles.first(where: { $0.id == id }), !p.isMain else { return }
+        if discardSaves {
+            var dirs = [p.backupsRoot(base: prefs.backupsURL)]
+            if let ids = try? FileManager.default.contentsOfDirectory(atPath: MacGameBundle.supportRoot.path) {
+                dirs += ids.map { MacGameBundle.supportRoot.appendingPathComponent("\($0)/perfiles/\(p.id)", isDirectory: true) }
+            }
+            var failed = 0
+            for d in dirs where FileManager.default.fileExists(atPath: d.path) {
+                do { try SaveVault.toTrash(d) } catch { failed += 1 }
+            }
+            if failed > 0 { notice = "\(failed) carpetas de \(p.name) no se pudieron llevar a la Papelera." }
+        }
+        profileBook.remove(id)
+        saveProfiles()
+    }
+
+    private func saveProfiles() {
+        do { try profileBook.save() } catch { notice = "No se pudieron guardar los perfiles: \(error.localizedDescription)" }
+    }
+
+    /// Borra la partida del perfil activo, con una copia antes.
+    func deleteSave(_ game: MacGameBundle) async throws {
+        try await vault.delete(saveDir: saveDirectory(for: game), titleID: game.titleID, game: game.name, version: game.version)
+    }
+
+    /// Todas las partidas del perfil activo, de los juegos instalados, en un zip.
+    func exportAllSaves(to out: URL) async throws -> Int {
+        let list = games.map { SaveVault.GameSave(titleID: $0.titleID, game: $0.name, version: $0.version, saveDir: saveDirectory(for: $0)) }
+        return try await vault.exportAll(list, profile: activeProfile.name, to: out)
+    }
+
+    /// Importa en el perfil activo. Un juego que no está instalado también
+    /// recibe su partida, en la carpeta que usará al instalarlo (la de su
+    /// title ID): reinstalar o construir después no la pierde.
+    func importAllSaves(from archive: URL) async throws -> [SaveVault.ImportResult] {
+        let installed = games, profile = activeProfile
+        return try await vault.importAll(archive) { e in
+            if let g = installed.first(where: { $0.titleID.uppercased() == e.titleID.uppercased() }) {
+                return .init(titleID: g.titleID, game: g.name, version: g.version, saveDir: profile.saveDirectory(support: g.supportDirectory))
+            }
+            let support = MacGameBundle.supportRoot.appendingPathComponent(e.titleID.uppercased(), isDirectory: true)
+            return .init(titleID: e.titleID.uppercased(), game: e.game, version: "", saveDir: profile.saveDirectory(support: support))
+        }
+    }
+
     /// Jugar desde la app: primero la copia automática, luego el juego.
     func play(_ game: MacGameBundle) {
         Task {
             await autoBackup(game)
-            runner.launch(game, extra: Self.launchEnvironment(for: game, globals: prefs.globalDefaults))
+            // El lanzador solo crea su carpeta de partidas, no la que le pasan.
+            if !activeProfile.isMain { try? FileManager.default.createDirectory(at: saveDirectory(for: game), withIntermediateDirectories: true) }
+            runner.launch(game, extra: Self.launchEnvironment(for: game, globals: prefs.globalDefaults, profile: activeProfile))
         }
     }
 
@@ -195,9 +272,14 @@ final class AppModel {
     ///
     /// `globals`: los valores para todos los juegos (Entorno), salvo los que
     /// el juego fija en su propio env.txt.
-    static func launchEnvironment(for game: MacGameBundle, globals: GlobalDefaults = GlobalDefaults()) -> [String: String] {
+    ///
+    /// `profile`: con un perfil que no es «Principal», `DM_SAVE` apunta a su
+    /// carpeta. El lanzador solo pone la suya si no viene ya fijada.
+    static func launchEnvironment(for game: MacGameBundle, globals: GlobalDefaults = GlobalDefaults(),
+                                  profile: Profile = .main) -> [String: String] {
         var env = globals.environment(userEnv: EnvFile(contentsOf: game.userEnv))
         env["DM_LAUNCHER"] = "0"
+        if !profile.isMain { env["DM_SAVE"] = profile.saveDirectory(support: game.supportDirectory).path }
         // El mismo orden que el lanzador: el env.txt del jugador gana al del bundle.
         let hud = EnvFile(contentsOf: game.userEnv)["DM_METAL_HUD"] ?? EnvFile(contentsOf: game.bundledEnv)["DM_METAL_HUD"]
         if let hud, (Int(hud.trimmingCharacters(in: .whitespaces)) ?? 0) != 0 {

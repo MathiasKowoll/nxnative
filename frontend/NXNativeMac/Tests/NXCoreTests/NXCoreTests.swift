@@ -458,6 +458,9 @@ enum Synth {
     }
 }
 
+/// Las pruebas no tocan la Papelera de quien las corre: borran en su carpeta temporal.
+let testDiscard: @Sendable (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }
+
 @Suite struct SaveVaultTests {
     let base: URL = {
         let d = FileManager.default.temporaryDirectory.appendingPathComponent("nxvault-\(UUID().uuidString)", isDirectory: true)
@@ -465,7 +468,7 @@ enum Synth {
         return d
     }()
     var save: URL { base.appendingPathComponent("support/save", isDirectory: true) }
-    var vault: SaveVault { SaveVault(root: base.appendingPathComponent("backups"), keepAuto: 3) }
+    var vault: SaveVault { SaveVault(root: base.appendingPathComponent("backups"), keepAuto: 3, discard: testDiscard) }
     let tid = "0100AAAA00000000"
 
     func writeSave(_ text: String, file: String = "slot0/data.bin") throws {
@@ -668,5 +671,141 @@ enum Synth {
         let player = all.filter { $0.group == .player }
         #expect(player.count >= 15)
         #expect(player.allSatisfy { !$0.suggestedValues.isEmpty || $0.placeholder != nil }, "\(player.filter { $0.suggestedValues.isEmpty && $0.placeholder == nil }.map(\.name))")
+    }
+}
+
+@Suite struct ProfileTests {
+    let support = URL(fileURLWithPath: "/x/nxnative/0100AAAA00000000", isDirectory: true)
+
+    /// «Principal» usa la carpeta de siempre: un juego abierto desde Finder sigue con esas partidas.
+    @Test func mainKeepsTheUsualFolder() {
+        #expect(Profile.main.saveDirectory(support: support).path == "/x/nxnative/0100AAAA00000000/save")
+        let p = Profile(id: "ana", name: "Ana")
+        #expect(p.saveDirectory(support: support).path == "/x/nxnative/0100AAAA00000000/perfiles/ana/save")
+        #expect(p.backupsRoot(base: URL(fileURLWithPath: "/b")).path == "/b/perfiles/ana")
+        #expect(Profile.main.backupsRoot(base: URL(fileURLWithPath: "/b")).path == "/b")
+    }
+
+    @Test func addRenameRemove() {
+        var b = ProfileBook()
+        let a = b.add(name: " Ána María ")
+        #expect(a.id == "ana-maria" && a.name == "Ána María")
+        #expect(b.add(name: "Ana María").id == "ana-maria-2")
+        #expect(b.add(name: "Principal").id != Profile.main.id)
+        b.active = a.id
+        b.rename(a.id, to: "Ana")
+        #expect(b.activeProfile.name == "Ana" && b.activeProfile.id == "ana-maria")   // el id no cambia al renombrar
+        b.remove(a.id)
+        #expect(b.active == Profile.main.id)
+        b.remove(Profile.main.id)
+        #expect(b.profiles.first == .main)   // «Principal» no se quita
+    }
+
+    @Test func loadSaveAndRepair() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("nxprof-\(UUID().uuidString)")
+        let url = dir.appendingPathComponent("perfiles.json")
+        var b = ProfileBook(); let p = b.add(name: "Leo"); b.active = p.id
+        try b.save(to: url)
+        #expect(ProfileBook.load(from: url) == b)
+        try Data(#"{"profiles":[{"id":"x","name":"X"}],"active":"nadie"}"#.utf8).write(to: url)
+        let r = ProfileBook.load(from: url)
+        #expect(r.profiles.first == .main && r.active == Profile.main.id && r.profiles.count == 2)
+        #expect(ProfileBook.load(from: dir.appendingPathComponent("no.json")) == ProfileBook())
+    }
+}
+
+@Suite struct SaveVaultAllTests {
+    let base: URL = {
+        let d = FileManager.default.temporaryDirectory.appendingPathComponent("nxall-\(UUID().uuidString)", isDirectory: true)
+        try! FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }()
+
+    func save(_ tid: String, _ text: String) throws -> URL {
+        let d = base.appendingPathComponent("nx/\(tid)/save", isDirectory: true)
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        try Data(text.utf8).write(to: d.appendingPathComponent("slot.bin"))
+        return d
+    }
+    func read(_ d: URL) -> String? { try? String(contentsOf: d.appendingPathComponent("slot.bin"), encoding: .utf8) }
+
+    @Test func deleteKeepsACopy() async throws {
+        let vault = SaveVault(root: base.appendingPathComponent("backups"), discard: testDiscard)
+        let d = try save("0100AAAA00000000", "partida")
+        try await vault.delete(saveDir: d, titleID: "0100AAAA00000000", game: "A", version: "")
+        #expect(!FileManager.default.fileExists(atPath: d.path))
+        #expect(vault.list("0100AAAA00000000").map(\.kind) == [.beforeDelete])
+        await #expect(throws: SaveVault.SaveError.noSave) { try await vault.delete(saveDir: d, titleID: "0100AAAA00000000", game: "A", version: "") }
+    }
+
+    /// Exportar dos juegos (uno sin partida se salta) e importarlos en otro perfil.
+    @Test func exportAndImportAll() async throws {
+        let vault = SaveVault(root: base.appendingPathComponent("backups"), discard: testDiscard)
+        let a = try save("0100AAAA00000000", "partida A"), b = try save("0100BBBB00000000", "partida B")
+        let none = base.appendingPathComponent("nx/0100CCCC00000000/save")
+        let out = base.appendingPathComponent("todas.zip")
+        let n = try await vault.exportAll([
+            .init(titleID: "0100AAAA00000000", game: "A", version: "1", saveDir: a),
+            .init(titleID: "0100BBBB00000000", game: "B", version: "1", saveDir: b),
+            .init(titleID: "0100CCCC00000000", game: "C", version: "1", saveDir: none),
+        ], profile: "Principal", to: out)
+        #expect(n == 2)
+        // Importar en el perfil «leo»: B ya tenía otra partida allí, que se copia antes de reemplazarla.
+        let leo = Profile(id: "leo", name: "Leo")
+        let leoVault = SaveVault(root: leo.backupsRoot(base: base.appendingPathComponent("backups")), discard: testDiscard)
+        let bLeo = leo.saveDirectory(support: base.appendingPathComponent("nx/0100BBBB00000000"))
+        try FileManager.default.createDirectory(at: bLeo, withIntermediateDirectories: true)
+        try Data("la de Leo".utf8).write(to: bLeo.appendingPathComponent("slot.bin"))
+        let results = try await leoVault.importAll(out) { e in
+            let tid = e.titleID
+            return .init(titleID: tid, game: e.game, version: "", saveDir: leo.saveDirectory(support: base.appendingPathComponent("nx/\(tid)")))
+        }
+        #expect(results.map(\.titleID) == ["0100AAAA00000000", "0100BBBB00000000"] && results.allSatisfy { $0.error == nil })
+        #expect(read(leo.saveDirectory(support: base.appendingPathComponent("nx/0100AAAA00000000"))) == "partida A")
+        #expect(read(bLeo) == "partida B")
+        #expect(leoVault.list("0100BBBB00000000").map(\.kind) == [.beforeRestore])   // la de Leo, a salvo
+        #expect(read(a) == "partida A")   // las de Principal, intactas
+    }
+
+    /// Un índice que nombra «../algo» no saca la importación de su sitio.
+    @Test func importRefusesPathsInTheIndex() async throws {
+        let vault = SaveVault(root: base.appendingPathComponent("backups"), discard: testDiscard)
+        let stage = base.appendingPathComponent("malo", isDirectory: true)
+        let fuera = base.appendingPathComponent("fuera", isDirectory: true)
+        try FileManager.default.createDirectory(at: fuera.appendingPathComponent("save"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: true)
+        let index = #"{"format":1,"created":"2026-01-01T00:00:00Z","profile":"x","games":[{"titleID":"../fuera","game":"X"}]}"#
+        try Data(index.utf8).write(to: stage.appendingPathComponent(SaveVault.AllSavesIndex.fileName))
+        let zip = base.appendingPathComponent("malo.zip")
+        #expect(await Shell.run("/usr/bin/ditto", ["-c", "-k", stage.path, zip.path]).ok)
+        let results = try await vault.importAll(zip) { _ in nil }
+        #expect(results.map(\.error) == [SaveVault.SaveError.badTitleID.localizedDescription])
+    }
+
+    @Test func singleGameCopyIsRefused() async throws {
+        let vault = SaveVault(root: base.appendingPathComponent("backups"), discard: testDiscard)
+        let a = try save("0100AAAA00000000", "x")
+        let one = base.appendingPathComponent("uno.zip")
+        try await vault.export(saveDir: a, titleID: "0100AAAA00000000", game: "A", version: "", to: one)
+        await #expect(throws: SaveVault.SaveError.notAnAllSavesArchive) { _ = try await vault.importAll(one) { _ in nil } }
+    }
+}
+
+/// Borrar y restaurar apartan la partida vieja SOLO a través de `discard`: así la app usa la Papelera y las pruebas no.
+@Suite struct SaveVaultDiscardTests {
+    final class Seen: @unchecked Sendable { let lock = NSLock(); var urls: [URL] = []
+        func add(_ u: URL) { lock.withLock { urls.append(u) } } }
+
+    @Test func everyRemovalGoesThroughDiscard() async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("nxdiscard-\(UUID().uuidString)", isDirectory: true)
+        let save = base.appendingPathComponent("save", isDirectory: true)
+        try FileManager.default.createDirectory(at: save, withIntermediateDirectories: true)
+        try Data("x".utf8).write(to: save.appendingPathComponent("a"))
+        let seen = Seen()
+        let vault = SaveVault(root: base.appendingPathComponent("b"), discard: { seen.add($0); try FileManager.default.removeItem(at: $0) })
+        let copy = try #require(try await vault.backup(saveDir: save, titleID: "0100AAAA00000000", game: "A", version: "", kind: .manual))
+        try await vault.restore(copy, saveDir: save, titleID: "0100AAAA00000000", game: "A", version: "")
+        try await vault.delete(saveDir: save, titleID: "0100AAAA00000000", game: "A", version: "")
+        #expect(seen.urls.map(\.lastPathComponent) == ["save", "save"])
     }
 }
