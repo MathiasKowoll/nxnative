@@ -187,6 +187,13 @@ To enroll a cut for any game's own module:
 - **Fix:** when the text ends within 32 MB of the reach (`BIG_TEXT`), the patch area goes right before the base: the stubs follow the sites in address order, so each site's stub is about as far from it as the text is long. The first pass tries the gap that keeps every site in reach (2.6 MB here); when the patch area is larger (3.6 MB, 34,322 sites), the rewriter runs itself again with exactly that size (`DM_PATCH_FRONT`, set only by the rerun) and `B()` checks every branch.
 - **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) `main`: 125.3 MB of text.
 
+### One patch area cannot cover a text larger than the branch reach
+
+- **Symptom:** `patch_nso.py` rewrites for several minutes, reports a small patch area (for example `0x6b738c` bytes), restarts itself with `DM_PATCH_FRONT`, and then stops in `site_window` at `B()`'s ±128 MB assertion. The text size in the module header is larger than `0x8000000`.
+- **Cause:** a direct Arm64 `b` reaches ±128 MB. A front patch area can cover only part of a text segment larger than that; moving it closer to the end moves it away from the start. FC 27's `main` has 194,478,320 bytes of text (185.5 MB), while its generated patch area is only about 6.7 MB. One front area therefore cannot reach every rewrite site.
+- **Status:** open. ZBIC decoding and the survey are working; the rewriter needs a layout with more than one patch area (or a range-independent site entry) before this module can be rewritten. `DM_PATCH_FRONT` only changes where the unreachable branch fails and is not a fix.
+- **Found on:** EA Sports FC 27 (survey; no repository profile yet).
+
 ## Cuts and observation gates
 
 ### Observation gates where x9–x17 are dead

@@ -5,32 +5,39 @@ dm/games/profile_guess.py imports it (dynsyms, host_hooks) to guess a provisiona
 import collections, glob, os, re, struct, sys
 
 def load(path):
-    import lz4.block   # Only NSO decoding needs LZ4; profile log parsing does not.
-    d = open(path, 'rb').read()
-    flags = struct.unpack_from('<I', d, 0xc)[0]
-    segs = [struct.unpack_from('<III', d, 0x10 + i * 0x10) for i in range(3)]
-    csz = struct.unpack_from('<III', d, 0x60)
-    img = bytearray(segs[2][1] + segs[2][2] + struct.unpack_from('<I', d, 0x3c)[0])
-    for i, (fo, mo, sz) in enumerate(segs):
-        raw = d[fo:fo + csz[i]]
-        if flags >> i & 1: raw = lz4.block.decompress(raw, uncompressed_size=sz)
-        img[mo:mo + sz] = raw
-    return bytes(img)
+    import nso_segments   # LZ4 or ZBIC segment decoding; profile log parsing needs neither.
+    return bytes(nso_segments.load(path)[0])
 
-def dynsyms(img):
-    mod0 = struct.unpack_from('<I', img, 4)[0]
-    assert img[mod0:mod0 + 4] == b'MOD0', 'no MOD0'
-    dyn = mod0 + struct.unpack_from('<i', img, mod0 + 4)[0]
+def dyn_tags(img, dyn):
+    """The .dynamic entries as {tag: value}: 16-byte Elf64_Dyn records, or the 8-byte records of the first
+    toolchain generation (New Super Mario Bros. U Deluxe: SYMENT 16, DT_REL instead of DT_RELA)."""
     tags = {}
     for i in range(4096):
         t, v = struct.unpack_from('<qQ', img, dyn + i * 16)
         if t == 0: break
         tags.setdefault(t, v)
+    if 5 in tags and 6 in tags and tags[6] < tags[5] < len(img): return tags
+    tags = {}
+    for i in range(4096):
+        t, v = struct.unpack_from('<iI', img, dyn + i * 8)
+        if t == 0: break
+        tags.setdefault(t, v)
+    return tags
+
+def dynsyms(img):
+    mod0 = struct.unpack_from('<I', img, 4)[0]
+    assert img[mod0:mod0 + 4] == b'MOD0', 'no MOD0'
+    dyn = mod0 + struct.unpack_from('<i', img, mod0 + 4)[0]
+    tags = dyn_tags(img, dyn)
     symtab, strtab = tags[6], tags[5]
-    n = struct.unpack_from('<I', img, tags[4] + 4)[0] if 4 in tags else (strtab - symtab) // 24
+    s32 = tags.get(11, 24) == 16   # DT_SYMENT: 16-byte Elf32_Sym entries in that first generation
+    n = struct.unpack_from('<I', img, tags[4] + 4)[0] if 4 in tags else (strtab - symtab) // (16 if s32 else 24)
     out = []
     for i in range(1, n):
-        name, info, other, shndx, value, size = struct.unpack_from('<IBBHQQ', img, symtab + i * 24)
+        if s32:
+            name, value, size, info, other, shndx = struct.unpack_from('<IIIBBH', img, symtab + i * 16)
+        else:
+            name, info, other, shndx, value, size = struct.unpack_from('<IBBHQQ', img, symtab + i * 24)
         s = img[strtab + name:img.index(b'\0', strtab + name)].decode('latin1')
         if s: out.append((s, shndx != 0, info >> 4))
     return out

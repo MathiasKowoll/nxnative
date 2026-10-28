@@ -36,6 +36,21 @@
 
 ## Compressed inputs
 
+### The shader split leaves out every plain zstd file of an image-packed game
+
+- **Symptom:** the split logs thousands of `[RED] <path>.zs: CalledProcessError: Command '['zstd', '-d', '-c', '-q', '<id>_build/extract/<version>/RomFS.img/…']' returned non-zero exit status 1. (its shaders are left out)` lines, ends with a tiny count (`shaders: 40`), and the packed game boots to a black screen with hundreds of `[RED] shader … is not in the shader map`, a 40-entry `shader_map.tsv` and a fine frame rate (the game runs, nothing draws).
+- **Cause:** `unzs()` in `dm/gfx/tools/shader_split.py` read each file's bytes with the patched `open`, which resolves paths inside a `DMROMFS1` image, but decompressed frames without a dictionary with the `zstd` command on the path string. The command opens real filesystem paths only, and image-internal paths do not exist as files, so every plain-`.zs` scan input failed. Frames that name a dictionary take the in-process branch with the bytes already read, which is why Zelda-style RomFS never hit it; a game with plain `.zs` and no dictionaries (Super Mario Bros. Wonder: all 6,861 RomFS `.zs`) loses every archive.
+- **Fix:** `unzs()` decompresses the bytes it already read with the zstd module (`zstd_mod().decompress`); no command is spawned and no path leaves the process. Verified byte-for-byte against the CLI decompression on 20 real files of the game (29 B to 69 MB compressed).
+- **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md#shaders), where the v0 build ran at 60 fps with an empty screen: 6,861 unreadable files, 40 shaders split out of 12,811 and almost every draw unmapped; the same split rerun with the fix packs the thousands of shaders the profile records.
+
+
+### Firmware 22 NSOs fail LZ4 decoding with `ZBIC`
+
+- **Symptom:** the survey or rewrite stops while reading an NSO with an error such as `lz4.block.LZ4BlockError: Decompressor wrote 0 bytes, but 194478320 are required`. The module header has flag bit 7 set and each compressed segment starts with the four bytes `ZBIC`.
+- **Cause:** firmware 22 and later can compress NSO segments with ZBIC, a Zstandard variant whose frame magic is `ZBIC` and whose normalization headers use Binary Interpolative Coding. The regular LZ4 and Zstandard decoders reject those frames.
+- **Fix:** `dm/tools/nso_segments.py` reads NSO flag bit 7 and sends ZBIC frames through `dm/tools/zbic.py`, which builds the ZBIC-enabled Zstandard amalgamation in `dm/third_party/zstd-zbic` once in the game-drive cache. Every tool that decompresses an NSO uses the shared loader. Verified on EA Sports FC 27: all three `main` segments decode to their exact sizes and pass the SHA-256 hashes in the NSO header, and the survey completes.
+- **Found on:** EA Sports FC 27 (survey; no repository profile yet).
+
 ### NSZ decompression rejects `--keys`
 
 - **Symptom:** `decompress NSZ` stops immediately with `nsz: error: unrecognized arguments: --keys …`.

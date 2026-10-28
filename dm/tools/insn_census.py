@@ -6,21 +6,15 @@ Linear sweep over text, leaving out the data blocks patch_nso.py leaves alone (n
 Usage: insn_census.py <module.nso> [--sites <tsv out>]"""
 import collections, os, struct, sys
 import re
-import capstone, lz4.block
+import capstone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import nso_code
 
 X18 = re.compile(r'\b[xw]18\b')   # not '#0x18' immediates
 
 def image_of(path):   # (text segment offset, text size, the image of all three segments)
-    d = open(path, 'rb').read()
-    flags = struct.unpack_from('<I', d, 0xc)[0]
-    segs = [struct.unpack_from('<III', d, 0x10 + i * 0x10) for i in range(3)]
-    csz = struct.unpack_from('<III', d, 0x60)
-    img = bytearray(segs[2][1] + segs[2][2])
-    for i, (fo, mo, sz) in enumerate(segs):
-        raw = d[fo:fo + csz[i]]
-        img[mo:mo + sz] = lz4.block.decompress(raw, uncompressed_size=sz) if flags >> i & 1 else raw
+    import nso_segments
+    img, _, segs, _, _ = nso_segments.load(path, bss=False)
     return segs[0][1], segs[0][2], img
 
 def main():

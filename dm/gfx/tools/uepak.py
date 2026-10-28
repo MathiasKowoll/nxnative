@@ -107,13 +107,10 @@ def city64(s):
 
 def nso_image(path):
     """A decompressed NSO image and its (read-only start, data end)"""
-    import lz4.block
-    d = open(path, 'rb').read()
-    flags = struct.unpack_from('<I', d, 0xc)[0]; segs = [struct.unpack_from('<III', d, 0x10 + i * 0x10) for i in range(3)]; csz = struct.unpack_from('<III', d, 0x60)
-    img = bytearray(segs[2][1] + segs[2][2])
-    for i, (fo, mo, sz) in enumerate(segs):
-        raw = d[fo:fo + csz[i]]
-        img[mo:mo + sz] = lz4.block.decompress(raw, uncompressed_size=sz) if flags >> i & 1 else raw
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../tools'))
+    import nso_segments
+    img, _, segs, _, _ = nso_segments.load(path, bss=False)
     return bytes(img), segs[1][1], segs[2][1] + segs[2][2]
 
 class OodleHost:

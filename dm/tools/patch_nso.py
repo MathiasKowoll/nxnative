@@ -14,7 +14,7 @@
 # Output: <name>.patched.bin (key page and patch area appended after the image at PATCH_OFF; when that would start beyond 112 MB the patch area sits before the base, see FAR), <name>.fixups.tsv (layout and key page index header), <name>.gates.tsv, <name>.sites.tsv, <name>.cuts.tsv, <name>.obs.tsv
 import struct, re, sys, os, glob, types, importlib.util
 from itertools import combinations
-import lz4.block
+import nso_segments
 from capstone import *
 from capstone.arm64 import ARM64_OP_IMM, ARM64_OP_MEM, ARM64_OP_REG
 import nso_asm
@@ -30,35 +30,41 @@ if d[0x10:0x14] == b'NRO0':
     bss = struct.unpack_from('<I', d, 0x38)[0]
 else:
     assert d[:4] == b'NSO0'
-    flags = struct.unpack_from('<I', d, 0xc)[0]
-    segs = [struct.unpack_from('<III', d, 0x10 + i * 0x10) for i in range(3)]
-    bss = struct.unpack_from('<I', d, 0x3c)[0]
-    csz = struct.unpack_from('<III', d, 0x60)
+    IMG, flags, segs, bss, csz = nso_segments.load(d, bss=True)
 # Every jump between the patch area and the code is a B (±128 MB). A patch area appended after the image (with bss) cannot reach the code when it would start beyond 112 MB (leaving 16 MB for the patch area): Metroid Dread's main has about 1.8 GB of bss (the engine's static heap); Engage's main starts its patch area at about 103 MB and keeps it after the image.
 # The patch area then sits FRONT bytes before the module base (PATCH_OFF is negative), and the output file holds only text + ro + data (FILE_IMAGE_LEN) followed by the patch area; the loader supplies zero pages for bss and the key page (IMAGE_SIZE is the whole image).
 # The key page stays after bss (the patch area reaches it through ADRP, ±4 GB). Modules below the limit produce output byte-identical to before
 NEAR_PATCH_OFF = ((((segs[2][1] + segs[2][2] + bss + 0x3FFF) & ~0x3FFF) + 0x4000 + 0xFFFF) & ~0xFFFF)   # where an appended patch area would start (as in the else branch below)
 FAR, FRONT = NEAR_PATCH_OFF > 0x7000000, 0x2000000
-# A text segment that ends within 32 MB of the ±128 MB reach (Monster Hunter Rise: 125.3 MB of text) puts the patch area right before the base instead. Its stubs follow the sites in address
-# order, so the last site's stub ends up about as far from it as the text is long. The first pass tries the gap that keeps every site in reach; when the patch area does not fit there
-# (Monster Hunter Rise: 3.6 MB), the rewriter runs again with exactly the size it needs (DM_PATCH_FRONT, set only by that rerun) and B() checks every branch
-BIG_TEXT = FAR and segs[0][2] + FRONT > 0x8000000 - 0x10000
-if BIG_TEXT: FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or (0x8000000 - 0x10000 - segs[0][2]) & ~0xFFFF
-IMG = bytearray(segs[2][1] + segs[2][2] + (0 if FAR else bss))
-for i, (fo, mo, sz) in enumerate(segs):
-    raw = d[fo:fo + csz[i]]
-    if flags >> i & 1: raw = lz4.block.decompress(raw, uncompressed_size=sz)
-    IMG[mo:mo + sz] = raw
-TEXT_END = segs[0][2]
+TEXT_SIZE = segs[0][2]
+HUGE_TEXT = FAR and TEXT_SIZE > 0x8000000   # one direct-branch patch area cannot cover this; use a front and a back area
+if HUGE_TEXT:
+    FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or 0x1000000
+    BIG_TEXT = False
+else:
+    # A text segment that ends within 32 MB of the ±128 MB reach (Monster Hunter Rise: 125.3 MB of text) puts the patch area right before the base instead. Its stubs follow the sites in address
+    # order, so the last site's stub ends up about as far from it as the text is long. The first pass tries the gap that keeps every site in reach (2.6 MB here); when the patch area does not fit there
+    # (Monster Hunter Rise: 3.6 MB), the rewriter runs again with exactly the size it needs (DM_PATCH_FRONT, set only by that rerun) and B() checks every branch
+    BIG_TEXT = FAR and TEXT_SIZE + FRONT > 0x8000000 - 0x10000
+    if BIG_TEXT: FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or (0x8000000 - 0x10000 - TEXT_SIZE) & ~0xFFFF
+if FAR: del IMG[segs[2][1] + segs[2][2]:]   # the patch area goes before the base; the file holds text + ro + data only
+TEXT_END = TEXT_SIZE
 RO_OFF, DATA_OFF = segs[1][1], segs[2][1]
 if FAR:
     FILE_IMAGE_LEN = (len(IMG) + 0x3FFF) & ~0x3FFF
     KEY_PAGE_OFF = (len(IMG) + bss + 0x3FFF) & ~0x3FFF
     IMAGE_SIZE, PATCH_OFF = KEY_PAGE_OFF + 0x4000, -FRONT
+    if HUGE_TEXT:
+        PATCH2_OFF = (KEY_PAGE_OFF + 0x4000 + 0x3FFF) & ~0x3FFF
+        PATCH2_SIZE = int(os.environ.get('DM_PATCH_BACK', '0'), 0) or 0x1000000
+    else:
+        PATCH2_OFF = PATCH2_SIZE = 0
 else:
     KEY_PAGE_OFF = (len(IMG) + 0x3FFF) & ~0x3FFF
     IMG.extend(bytes(0x4000))
     PATCH_OFF = (len(IMG) + 0xFFFF) & ~0xFFFF
+    PATCH2_OFF = PATCH2_SIZE = 0
+
 
 # ---- Registered patches of particular builds, keyed by NSO build ID: dm/tools/sdk_patches.py (Nintendo SDK module builds, which several games can ship) and dm/games/<id>/patches.py
 # (a game's own modules: its profile's builds). Every file is loaded, whatever the game, so a module gets the patches of its build wherever it comes from; a build ID claimed twice stops the rewrite.
@@ -108,9 +114,21 @@ KEYS = {'K18': 508, 'KTLS': 509, 'KTLR': 510, 'KGATE': 511}
 KEY_INDEX = {k: i for i, k in enumerate(('K18', 'KTLS', 'KTLR', 'KGATE'))}
 
 md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
-patch = bytearray(); fix = []; gates = []; stats = {}
+patch_front = bytearray(); patch_back = bytearray()
+AREA_OFFS = (PATCH_OFF, PATCH2_OFF) if HUGE_TEXT else (PATCH_OFF,)
+AREA_BUFS = (patch_front, patch_back) if HUGE_TEXT else (patch_front,)
+AREA = 0
+patch = patch_front
+fix = []; gates = []; stats = {}
 def stat(k): stats[k] = stats.get(k, 0) + 1
-def here(): return PATCH_OFF + len(patch)
+def area_off(): return AREA_OFFS[AREA]
+def here(): return area_off() + len(patch)
+def set_area(addr):
+    global AREA, patch
+    cand = [i for i in range(len(AREA_OFFS)) if abs(addr - (AREA_OFFS[i] + len(AREA_BUFS[i]))) <= 0x8000000 - 0x10000]
+    if not cand: raise RuntimeError(f'no patch area reaches site {addr:#x}')
+    AREA = min(cand, key=lambda i: abs(addr - (AREA_OFFS[i] + len(AREA_BUFS[i]))))
+    patch = AREA_BUFS[AREA]
 def emit(w, kind=None):
     if kind: fix.append((len(patch), kind))
     patch.extend(struct.pack('<I', w & 0xFFFFFFFF))
@@ -166,6 +184,7 @@ def sp_delta(ins):
     return 0
 
 def site_plain(ins):
+    set_area(ins.address)
     S, T = pick(regs_in(ins))
     dlt = sp_delta(ins)
     save = -16 if dlt == 0 else -112          # Instructions that modify sp write below sp, so the scratch save is placed deep in the reserved area
@@ -178,6 +197,7 @@ def site_plain(ins):
     return start
 
 def site_sp(ins):
+    set_area(ins.address)
     """Destination is sp and a source is x18 (Engage's alloca: mov x18, sp; sub x18, x18, x0; mov sp, x18). site_plain saves its scratch relative to the old sp and would restore it relative to the new one:
     copy the old sp into T first, and after the instruction restore S / T relative to T (without writeback, ldp may use the base register as a destination). x18 is not written, so the slot is not written back"""
     S, T = pick(regs_in(ins))
@@ -189,6 +209,7 @@ def site_sp(ins):
     return start
 
 def site_sp_align(ins, n):
+    set_area(ins.address)
     """sub sp, sp, xN (no shift): Horizon leaves stack alignment checking off for user code, Apple's kernel does not, so an sp that is not 16-byte aligned faults (SIGBUS) at the next sp-based access.
     Paper Mario: The Thousand-Year Door's script call bridges (main+0x17c140 and five more beside it, hand-written) reserve the callee's stack arguments as their sizes add up (4 for one int)
     and give the area back with add sp, sp, xN: the callee's first stp faulted. xN is rounded up to 16 first, which the add then gives back too. Compiled code keeps such sizes 16-aligned, so
@@ -199,6 +220,7 @@ def site_sp_align(ins, n):
     return start
 
 def site_cond(ins):
+    set_area(ins.address)
     w = struct.unpack('<I', ins.bytes)[0]
     S, T = pick(regs_in(ins))
     tgt = ins.operands[-1].imm
@@ -216,6 +238,7 @@ def site_cond(ins):
     return start
 
 def site_pcrel(ins):
+    set_area(ins.address)
     tgt = ins.operands[1].imm
     S, T = pick(set())
     start = here()
@@ -227,6 +250,7 @@ def site_pcrel(ins):
     return start
 
 def site_br(ins, base, count):
+    set_area(ins.address)
     """Jump table br x18: target = base + 4i. Stash x16 in the red zone → equally spaced landing pads → restore x16 → original target."""
     start = here()
     emit(STUR(16, 31, -16)); emit(STUR(17, 31, -24))   # x16 / x17 are temporary registers that can stay live within a function; save them to the red zone before borrowing
@@ -249,6 +273,7 @@ def site_br(ins, base, count):
     return start
 
 def site_br_tab(ins, targets):
+    set_area(ins.address)
     """Offset-table br x18 (ldrsw x18,[xB,x18,lsl #2]; add x18,x18,xB): target = table base + signed entry; the table is constant, so all targets are read at rewrite time.
     x16 = guest x18, compared with each target in turn (adrp + add put the target address in x17); on a match restore x16 / x17 and jump to the original target; no match → brk (the original bounds check already stops out-of-range indices)"""
     start = here()
@@ -264,6 +289,7 @@ def site_br_tab(ins, targets):
     return start
 
 def site_blr(ins):
+    set_area(ins.address)
     """blr x18 (Engage main+0x9ff324): x16 = guest x18, x30 = the instruction after the original blr, br x16. At a call site x16 / x17 are intra-procedure-call temporaries under the calling convention, so they need no saving;
     the return address is the original one, so the callee returns straight there (IL2CPP's C++ exceptions look up unwind tables by return address and must not stop in the patch area)"""
     start = here()
@@ -273,12 +299,14 @@ def site_blr(ins):
     return start
 
 def site_br_call(ins):
+    set_area(ins.address)
     """br x18 as an indirect tail call (tail_call): x16 = guest x18, br x16. As at site_blr, x16 / x17 are intra-procedure-call temporaries at a call, and x30 keeps the caller's return address"""
     start = here()
     emit(MRS_TPIDRRO(16)); emit_slot_addr(16, 17, 'K18'); emit(LDRX(16, 16)); emit(BR(16))
     return start
 
 def site_sysreg_read(ins, kind):
+    set_area(ins.address)
     """mrs xN, tpidr_el0 / tpidrro_el0 → xN = thread slot value."""
     N = ins.bytes[0] & 31
     tmp = 16 if N != 16 else 17
@@ -288,6 +316,7 @@ def site_sysreg_read(ins, kind):
     return start
 
 def site_tpidr_write(ins):
+    set_area(ins.address)
     N = struct.unpack('<I', ins.bytes)[0] & 31
     (T,) = pick({N}, 1)
     start = here()
@@ -305,6 +334,7 @@ def emit_gate_call():
     emit(MRS_TPIDRRO(30)); emit_slot_addr(30, 29, 'KGATE'); emit(LDRX(30, 30)); emit(LDRX(29, 31))
 
 def site_gate(ins, kind, arg):
+    set_area(ins.address)
     """svc / mrs cntpct_el0 → host gate. The gate address is taken from thread slot KGATE; the gate looks up gates.tsv by return point (the address of this block's ldp)."""
     start = here()
     emit(STP_PRE(29, 30, 31, -16))
@@ -317,6 +347,7 @@ def site_gate(ins, kind, arg):
     return start
 
 def site_obs(off, oid, word):
+    set_area(off)
     """Observation gate: original entry instruction → enter the host gate (arg = observation number) → restore x29/x30 → execute the original instruction → jump back to off+4.
         The first half of the gate block is word-for-word isomorphic with site_gate; the host only reads registers and does not modify them (the x0–x8 written back by dm_gate are the original values)."""
     ins = dis(word, off)
@@ -358,6 +389,7 @@ def window_adrp(x, S, pc):
     return ADRP(S if rd == 18 else rd, pc, x.operands[1].imm)
 
 def site_window(seg):
+    set_area(seg[0].address)
     used = set()
     for x in seg: used |= regs_in(x)
     S, T = pick(used)
@@ -406,6 +438,7 @@ def retry_block(insl, k, wseg):
     return None
 
 def site_retry_window(parts):
+    set_area(parts[0][0][0].address)
     """A retry block (see retry_block) gets a patch copy of its own: it cannot jump into the window's copy, because the x18 stand-in would have to be loaded
     between its exclusive load and the store. parts = [(retry block, its fall-through), (window from the store on, the window's fall-through)] are copied one
     after the other under one prologue, each followed by its fall-through stub; branches to any copied instruction (between the parts, and the failed store's
@@ -541,7 +574,7 @@ def check_before_copy(insl, ctx, ld, idx):
         if writes(p) & (idx | {src}): return None
     else: return None
     return ctx[k - 2]
-def jump_offsets(insl, j, copy_first=False, far_base=False):
+def jump_offsets(insl, j, copy_first=False, far_base=False, back=16):
     """The br x18 is preceded by the offset-table form (Engage main+0x12eec94): cmp w18,#N; b.hi; ldrsw x18,[xB,x18,lsl #2]; add x18,x18,xB.
     The index may be another register, and the bounds check may be on a register copied into it: Link's Awakening's GLSLC (subsdk0+0x1be6e8) has
     sub w0,w18,#0xd1; cmp w0,#0x31; b.hi; ldrsw x18,[x17,x0,lsl #2], its movie module (subsdk1+0xae9a4) cmp w21,#7; b.hi; ...; mov w18,w21; ldrsw x18,[x4,x18,lsl #2].
@@ -551,11 +584,26 @@ def jump_offsets(insl, j, copy_first=False, far_base=False):
     256 instructions was set further back, and its writer chain is followed to the function's start (table_base far), every target an instruction of the function: ASTRAL CHAIN main+0x6db498
     and +0x6db70c load bases set 441 and 549 instructions before, x24 in the function's first block and x3 after it, which the loop around their dispatches keeps. A function-wide search
     for the one adrp + add pair that fits (table_cands, as jump_adr_offsets does) finds two for x3 there, the other a table of its own further on. Returns all targets, or None if not recognized"""
-    ctx = insl[max(0, j - 16):j]
+    ctx = insl[max(0, j - back):j]
     add = next((p for p in reversed(ctx) if p.mnemonic == 'add' and re.fullmatch(r'x18, x\d+, x\d+', p.op_str)), None)
     if not add: return None
+    if back > 16:
+        # The compiler may schedule whole blocks between the dispatch's add and the br (Persona 5
+        # Strikers main+0x496f20 zeroes twenty-something registers there); valid only if nothing
+        # writes x18 on that stretch.
+        if any('x18' in [p.reg_name(r) for r in p.regs_access()[1]] for p in ctx[ctx.index(add) + 1:]): return None
     _, t, rb = add.op_str.split(', ')   # t = the loaded entry, rb = the table base
     ld = next((p for p in reversed(ctx) if p.mnemonic == 'ldrsw' and re.fullmatch(rf'{t}, \[{rb}, x(\d+), lsl #2\]', p.op_str)), None)
+    if not ld:
+        # Or the add's base is a fresh copy of the register the load indexed with: P5S has
+        # ldrsw x9,[x10,x9,lsl #2]; mov x12,x10; add x18,x9,x12.
+        for p in reversed(ctx[:ctx.index(add)]):
+            m = re.fullmatch(r'(x\d+), (x\d+)', p.op_str) if p.mnemonic == 'mov' else None
+            if not m or m.group(1) != rb: continue
+            src = m.group(2)
+            ld = next((q for q in reversed(ctx[:ctx.index(p)]) if q.mnemonic == 'ldrsw' and re.fullmatch(rf'{t}, \[{src}, x(\d+), lsl #2\]', q.op_str)), None)
+            if ld: rb = src
+            break
     if not ld: return None
     # GLSLC subsdk0+0x2f403c checks a masked copy instead: and w16,w18,#0x3f; cmp w16,#0xe; b.hi; ...; and x18,x18,#0x3f; ldrsw x18,[x15,x18,lsl #2]
     idx = {'w' + re.fullmatch(rf'{t}, \[{rb}, x(\d+), lsl #2\]', ld.op_str).group(1)}
@@ -907,6 +955,7 @@ for fa, fb in funcs:
                 if not tgt and (far := jump_bytes_far(insl, j)): jumps[ins.address] = far; continue
                 if not tgt: tgt = jump_offsets(insl, j, copy_first=True, far_base=True)   # the index copied before the check (check_before_copy) or the base set far back, only where every other form failed
                 if not tgt: tgt = jump_masked_pred(insl, j)   # the check on a masked copy made in the block, the index masked in the block that branches to it
+                if not tgt: tgt = jump_offsets(insl, j, back=64)   # the dispatch computed far before the br (P5S main+0x496f20); last, so sites that rewrote before come out the same
                 assert tgt, f'jump table {ins.address:x}'
                 tabjumps[ins.address] = tgt; continue
             jumps[ins.address] = (base, width)
@@ -1262,6 +1311,7 @@ def spin_region1(T, bes, ban, stores):
     if live[T] & defs: return None
     return {'T': T, 'R': sorted(R), 'nodes': nodes, 'valid': valid}
 def spin_emit(g):
+    set_area(g['T'])
     T, R, nodes, valid = g['T'], g['R'], g['nodes'], g['valid']
     cpy, fixes, tramp = {}, [], {}
     for i, a in enumerate(R):
@@ -1291,7 +1341,7 @@ def spin_emit(g):
         if t not in tramp: tramp[t] = here(); emit(B(here(), t))
         return tramp[t]
     for idx, x, info in fixes:
-        pc = PATCH_OFF + idx
+        pc = area_off() + idx
         if x is None: w = B(pc, cpy.get(info, info))
         elif isinstance(info, tuple): w = spin_rebranch(x, pc, out(info[1]))
         elif info is not None: w = spin_rebranch(x, pc, cpy[info])
@@ -1314,19 +1364,26 @@ if os.environ.get('DM_SPIN_LIST'):
 os.makedirs(outdir, exist_ok=True)
 P = lambda ext: os.path.join(outdir, f'{NAME}.{ext}')
 if FAR:   # patch area before the base: file = text + ro + data (padded to 16K) + patch area
-    if BIG_TEXT and len(patch) > FRONT - 0x4000 and 'DM_PATCH_FRONT' not in os.environ:
-        need = (len(patch) + 0x4000 + 0xFFFF) & ~0xFFFF
-        print(f'{NAME}: patch area of {len(patch):#x} bytes does not fit in {FRONT:#x} before the base; rewriting again with {need:#x}', flush=True)
+    if BIG_TEXT and len(patch_front) > FRONT - 0x4000 and 'DM_PATCH_FRONT' not in os.environ:
+        need = (len(patch_front) + 0x4000 + 0xFFFF) & ~0xFFFF
+        print(f'{NAME}: patch area of {len(patch_front):#x} bytes does not fit in {FRONT:#x} before the base; rewriting again with {need:#x}', flush=True)
         os.execve(sys.executable, [sys.executable] + sys.argv, dict(os.environ, DM_PATCH_FRONT=hex(need)))
-    assert len(patch) <= FRONT - 0x4000, f'patch area of {len(patch):#x} bytes does not fit in the {FRONT:#x} before the base'
-    open(P('patched.bin'), 'wb').write(IMG + bytearray(FILE_IMAGE_LEN - len(IMG)) + patch)
+    assert len(patch_front) <= FRONT - 0x4000, f'patch area of {len(patch_front):#x} bytes does not fit in the {FRONT:#x} before the base'
+    if HUGE_TEXT:
+        assert len(patch_back) <= PATCH2_SIZE - 0x4000, f'back patch area of {len(patch_back):#x} bytes does not fit in {PATCH2_SIZE:#x}'
+        open(P('patched.bin'), 'wb').write(IMG + bytearray(FILE_IMAGE_LEN - len(IMG)) + patch_front + patch_back)
+    else:
+        open(P('patched.bin'), 'wb').write(IMG + bytearray(FILE_IMAGE_LEN - len(IMG)) + patch_front)
 else:
-    open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch)
+    open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch_front)
+
 import hashlib
 with open(os.path.join(outdir, 'build_src.sha256'), 'w') as f:   # the same for every module: the rewriter and every patch file, by path from dm/tools
     for src_ in (os.path.abspath(__file__), nso_code.__file__, nso_asm.__file__, *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__)))}\n')
 with open(P('fixups.tsv'), 'w') as f:
     f.write(f'# PATCH_OFF\t{PATCH_OFF:#x}\n# KEY_PAGE_OFF\t{KEY_PAGE_OFF:#x}\n# KEY_PAGE_SIZE\t0x4000\n# TEXT_END\t{TEXT_END:#x}\n# RO_OFF\t{RO_OFF:#x}\n# DATA_OFF\t{DATA_OFF:#x}\n')
+    if HUGE_TEXT:
+        f.write(f'# PATCH2_OFF\t{PATCH2_OFF:#x}\n# PATCH2_SIZE\t{PATCH2_SIZE:#x}\n# PATCH2_FILE_OFF\t{FILE_IMAGE_LEN + len(patch_front):#x}\n# PATCH2_LEN\t{len(patch_back):#x}\n')
     if FAR: f.write(f'# IMAGE_SIZE\t{IMAGE_SIZE:#x}\n# FILE_IMAGE_LEN\t{FILE_IMAGE_LEN:#x}\n')   # patch area before the base (negative PATCH_OFF): whole image size, length of the image part of the file
     for k in KEY_INDEX: f.write(f'# KEY_{k}_IDX\t{KEY_INDEX[k]}\n')
     if FS_STATE_OFF: f.write(f'# FPS_STATE_OFF\t{FS_STATE_OFF:#x}\n')   # frame step state page (FRAME_STEP): the loader writes the target fps there
@@ -1347,5 +1404,5 @@ with open(P('cuts.tsv'), 'w') as f:
 with open(P('obs.tsv'), 'w') as f:
     f.write(f'# BUILD_ID\t{BUILD_ID}\n')
     for off, oid, ow, why in obs: f.write(f'{off:#x}\t{oid}\t{ow}\t{why}\n')
-print(NAME, stats, 'cuts', len(cuts), 'obs', len(obs), 'patch', len(patch), 'PATCH_OFF', hex(PATCH_OFF), 'slot_refs', len(fix), 'gates', len(gates))
+print(NAME, stats, 'cuts', len(cuts), 'obs', len(obs), 'patch', len(patch_front) + (len(patch_back) if HUGE_TEXT else 0), 'PATCH_OFF', hex(PATCH_OFF), 'PATCH2_OFF', hex(PATCH2_OFF), 'slot_refs', len(fix), 'gates', len(gates))
 if DATA_BLOCKS: print(NAME, 'data blocks left alone:', ', '.join(f'{s:#x}..{e:#x}' for s, e in DATA_BLOCKS))

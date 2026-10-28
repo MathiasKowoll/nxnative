@@ -969,7 +969,10 @@ def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
     src = {m: exe_dir / m for m in mods} | nros
     names = list(src)
     kf = out.with_name(out.name + '.key')
-    key = fingerprint(('files', [repo / 'dm/tools' / f for f in ('patch_nso.py', 'nso_code.py', 'nso_asm.py', 'nso_match.py')] + patch_files(repo, exe_dir, mods, env.get('DM_GAME')) + list(src.values()) + ([manifest] if manifest.is_file() else [])), names, capstone.__version__,
+    rewrite_files = ('patch_nso.py', 'nso_code.py', 'nso_asm.py', 'nso_match.py', 'nso_segments.py', 'zbic.py')
+    key = fingerprint(('files', [repo / 'dm/tools' / f for f in rewrite_files]
+                       + [repo / 'dm/third_party/zstd-zbic/source/core/zstd.c', repo / 'dm/third_party/zstd-zbic/zbic_decode.c']
+                       + patch_files(repo, exe_dir, mods, env.get('DM_GAME')) + list(src.values()) + ([manifest] if manifest.is_file() else [])), names, capstone.__version__,
                       {k: env.get(k) for k in ('DM_PATCH_FRONT', 'DM_GAME')})
     if all((out / f'{m}.patched.bin').is_file() for m in names) and reused(kf, key) is not None:
         PROG.end(f'{", ".join(mods)}{f" and {len(nros)} NROs" if nros else ""}, reused (inputs unchanged)'); return g
@@ -1919,6 +1922,9 @@ def main(args=None):
     want_lang = language_code(lang_in) if lang_in else 'en-US'
     if not want_lang: raise BuildError(f'unknown game language {lang_in!r}; give one of {language_list([c for c, _ in nacp.LANGUAGES])}, by code or by name')
     env = dict(os.environ, PATH=os.pathsep.join(TOOL_PATHS + [os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')]))
+    # ZBIC's decoder is built once on the game drive, not in the repository or the home folder.
+    cache = os.environ.get('NXNATIVE_CACHE') or str(nsp_dir.parent / '_nxnative' / '_tools')
+    os.environ['NXNATIVE_CACHE'] = env['NXNATIVE_CACHE'] = cache
     env.setdefault('USER', getpass.getuser())   # xcodegen fails without USER (Couldn't find current username)
     configure_dotnet(env)
     env.setdefault('J', str(os.cpu_count() or 8))   # shader_split.py's and dmsh_build.py's workers (their default is 8)

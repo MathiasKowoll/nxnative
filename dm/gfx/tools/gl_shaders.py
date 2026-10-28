@@ -40,11 +40,11 @@ def text_of(b):
 def nso_strings(path):
     """'#version <number>' strings of an NSO's read-only segment (lz4 segments, as dm/tools/nso.py decompresses them); a main that links glslang (Balatro's LÖVE) also has its messages that
     start with '#version:'"""
-    import lz4.block, struct
-    d = open(path, 'rb').read()
-    flags = struct.unpack_from('<I', d, 0xc)[0]; fo, mo, sz = struct.unpack_from('<III', d, 0x20); csz = struct.unpack_from('<I', d, 0x64)[0]
-    img = d[fo:fo + csz]
-    if flags >> 1 & 1: img = lz4.block.decompress(img, uncompressed_size=sz)
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../tools'))
+    import nso_segments
+    img, _, segs, _, _ = nso_segments.load(path, bss=False)
+    _, mo, sz = segs[1]; img = img[mo:mo + sz]
     return [text_of(img[m.start():m.start() + 0x10000]) for m in re.finditer(rb'(?:^|(?<=\0))#version [0-9]', img)]
 
 def sources(roots):

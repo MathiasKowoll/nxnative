@@ -1799,11 +1799,12 @@ def unzs_dict(d, did, where):
     return zstd.decompress(d, zstd_dict=_ZD[did])
 
 def unzs(path):
-    """A zstd file decompressed: frames without a dictionary through the zstd command as before, frames that name one with that dictionary from ZDICTS"""
+    """A zstd file decompressed from its bytes: `open` here resolves paths inside a RomFS image (DMROMFS1), which a zstd command
+    given the same path could not read (only this patched open understands them). Frames that name a dictionary use ZDICTS."""
     d = open(path, 'rb').read()
     did = zs_dict_id(d)
-    if not did: return subprocess.run(['zstd', '-d', '-c', '-q', path], capture_output=True, check=True).stdout
-    return unzs_dict(d, did, path)
+    if did: return unzs_dict(d, did, path)
+    return zstd_mod().decompress(d)
 
 def frame_size(f):
     """The uncompressed size a zstd or LZ4 frame header records, None when it records none"""
@@ -2116,14 +2117,9 @@ def uniq_keys(found):
     return uniq
 
 def nso_image(path):
-    import lz4.block
-    d = open(path, 'rb').read()
-    flags = struct.unpack_from('<I', d, 0xc)[0]; segs = [struct.unpack_from('<III', d, 0x10 + i * 0x10) for i in range(3)]; csz = struct.unpack_from('<III', d, 0x60)
-    img = bytearray(segs[2][1] + segs[2][2])
-    for i, (fo, mo, sz) in enumerate(segs):
-        raw = d[fo:fo + csz[i]]
-        img[mo:mo + sz] = lz4.block.decompress(raw, uncompressed_size=sz) if flags >> i & 1 else raw
-    return bytes(img)
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../tools'))
+    import nso_segments
+    return bytes(nso_segments.load(path, bss=False)[0])
 
 def scan_batch(jobs):   # scan_file over a batch of jobs, in a pool worker
     return [scan_file(j) for j in jobs]
