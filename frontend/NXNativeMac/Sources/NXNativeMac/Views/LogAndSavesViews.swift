@@ -65,6 +65,7 @@ struct SavesView: View {
     @State private var backups: [SaveVault.Entry] = []
     @State private var message: String?
     @State private var pendingRestore: URL?
+    @State private var confirmDelete = false
     @State private var busy = false
 
     var body: some View {
@@ -72,13 +73,13 @@ struct SavesView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Partida guardada").font(.headline)
-                    Text(game.saveDirectory.path).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                    Text(model.activeProfile.isMain ? "Partida guardada" : "Partida guardada · \(model.activeProfile.name)").font(.headline)
+                    Text(model.saveDirectory(for: game).path).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                     Text("Está fuera de la app: reinstalar o reconstruir el juego no la borra. Un desinstalador que limpie Application Support sí, y por eso están las copias.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("Mostrar") { Finder.open(game.saveDirectory) }
+                Button("Mostrar") { Finder.open(model.saveDirectory(for: game)) }
             }
 
             HStack {
@@ -87,6 +88,8 @@ struct SavesView: View {
                     .help("Guarda la partida actual en un zip donde quieras: iCloud Drive, otro disco, otro Mac.")
                 Button("Importar…") { importArchive() }
                     .help("Restaura la partida desde un zip exportado. Antes se copia la actual.")
+                Button("Borrar partida…", role: .destructive) { confirmDelete = true }
+                    .help("Empieza de cero. Antes se hace una copia, y la carpeta va a la Papelera.")
                 Spacer()
                 Toggle("Copia automática al jugar y al reconstruir", isOn: $prefs.autoBackup)
                     .toggleStyle(.checkbox)
@@ -119,13 +122,26 @@ struct SavesView: View {
                 } header: {
                     Text("Copias · \(model.vault.directory(for: game.titleID).path)")
                 } footer: {
-                    Text("Se guardan las \(model.vault.keepAuto) copias automáticas más nuevas; las manuales y las de antes de restaurar no se borran nunca. La carpeta se cambia en Entorno.")
+                    Text("Se guardan las \(model.vault.keepAuto) copias automáticas más nuevas; las manuales y las de antes de restaurar o de borrar no se borran nunca. La carpeta se cambia en Entorno.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
         }
         .padding()
         .onAppear(perform: reload)
+        .onChange(of: model.activeProfile.id) { message = nil; reload() }
+        .confirmationDialog("¿Borrar la partida de \(game.name)?", isPresented: $confirmDelete) {
+            Button("Borrar partida", role: .destructive) {
+                run {
+                    try await model.deleteSave(game)
+                    return "Partida borrada. Quedó una copia («antes de borrar») y la carpeta está en la Papelera."
+                }
+            }
+        } message: {
+            Text(model.activeProfile.isMain
+                 ? "El juego empezará de cero. Antes se hace una copia que puedes restaurar desde esta lista."
+                 : "Solo la de \(model.activeProfile.name): las de los demás perfiles no se tocan. Antes se hace una copia que puedes restaurar desde esta lista.")
+        }
         .confirmationDialog("¿Restaurar esta copia?",
                             isPresented: Binding(get: { pendingRestore != nil }, set: { if !$0 { pendingRestore = nil } })) {
             Button("Restaurar", role: .destructive) {
@@ -148,7 +164,7 @@ struct SavesView: View {
 
     private func restore(_ url: URL) {
         run {
-            try await model.vault.restore(url, saveDir: game.saveDirectory, titleID: game.titleID,
+            try await model.vault.restore(url, saveDir: model.saveDirectory(for: game), titleID: game.titleID,
                                           game: game.name, version: game.version)
             return "Restaurada. La partida anterior quedó copiada («antes de restaurar») y en la Papelera."
         }
@@ -165,7 +181,7 @@ struct SavesView: View {
         p.allowedContentTypes = [.zip]
         guard p.runModal() == .OK, let out = p.url else { return }
         run {
-            try await model.vault.export(saveDir: game.saveDirectory, titleID: game.titleID,
+            try await model.vault.export(saveDir: model.saveDirectory(for: game), titleID: game.titleID,
                                          game: game.name, version: game.version, to: out)
             return "Exportada a \(out.path)"
         }
@@ -196,6 +212,7 @@ struct SavesView: View {
         case .auto: "Automática"
         case .manual: "Manual"
         case .beforeRestore: "Antes de restaurar"
+        case .beforeDelete: "Antes de borrar"
         }
     }
 
@@ -204,6 +221,7 @@ struct SavesView: View {
         case .auto: "clock.arrow.circlepath"
         case .manual: "archivebox"
         case .beforeRestore: "arrow.uturn.backward"
+        case .beforeDelete: "trash"
         }
     }
 

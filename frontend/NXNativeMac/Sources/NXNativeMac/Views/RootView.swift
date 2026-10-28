@@ -37,6 +37,7 @@ struct RootView: View {
                     .tag(item)
             }
             .navigationSplitViewColumnWidth(min: 190, ideal: 210)
+            .safeAreaInset(edge: .top, alignment: .leading) { ProfileSwitcher() }
             .safeAreaInset(edge: .bottom) { statusFooter }
         } detail: {
             switch selection ?? .library {

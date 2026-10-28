@@ -36,6 +36,8 @@ public struct SaveVault: Sendable {
         case manual
         /// La partida que había antes de restaurar o importar otra.
         case beforeRestore = "antes-de-restaurar"
+        /// La partida que había antes de borrarla.
+        case beforeDelete = "antes-de-borrar"
     }
 
     public struct Entry: Sendable, Hashable, Identifiable {
@@ -47,10 +49,17 @@ public struct SaveVault: Sendable {
 
     public var root: URL
     public var keepAuto: Int
+    /// Cómo se aparta una partida vieja al restaurar o borrar. La app la manda
+    /// a la Papelera (se puede recuperar); las pruebas la borran en su carpeta
+    /// temporal, para no llenar la Papelera de quien las corre.
+    public var discard: @Sendable (URL) throws -> Void
 
-    public init(root: URL = SaveVault.defaultRoot, keepAuto: Int = 10) {
+    public static let toTrash: @Sendable (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) }
+
+    public init(root: URL = SaveVault.defaultRoot, keepAuto: Int = 10, discard: @escaping @Sendable (URL) throws -> Void = SaveVault.toTrash) {
         self.root = root
         self.keepAuto = keepAuto
+        self.discard = discard
     }
 
     public static var defaultRoot: URL {
@@ -198,6 +207,8 @@ public struct SaveVault: Sendable {
     public enum SaveError: LocalizedError, Equatable {
         case noSave
         case notASave
+        case notAnAllSavesArchive
+        case badTitleID
         case otherGame(expected: String, found: String, game: String)
         case tool(String)
 
@@ -205,6 +216,8 @@ public struct SaveVault: Sendable {
             switch self {
             case .noSave: "Este juego aún no tiene partida guardada."
             case .notASave: "El archivo no es una copia de partida: no contiene una carpeta save/."
+            case .badTitleID: "El índice nombra un title ID que no es válido."
+            case .notAnAllSavesArchive: "El archivo no es una exportación de todas las partidas (le falta nxnative-saves.json). Una copia de un solo juego se importa desde la pestaña Partidas de ese juego."
             case let .otherGame(expected, found, game):
                 "Esta copia es de otro juego (\(game), \(found)); este es \(expected). No se importa."
             case let .tool(s): s
@@ -227,11 +240,121 @@ public struct SaveVault: Sendable {
         guard r.ok else { throw SaveError.tool("ditto -x: \(r.stderr)") }
         let restored = staging.appendingPathComponent("save", isDirectory: true)
         guard fm.fileExists(atPath: restored.path) else { throw SaveError.notASave }
+        try await replace(saveDir: saveDir, with: restored, titleID: titleID, game: game, version: version)
+    }
 
+    /// Pone `restored` como la partida: antes copia la actual (si hay) y manda
+    /// la carpeta vieja a la Papelera. La comparten restaurar e importar todas.
+    func replace(saveDir: URL, with restored: URL, titleID: String, game: String, version: String) async throws {
+        let fm = FileManager.default
         if fm.fileExists(atPath: saveDir.path) {
             try await backup(saveDir: saveDir, titleID: titleID, game: game, version: version, kind: .beforeRestore)
-            try fm.trashItem(at: saveDir, resultingItemURL: nil)
+            try discard(saveDir)
         }
+        try fm.createDirectory(at: saveDir.deletingLastPathComponent(), withIntermediateDirectories: true)
         try fm.moveItem(at: restored, to: saveDir)
+    }
+
+    // MARK: borrar
+
+    /// Borra la partida: antes una copia («antes de borrar»), y la carpeta va a
+    /// la Papelera, no desaparece. La partida del «dispositivo»
+    /// (`<save>_device`) no se toca: no es de la partida del jugador.
+    public func delete(saveDir: URL, titleID: String, game: String, version: String) async throws {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: saveDir.path) else { throw SaveError.noSave }
+        try await backup(saveDir: saveDir, titleID: titleID, game: game, version: version, kind: .beforeDelete)
+        try discard(saveDir)
+    }
+
+    // MARK: todas las partidas a la vez
+
+    /// Lo que hace falta de un juego para exportar o importar su partida.
+    public struct GameSave: Sendable {
+        public var titleID: String, game: String, version: String, saveDir: URL
+        public init(titleID: String, game: String, version: String, saveDir: URL) {
+            self.titleID = titleID; self.game = game; self.version = version; self.saveDir = saveDir
+        }
+    }
+
+    public struct AllSavesIndex: Codable, Sendable, Equatable {
+        public var format = 1
+        public var created: Date
+        public var profile: String
+        public var games: [Entry]
+        public struct Entry: Codable, Sendable, Equatable { public var titleID: String; public var game: String }
+        public static let fileName = "nxnative-saves.json"
+    }
+
+    /// Un zip con una carpeta por juego (`<title ID>/save` y su manifiesto) y
+    /// un índice. Los juegos sin partida se saltan. Devuelve cuántos van.
+    @discardableResult
+    public func exportAll(_ games: [GameSave], profile: String, to out: URL, now: Date = Date()) async throws -> Int {
+        let fm = FileManager.default
+        let stage = fm.temporaryDirectory.appendingPathComponent("nxsaves-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: stage, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: stage) }
+        let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]; enc.dateEncodingStrategy = .iso8601
+        var entries: [AllSavesIndex.Entry] = []
+        for g in games where fm.fileExists(atPath: g.saveDir.path) {
+            let dir = stage.appendingPathComponent(g.titleID.uppercased(), isDirectory: true)
+            guard !fm.fileExists(atPath: dir.path) else { continue }   // el mismo juego dos veces (dos apps): vale la primera
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            try fm.copyItem(at: g.saveDir, to: dir.appendingPathComponent("save", isDirectory: true))
+            let fp = Self.fingerprint(g.saveDir)
+            let m = SaveManifest(titleID: g.titleID, game: g.game, version: g.version, created: now, fingerprint: fp.hash, files: fp.files, bytes: fp.bytes)
+            try enc.encode(m).write(to: dir.appendingPathComponent(SaveManifest.fileName))
+            entries.append(.init(titleID: g.titleID.uppercased(), game: g.game))
+        }
+        guard !entries.isEmpty else { throw SaveError.noSave }
+        try enc.encode(AllSavesIndex(created: now, profile: profile, games: entries)).write(to: stage.appendingPathComponent(AllSavesIndex.fileName))
+        if fm.fileExists(atPath: out.path) { try fm.removeItem(at: out) }
+        let partial = out.appendingPathExtension("partial"); try? fm.removeItem(at: partial)
+        let r = await Shell.run("/usr/bin/ditto", ["-c", "-k", "--sequesterRsrc", stage.path, partial.path])
+        guard r.ok else { throw SaveError.tool("ditto -c: \(r.stderr)") }
+        try fm.moveItem(at: partial, to: out)
+        return entries.count
+    }
+
+    public struct ImportResult: Sendable, Equatable { public var titleID: String; public var game: String; public var error: String? }
+
+    /// Importa una exportación de todas las partidas. `target` dice, para cada
+    /// juego del índice, dónde va su partida en el perfil actual (nil = no
+    /// importarla).
+    /// Cada juego pasa por lo mismo que restaurar uno: copia de la partida
+    /// actual y la vieja a la Papelera. Un juego que falla no para a los demás.
+    public func importAll(_ archive: URL, target: @Sendable (AllSavesIndex.Entry) -> GameSave?) async throws -> [ImportResult] {
+        let fm = FileManager.default
+        let stage = fm.temporaryDirectory.appendingPathComponent("nxsaves-in-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: stage, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: stage) }
+        let r = await Shell.run("/usr/bin/ditto", ["-x", "-k", archive.path, stage.path])
+        guard r.ok else { throw SaveError.tool("ditto -x: \(r.stderr)") }
+        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+        guard let data = try? Data(contentsOf: stage.appendingPathComponent(AllSavesIndex.fileName)),
+              let index = try? dec.decode(AllSavesIndex.self, from: data) else { throw SaveError.notAnAllSavesArchive }
+        var out: [ImportResult] = []
+        for e in index.games {
+            // El nombre de la carpeta sale del archivo: solo un title ID de verdad,
+            // o un «../» llevaría la importación fuera de donde toca.
+            guard TitleID(e.titleID) != nil else {
+                out.append(.init(titleID: e.titleID, game: e.game, error: SaveError.badTitleID.localizedDescription)); continue
+            }
+            let dir = stage.appendingPathComponent(e.titleID, isDirectory: true)
+            let restored = dir.appendingPathComponent("save", isDirectory: true)
+            // El manifiesto de cada carpeta tiene que decir el mismo juego que su nombre.
+            let m = (try? Data(contentsOf: dir.appendingPathComponent(SaveManifest.fileName))).flatMap { try? dec.decode(SaveManifest.self, from: $0) }
+            guard fm.fileExists(atPath: restored.path), m?.titleID.uppercased() == e.titleID.uppercased() else {
+                out.append(.init(titleID: e.titleID, game: e.game, error: "La carpeta del juego está incompleta en el archivo.")); continue
+            }
+            guard let t = target(e) else { out.append(.init(titleID: e.titleID, game: e.game, error: "No se importa: no hay dónde ponerla.")); continue }
+            do {
+                try await replace(saveDir: t.saveDir, with: restored, titleID: t.titleID, game: t.game, version: t.version)
+                out.append(.init(titleID: e.titleID, game: e.game, error: nil))
+            } catch {
+                out.append(.init(titleID: e.titleID, game: e.game, error: error.localizedDescription))
+            }
+        }
+        return out
     }
 }

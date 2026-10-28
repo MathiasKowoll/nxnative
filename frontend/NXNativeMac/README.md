@@ -88,6 +88,19 @@ nxnative cambia esa interfaz, el punto de contacto está en `Sources/NXCore`.
     disco sobrevive a lo que borre Application Support.
   - **Restaurar o importar** copia antes la partida actual y manda la carpeta
     vieja a la Papelera: dos caminos de vuelta.
+  - **Borrar partida** hace lo mismo: una copia «antes de borrar» y la carpeta
+    a la Papelera. La partida del «dispositivo» (`save_device`) no se toca.
+  - **Todas a la vez** (menú Partidas de la Biblioteca): un zip con una
+    carpeta por juego y un índice `nxnative-saves.json`. Al importarlo, cada
+    juego pasa por lo mismo que restaurar uno; uno que aún no está instalado
+    recibe su partida igual, en la carpeta de su title ID.
+- **Perfiles.** Para que varias personas compartan el Mac con partidas
+  propias. «Principal» usa la carpeta de siempre, la que ve el juego abierto
+  desde Finder. Los demás guardan en
+  `…/nxnative/<title ID>/perfiles/<id>/save`: la app se lo pasa al juego con
+  `DM_SAVE`, que el lanzador respeta si ya viene puesto, así que **solo
+  valen al jugar desde la app**. Las copias también van por perfil
+  (`<copias>/perfiles/<id>`), y los ajustes del juego son comunes.
   - El build de desarrollo (`--platform mac`) guarda en otro sitio,
     `<title ID>_build/run/save`, y no es la misma partida que la de la app.
 
