@@ -185,6 +185,12 @@ int main(int argc, char **argv) {
     snprintf(p, sizeof p, "%s/pso", res); if (!stat(p, &st)) setenv("DM_PSO_BUNDLE", p, 0);   // the bases of every shader pair: the first start builds none
     if (*lang) setenv("DM_LANG", lang, 0);
     setenv("DM_WINDOW", "1", 0); setenv("DM_AUDIO", "1", 0);
+    // The HUD did not show (macOS 27), with "Metal performance HUD on" in the host's log, for two reasons:
+    // - LaunchServices puts MTL_HUD_ENABLED=0 (and other MTL_HUD_* settings) in the environment of every app it opens, so front_hud_env()'s
+    //   setenv(..., 0) in the host never replaced it: DM_METAL_HUD is the player asking for the HUD, so it overrides that value;
+    // - Metal reads it when its library loads, before the host's own constructors run. Set here, it is there from the host's first instruction.
+    const char *hud = getenv("DM_METAL_HUD");
+    if (hud && atoi(hud)) { setenv("MTL_HUD_ENABLED", "1", 1); setenv("MTL_HUD_HIDE_METALFX_METRICS", "1", 0); }
     if (chdir(sup)) { fprintf(stderr, "[RED] launcher: cannot enter %s\n", sup); return 1; }
     struct sigaction sa = {.sa_handler = forward};   // no SA_RESTART: waitpid below sees EINTR and waits again
     sigemptyset(&sa.sa_mask);
