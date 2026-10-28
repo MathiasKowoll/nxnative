@@ -175,7 +175,7 @@ final class AppModel {
     func play(_ game: MacGameBundle) {
         Task {
             await autoBackup(game)
-            runner.launch(game, extra: Self.launchEnvironment(for: game))
+            runner.launch(game, extra: Self.launchEnvironment(for: game, globals: prefs.globalDefaults))
         }
     }
 
@@ -192,8 +192,12 @@ final class AppModel {
     /// `DM_LAUNCHER=0`: los lanzadores nuevos enseñan su propia ventana de
     /// ajustes antes del juego; un front end que dibuja los ajustes, como
     /// esta app, la salta así (`docs/frontends.md`). Los viejos lo ignoran.
-    static func launchEnvironment(for game: MacGameBundle) -> [String: String] {
-        var env = ["DM_LAUNCHER": "0"]
+    ///
+    /// `globals`: los valores para todos los juegos (Entorno), salvo los que
+    /// el juego fija en su propio env.txt.
+    static func launchEnvironment(for game: MacGameBundle, globals: GlobalDefaults = GlobalDefaults()) -> [String: String] {
+        var env = globals.environment(userEnv: EnvFile(contentsOf: game.userEnv))
+        env["DM_LAUNCHER"] = "0"
         // El mismo orden que el lanzador: el env.txt del jugador gana al del bundle.
         let hud = EnvFile(contentsOf: game.userEnv)["DM_METAL_HUD"] ?? EnvFile(contentsOf: game.bundledEnv)["DM_METAL_HUD"]
         if let hud, (Int(hud.trimmingCharacters(in: .whitespaces)) ?? 0) != 0 {
