@@ -1,4 +1,5 @@
 import NXCore
+import UniformTypeIdentifiers
 import SwiftUI
 
 struct LogView: View {
@@ -61,75 +62,150 @@ struct LogView: View {
 struct SavesView: View {
     @Environment(AppModel.self) private var model
     let game: MacGameBundle
-    @State private var backups: [URL] = []
+    @State private var backups: [SaveVault.Entry] = []
     @State private var message: String?
     @State private var pendingRestore: URL?
     @State private var busy = false
 
     var body: some View {
+        @Bindable var prefs = model.prefs
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                VStack(alignment: .leading) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 2) {
                     Text("Partida guardada").font(.headline)
                     Text(game.saveDirectory.path).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                    Text("Está fuera de la app: reinstalar o reconstruir el juego no la borra. Un desinstalador que limpie Application Support sí, y por eso están las copias.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button("Mostrar") { Finder.open(game.saveDirectory) }
-                Button("Hacer copia ahora") {
-                    Task {
-                        busy = true
-                        defer { busy = false }
-                        do {
-                            let url = try await SaveBackups.backup(game)
-                            message = "Copia creada: \(url.lastPathComponent)"
-                        } catch { message = error.localizedDescription }
-                        reload()
-                    }
-                }
-                .disabled(busy || model.runner.isRunning(game))
             }
+
+            HStack {
+                Button("Hacer copia ahora") { run { try await model.backup(game, kind: .manual).map { "Copia creada: \($0.lastPathComponent)" } ?? "Este juego aún no tiene partida guardada." } }
+                Button("Exportar…") { exportCurrent() }
+                    .help("Guarda la partida actual en un zip donde quieras: iCloud Drive, otro disco, otro Mac.")
+                Button("Importar…") { importArchive() }
+                    .help("Restaura la partida desde un zip exportado. Antes se copia la actual.")
+                Spacer()
+                Toggle("Copia automática al jugar y al reconstruir", isOn: $prefs.autoBackup)
+                    .toggleStyle(.checkbox)
+            }
+            .disabled(busy || model.runner.isRunning(game))
+
             if model.runner.isRunning(game) {
                 Text("El juego está en marcha: deténlo antes de copiar o restaurar, o la copia puede quedar a medias.")
                     .font(.callout).foregroundStyle(.orange)
             }
-            if let message { Text(message).font(.callout) }
+            if let message { Text(message).font(.callout).textSelection(.enabled) }
 
             List {
-                Section("Copias (\(SaveBackups.directory(for: game).path))") {
+                Section {
                     if backups.isEmpty { Text("Ninguna todavía.").foregroundStyle(.secondary) }
-                    ForEach(backups, id: \.self) { url in
+                    ForEach(backups) { e in
                         HStack {
-                            Image(systemName: "archivebox")
-                            Text(url.lastPathComponent).monospaced()
+                            Image(systemName: icon(e.kind)).foregroundStyle(.secondary)
+                            VStack(alignment: .leading) {
+                                Text(e.date.formatted(date: .abbreviated, time: .standard))
+                                Text(label(e.kind)).font(.caption).foregroundStyle(.secondary)
+                            }
                             Spacer()
-                            Button("Mostrar") { Finder.reveal(url) }
-                            Button("Restaurar…") { pendingRestore = url }
+                            Button("Exportar…") { exportCopy(e.url) }
+                            Button("Mostrar") { Finder.reveal(e.url) }
+                            Button("Restaurar…") { pendingRestore = e.url }
                                 .disabled(busy || model.runner.isRunning(game))
                         }
                     }
+                } header: {
+                    Text("Copias · \(model.vault.directory(for: game.titleID).path)")
+                } footer: {
+                    Text("Se guardan las \(model.vault.keepAuto) copias automáticas más nuevas; las manuales y las de antes de restaurar no se borran nunca. La carpeta se cambia en Entorno.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
         }
         .padding()
         .onAppear(perform: reload)
-        .confirmationDialog("¿Restaurar \(pendingRestore?.lastPathComponent ?? "")?",
+        .confirmationDialog("¿Restaurar esta copia?",
                             isPresented: Binding(get: { pendingRestore != nil }, set: { if !$0 { pendingRestore = nil } })) {
             Button("Restaurar", role: .destructive) {
                 guard let url = pendingRestore else { return }
-                Task {
-                    busy = true
-                    defer { busy = false }
-                    do {
-                        try await SaveBackups.restore(url, into: game)
-                        message = "Restaurada. La partida anterior quedó copiada y en la Papelera."
-                    } catch { message = error.localizedDescription }
-                    reload()
-                }
+                restore(url)
             }
         } message: {
             Text("Antes se hace una copia de la partida actual, y la carpeta vieja va a la Papelera.")
         }
     }
 
-    private func reload() { backups = SaveBackups.list(for: game) }
+    private func run(_ work: @escaping () async throws -> String) {
+        Task {
+            busy = true
+            defer { busy = false }
+            do { message = try await work() } catch { message = error.localizedDescription }
+            reload()
+        }
+    }
+
+    private func restore(_ url: URL) {
+        run {
+            try await model.vault.restore(url, saveDir: game.saveDirectory, titleID: game.titleID,
+                                          game: game.name, version: game.version)
+            return "Restaurada. La partida anterior quedó copiada («antes de restaurar») y en la Papelera."
+        }
+    }
+
+    private var exportName: String {
+        let d = Date().formatted(.iso8601.year().month().day())
+        return "\(game.name) - partida \(d).zip".replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: " -")
+    }
+
+    private func exportCurrent() {
+        let p = NSSavePanel()
+        p.nameFieldStringValue = exportName
+        p.allowedContentTypes = [.zip]
+        guard p.runModal() == .OK, let out = p.url else { return }
+        run {
+            try await model.vault.export(saveDir: game.saveDirectory, titleID: game.titleID,
+                                         game: game.name, version: game.version, to: out)
+            return "Exportada a \(out.path)"
+        }
+    }
+
+    private func exportCopy(_ url: URL) {
+        let p = NSSavePanel()
+        p.nameFieldStringValue = exportName
+        p.allowedContentTypes = [.zip]
+        guard p.runModal() == .OK, let out = p.url else { return }
+        run {
+            if FileManager.default.fileExists(atPath: out.path) { try FileManager.default.removeItem(at: out) }
+            try FileManager.default.copyItem(at: url, to: out)
+            return "Copiada a \(out.path)"
+        }
+    }
+
+    private func importArchive() {
+        let p = NSOpenPanel()
+        p.allowedContentTypes = [.zip]
+        p.allowsMultipleSelection = false
+        guard p.runModal() == .OK, let url = p.url else { return }
+        pendingRestore = url
+    }
+
+    private func label(_ k: SaveVault.Kind) -> String {
+        switch k {
+        case .auto: "Automática"
+        case .manual: "Manual"
+        case .beforeRestore: "Antes de restaurar"
+        }
+    }
+
+    private func icon(_ k: SaveVault.Kind) -> String {
+        switch k {
+        case .auto: "clock.arrow.circlepath"
+        case .manual: "archivebox"
+        case .beforeRestore: "arrow.uturn.backward"
+        }
+    }
+
+    private func reload() { backups = model.vault.list(game.titleID) }
 }

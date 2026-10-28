@@ -137,7 +137,7 @@ final class Toolchain {
             }
         } else {
             out.append(Check(id: "keys", title: "prod.keys", status: .failure,
-                             detail: "Elige el prod.keys volcado de TU consola. La app no lo lee: se lo pasa al script."))
+                             detail: "Elige el prod.keys volcado de TU consola. La app solo lee header_key para identificar archivos sin etiqueta; el resto se lo pasa al script."))
         }
 
         // Espacio libre donde se construye.

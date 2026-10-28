@@ -33,10 +33,13 @@ final class AppModel {
         let gameRoots = prefs.gameRootURLs
         let appRoots = prefs.appRootURLs + gameRoots
         let assigned = prefs.assignedTitleIDs.compactMapValues { TitleID($0) }
+        // Si hay prod.keys configurado, los archivos sin etiqueta ni ticket se
+        // identifican descifrando la cabecera de su NCA de metadatos.
+        let keyset = prefs.keysURL.flatMap(Keyset.init(url:))
         // Recorrer discos y leer cabeceras puede tardar: fuera del hilo principal.
         let (g, scans, prep, p, c, s) = await Task.detached {
             let scans = gameRoots.map { root -> LibraryScan in
-                var scan = GameLibrary.group(GameLibrary.collect(root: root), assigned: assigned)
+                var scan = GameLibrary.group(GameLibrary.collect(root: root, keyset: keyset), assigned: assigned)
                 for i in scan.games.indices { scan.games[i].root = root }
                 return scan
             }
@@ -69,7 +72,12 @@ final class AppModel {
 
     /// La carpeta que recibe el script: la del juego si la tiene para él solo,
     /// si no la preparada con enlaces.
-    func buildFolder(for game: GameEntry) -> URL? { game.ownFolder ?? prepared[game.base] }
+    /// Una carpeta propia solo vale si el script la sabe leer (ver
+    /// `GameEntry.scriptReadable`): un XCI sin etiqueta va por la preparada.
+    func buildFolder(for game: GameEntry) -> URL? {
+        if game.scriptReadable, let own = game.ownFolder { return own }
+        return prepared[game.base]
+    }
 
     /// `<carpeta>/<title ID>_build`.
     func buildDirectory(for game: GameEntry) -> URL? {
@@ -79,7 +87,7 @@ final class AppModel {
     /// Crea o pone al día los enlaces del juego. Se llama antes de cada build:
     /// si aparece una actualización o un DLC nuevo, entra solo.
     func prepare(_ game: GameEntry) throws -> URL {
-        if let own = game.ownFolder { return own }
+        if game.scriptReadable, let own = game.ownFolder { return own }
         guard let root = game.root else { throw NSError(domain: "NXNativeMac", code: 10) }
         let dir = try PreparedFolder.sync(game, root: root, name: name(for: game))
         prepared[game.base] = dir
@@ -111,6 +119,9 @@ final class AppModel {
 
     /// Devuelve un error legible, o nil si el build quedó en cola.
     func startBuild(_ options: BuildOptions, game: GameEntry) -> String? {
+        // El build no toca las partidas, pero reconstruir es justo cuando
+        // alguien borra cosas «para empezar limpio»: copia antes, por si acaso.
+        if let installed = self.game(for: game.base) { Task { await autoBackup(installed) } }
         let output = options.output?.deletingLastPathComponent() ?? options.nspFolder
         let job = BuildJob(title: "\(options.platform.label) · \(name(for: game))", folder: options.nspFolder,
                            arguments: options.arguments(script: repository.buildScript),
@@ -135,6 +146,53 @@ final class AppModel {
         guard repository.isValid else { return "No hay checkout de nxnative: revisa Entorno." }
         builds.enqueue(job, python: python, repository: prefs.repositoryURL)
         return nil
+    }
+
+    // MARK: - Partidas
+
+    var vault: SaveVault { SaveVault(root: prefs.backupsURL) }
+
+    func backup(_ game: MacGameBundle, kind: SaveVault.Kind) async throws -> URL? {
+        try await vault.backup(saveDir: game.saveDirectory, titleID: game.titleID, game: game.name,
+                               version: game.version, kind: kind)
+    }
+
+    /// Una copia si la partida cambió desde la última. Un fallo aquí no debe
+    /// impedir jugar: se anota y se sigue.
+    func autoBackup(_ game: MacGameBundle) async {
+        guard prefs.autoBackup else { return }
+        do {
+            if let url = try await vault.autoBackup(saveDir: game.saveDirectory, titleID: game.titleID,
+                                                     game: game.name, version: game.version) {
+                notice = "Copia automática de \(game.name): \(url.lastPathComponent)"
+            }
+        } catch {
+            notice = "No se pudo hacer la copia automática de \(game.name): \(error.localizedDescription)"
+        }
+    }
+
+    /// Jugar desde la app: primero la copia automática, luego el juego.
+    func play(_ game: MacGameBundle) {
+        Task {
+            await autoBackup(game)
+            runner.launch(game, extra: Self.launchEnvironment(for: game))
+        }
+    }
+
+    /// Variables que tienen que estar en el entorno ANTES de que arranque el
+    /// host. Metal lee `MTL_HUD_ENABLED` al cargar su librería, antes que los
+    /// constructores del host, así que el `setenv` que hace el host al leer
+    /// `DM_METAL_HUD` llega tarde y el HUD no sale. Medido en macOS 27: con
+    /// la variable puesta antes del arranque el HUD aparece, por las dos vías
+    /// de presentado (clásica y Metal 4); puesta en un constructor, no. El
+    /// lanzador lo pasa al host tal cual (`posix_spawn` con su `environ`).
+    /// Los lanzadores nuevos ya lo hacen solos; esto cubre las apps hechas
+    /// antes de ese cambio.
+    static func launchEnvironment(for game: MacGameBundle) -> [String: String] {
+        // El mismo orden que el lanzador: el env.txt del jugador gana al del bundle.
+        let hud = EnvFile(contentsOf: game.userEnv)["DM_METAL_HUD"] ?? EnvFile(contentsOf: game.bundledEnv)["DM_METAL_HUD"]
+        guard let hud, (Int(hud.trimmingCharacters(in: .whitespaces)) ?? 0) != 0 else { return [:] }
+        return ["MTL_HUD_ENABLED": "1", "MTL_HUD_HIDE_METALFX_METRICS": "1"]
     }
 
     // MARK: - Python
