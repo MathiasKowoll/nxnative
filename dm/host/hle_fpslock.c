@@ -11,7 +11,7 @@
 // period, so frames at exactly 16.667 ms came 0.11 ms late each on the Mac (59.6 fps, every 150th frame shown two vsyncs). Slightly shorter, the host's present pacing sets the pace
 // (the acquire waits): Luigi's Mansion 3's display interval p99 18.69 → 16.67 ms, 60.0 fps. Not at 30: with present_interval display the presents follow every vsync and hold no
 // frame for two, so a shorter time showed some frames for one (30.4 fps); 30 writes the game's own 33.333 ms
-enum { FPS_F32, VSYNCS_I32, MS_F32, FPS_I32 };
+enum { FPS_F32, VSYNCS_I32, MS_F32, FPS_I32, VSYNCS_MINUS1_I32 };
 #define MS_MARGIN 0.5f
 static float ms_want(int fps) { return 1000.0f / (float)fps - (fps == 60 ? MS_MARGIN : 0); }
 static const struct { const char *build, *what; uint64_t ptr_off; uint32_t field; uint8_t kind, copies; } k_locks[] = {
@@ -60,6 +60,14 @@ static const struct { const char *build, *what; uint64_t ptr_off; uint32_t field
     // started; the limiter (main+0x7a3e70) runs jobs or sleeps until 33.333 ms have passed, the float at main+0x13c94dc (read only there, at main+0x7a3ea8 and main+0x7a3f18), and the game
     // steps by the time that really passed. The game asks for present interval 2 too, which the profile's present_interval display ignores; both are needed
     { "79e5950ffa85acf63e28c9aec051eac2", "NLG frame limiter target", 0, 0x13c94dc, MS_F32, 1 },
+    // Persona 5 Strikers 1.0.0: the game writes 30 fps / 2 vsyncs at boot (main+0x4f3d68 and main+0x4d8748), while its
+    // own read-only defaults are 60 fps / 2. The public FPSLocker patch for this build raises the first pair to 60/1,
+    // keeps the float frame rate at 60.0, and clears the interval flag at main+0x2aefb30. The host writes those fields every
+    // present, so the game's boot writes no longer own the cap.
+    { "c4df04f647bdc727926348bd9a9918c8", "P5S frame rate", 0, 0x1d584f8, FPS_I32, 1 },
+    { "c4df04f647bdc727926348bd9a9918c8", "P5S vsync count", 0, 0x1d584fc, VSYNCS_I32, 1 },
+    { "c4df04f647bdc727926348bd9a9918c8", "P5S float frame rate", 0, 0x1d6bfa0, FPS_F32, 1 },
+    { "c4df04f647bdc727926348bd9a9918c8", "P5S interval flag", 0, 0x2aefb30, VSYNCS_MINUS1_I32, 1 },
 };
 #define NLOCKS ((int)(sizeof k_locks / sizeof k_locks[0]))
 
@@ -192,15 +200,16 @@ void dm_fps_lock_tick(void) {
                 snprintf(was, sizeof was, ms ? "%.3f ms" : "%g", f);
             } else {
                 int fps = k_locks[k].kind == FPS_I32;
-                want = fps ? (uint32_t)target : 60 / (uint32_t)target;
-                if (cur == want || cur < (fps ? 10u : 1u) || cur > (fps ? 120u : 4u)) continue;
+                int minus1 = k_locks[k].kind == VSYNCS_MINUS1_I32;
+                want = fps ? (uint32_t)target : (uint32_t)(60 / target - (minus1 ? 1 : 0));
+                if (cur == want || cur < (minus1 ? 0u : (fps ? 10u : 1u)) || cur > (minus1 ? 3u : (fps ? 120u : 4u))) continue;
                 snprintf(was, sizeof was, "%u", cur);
             }
             uint32_t *p = (uint32_t *)(uintptr_t)a;
             dm_guest_write_prepare(p, sizeof *p); __atomic_store_n(p, want, __ATOMIC_RELAXED);
             if (nlog[k] < 8) { nlog[k]++; char now[24];
                 if (k_locks[k].kind == MS_F32) snprintf(now, sizeof now, "%.3f ms (%d fps)", ms_want(target), target);
-                else snprintf(now, sizeof now, "%u%s", k_locks[k].kind == FPS_F32 ? (unsigned)target : want, k_locks[k].kind == FPS_F32 || k_locks[k].kind == FPS_I32 ? " fps" : " vsyncs");
+                else snprintf(now, sizeof now, "%u%s", k_locks[k].kind == FPS_F32 ? (unsigned)target : want, k_locks[k].kind == FPS_F32 || k_locks[k].kind == FPS_I32 ? " fps" : (k_locks[k].kind == VSYNCS_MINUS1_I32 ? " flag" : " vsyncs"));
                 LOG("main: %s%s %s → %s (%s)", k_locks[k].what, k_locks[k].copies > 1 ? (c ? " (render thread)" : " (game thread)") : "", was, now, src); }
         }
     }
