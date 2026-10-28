@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # Generate a stand-in for the "Nintendo extension" shared font (nintendo_ext.ttf): controller-button icons at the original private-use code points (A/B/X/Y, L/R/ZL/ZR/SL/SR, +/−, D-pad, stick direction arrows).
 # The host has no original system fonts; button icons in game text (e.g. Mario's GameMsg/Key.msbt: U+E0E0 = A button) render as "?" when the glyph is missing. Letters come from macOS's Arial Rounded Bold, knocked out of a solid plate.
-# Usage: make_ext_font.py out.ttf [letter-font.ttf]; needs fontTools (pip install fonttools)
+# Usage: make_ext_font.py out.ttf [letter-font.ttf] [--style nintendo|playstation]; needs fontTools (pip install fonttools).
+# --style playstation: the same code points with the symbols of a Sony controller's buttons in the same position (see build()).
 import math, sys
 from fontTools.ttLib import TTFont
 from fontTools.fontBuilder import FontBuilder
@@ -67,7 +68,34 @@ def cross(cx, cy, half, arm):   # D-pad outline (one closed ring)
     return [(cx - a, cy + h, 1), (cx + a, cy + h, 1), (cx + a, cy + a, 1), (cx + h, cy + a, 1), (cx + h, cy - a, 1), (cx + a, cy - a, 1),
             (cx + a, cy - h, 1), (cx - a, cy - h, 1), (cx - a, cy - a, 1), (cx - h, cy - a, 1), (cx - h, cy + a, 1), (cx - a, cy + a, 1)]
 
-def build(out, letter_font):
+def ps_face(shape):   # PlayStation face-button symbol, knocked out of the round plate as an outline (ring)
+    def d(pen, cx):
+        contour(pen, circle(cx, CY, R))
+        if shape == 'circle':
+            contour(pen, circle(cx, CY, 255), hole=True); contour(pen, circle(cx, CY, 175))
+        elif shape == 'cross':   # one closed ring: the plus outline turned 45 degrees (two overlapping holes would fill their overlap under nonzero winding)
+            contour(pen, rot(cross(cx, CY, 270, 95), cx, CY, 45), hole=True)
+        elif shape == 'square':
+            contour(pen, rect(cx - 225, CY - 225, cx + 225, CY + 225), hole=True); contour(pen, rect(cx - 150, CY - 150, cx + 150, CY + 150))
+        elif shape == 'triangle':   # centroid on CY: apex +270, base -135
+            tri = lambda s: [(round(cx), round(CY + 270 * s), 1), (round(cx + 234 * s), round(CY - 135 * s), 1), (round(cx - 234 * s), round(CY - 135 * s), 1)]
+            contour(pen, tri(1), hole=True); contour(pen, tri(0.5))
+    return d
+
+def ps_options(pen, cx):   # Options: three bars
+    contour(pen, circle(cx, CY, R))
+    for dy in (-140, 0, 140): contour(pen, rect(cx - 230, CY + dy - 42, cx + 230, CY + dy + 42), hole=True)
+
+def ps_create(pen, cx):   # Create: three short rays that do not touch (disjoint holes)
+    contour(pen, circle(cx, CY, R))
+    for deg in (90, 210, 330):
+        contour(pen, rot(rect(cx + 90, CY - 45, cx + 300, CY + 45), cx, CY, deg), hole=True)
+
+def build(out, letter_font, style='nintendo'):
+    """style 'nintendo' draws the Switch's lettered buttons; 'playstation' draws, at the same code points, the symbol of the button a
+    DualSense / DualShock has in that POSITION: the host maps controllers by position (front_mac.m: right A, bottom B, top X, left Y),
+    so A = circle, B = cross, X = triangle, Y = square; L/R/ZL/ZR = L1/R1/L2/R2, + / - = Options / Create, stick presses L3 / R3."""
+    ps = style == 'playstation'
     L = Letters(letter_font); glyphs = {}; adv = {}; cmap = {}
     def glyph(name, codes, width, draw):
         pen = TTGlyphPen(None); draw(pen, width / 2); glyphs[name] = pen.glyph(); adv[name] = width
@@ -104,15 +132,18 @@ def build(out, letter_font):
         return d
 
     pen = TTGlyphPen(None); glyphs['.notdef'] = pen.glyph(); adv['.notdef'] = 500
-    for i, t in enumerate(['A', 'B', 'X', 'Y']): glyph('btn' + t, [0xE0A0 + i, 0xE0E0 + i], 1000, round_btn(t))
+    faces = dict(zip('ABXY', ['circle', 'cross', 'triangle', 'square']))
+    for i, t in enumerate(['A', 'B', 'X', 'Y']): glyph('btn' + t, [0xE0A0 + i, 0xE0E0 + i], 1000, ps_face(faces[t]) if ps else round_btn(t))
+    shoulders = {'L': 'L1', 'R': 'R1', 'ZL': 'L2', 'ZR': 'R2'} if ps else {}
     for i, (t, w) in enumerate([('L', 900), ('R', 900), ('ZL', 1200), ('ZR', 1200), ('SL', 1200), ('SR', 1200)]):
-        glyph('btn' + t, [0xE0A4 + i, 0xE0E4 + i], w + 100, plate(t, w))
-    glyph('btnPlus', [0xE0B5, 0xE0EF], 1000, sign(False)); glyph('btnMinus', [0xE0B6, 0xE0F0], 1000, sign(True))
+        if t in shoulders: w = 1200
+        glyph('btn' + t, [0xE0A4 + i, 0xE0E4 + i], w + 100, plate(shoulders.get(t, t), w))
+    glyph('btnPlus', [0xE0B5, 0xE0EF], 1000, ps_options if ps else sign(False)); glyph('btnMinus', [0xE0B6, 0xE0F0], 1000, ps_create if ps else sign(True))
     glyph('dpad', [0xE0EA], 1000, dpad(None))
     for c, dr in [(0xE0AB, 'right'), (0xE0AC, 'down'), (0xE0AD, 'up'), (0xE0AE, 'left')]: glyph('dpad_' + dr, [c, c + 0x40], 1000, dpad(dr))
     for c, (nm, deg) in zip(range(0xE090, 0xE098), [('right', 0), ('left', 180), ('up', 90), ('down', 270), ('rightup', 45), ('rightdown', 315), ('leftdown', 225), ('leftup', 135)]):
         glyph('arrow_' + nm, [c], 1000, arrow(deg))
-    glyph('stick', [0xE100], 1000, stick(None)); glyph('stickL', [0xE101, 0xE0C1], 1000, stick('L')); glyph('stickR', [0xE102, 0xE0C2], 1000, stick('R'))
+    glyph('stick', [0xE100], 1000, stick(None)); glyph('stickL', [0xE101, 0xE0C1], 1000, stick('L3' if ps else 'L')); glyph('stickR', [0xE102, 0xE0C2], 1000, stick('R3' if ps else 'R'))
 
     order = ['.notdef'] + sorted(n for n in glyphs if n != '.notdef')
     fb = FontBuilder(EM, isTTF=True)
@@ -121,11 +152,15 @@ def build(out, letter_font):
     for n in order: glyf[n].recalcBounds(glyf)
     fb.setupHorizontalMetrics({n: (adv[n], getattr(glyf[n], 'xMin', 0)) for n in order})
     fb.setupHorizontalHeader(ascent=ASC, descent=DESC)
-    fb.setupNameTable({'familyName': 'DM Nintendo Extension Stand-in', 'styleName': 'Regular'})
+    fb.setupNameTable({'familyName': 'DM Nintendo Extension Stand-in' + (' (PlayStation)' if ps else ''), 'styleName': 'Regular'})
     fb.setupOS2(sTypoAscender=ASC, sTypoDescender=DESC, sTypoLineGap=0, usWinAscent=ASC, usWinDescent=-DESC)
     fb.setupPost(); fb.save(out)
     print('%s: %d glyphs, %d code points' % (out, len(order), len(cmap)))
 
 if __name__ == '__main__':
-    if len(sys.argv) < 2: sys.exit(__doc__ or 'usage: make_ext_font.py out.ttf [letter-font.ttf]')
-    build(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else '/System/Library/Fonts/Supplemental/Arial Rounded Bold.ttf')
+    args = sys.argv[1:]; style = 'nintendo'
+    if '--style' in args:
+        i = args.index('--style'); style = args[i + 1] if i + 1 < len(args) else ''; del args[i:i + 2]
+    if style not in ('nintendo', 'playstation'): sys.exit('--style is nintendo or playstation')
+    if not args: sys.exit('usage: make_ext_font.py out.ttf [letter-font.ttf] [--style nintendo|playstation]')
+    build(args[0], args[1] if len(args) > 1 else '/System/Library/Fonts/Supplemental/Arial Rounded Bold.ttf', style)
