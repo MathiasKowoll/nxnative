@@ -188,11 +188,18 @@ final class AppModel {
     /// lanzador lo pasa al host tal cual (`posix_spawn` con su `environ`).
     /// Los lanzadores nuevos ya lo hacen solos; esto cubre las apps hechas
     /// antes de ese cambio.
+    ///
+    /// `DM_LAUNCHER=0`: los lanzadores nuevos enseñan su propia ventana de
+    /// ajustes antes del juego; un front end que dibuja los ajustes, como
+    /// esta app, la salta así (`docs/frontends.md`). Los viejos lo ignoran.
     static func launchEnvironment(for game: MacGameBundle) -> [String: String] {
+        var env = ["DM_LAUNCHER": "0"]
         // El mismo orden que el lanzador: el env.txt del jugador gana al del bundle.
         let hud = EnvFile(contentsOf: game.userEnv)["DM_METAL_HUD"] ?? EnvFile(contentsOf: game.bundledEnv)["DM_METAL_HUD"]
-        guard let hud, (Int(hud.trimmingCharacters(in: .whitespaces)) ?? 0) != 0 else { return [:] }
-        return ["MTL_HUD_ENABLED": "1", "MTL_HUD_HIDE_METALFX_METRICS": "1"]
+        if let hud, (Int(hud.trimmingCharacters(in: .whitespaces)) ?? 0) != 0 {
+            env["MTL_HUD_ENABLED"] = "1"; env["MTL_HUD_HIDE_METALFX_METRICS"] = "1"
+        }
+        return env
     }
 
     // MARK: - Python
