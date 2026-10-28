@@ -8,6 +8,7 @@ import shutil
 import sys
 import tempfile
 import types
+import time
 import unittest
 from unittest import mock
 
@@ -146,6 +147,18 @@ class Nvn(Base):
         pso = self.tmp / 'pso_pairs.tsv'; pso.write_text('a\tb\n')
         watch = nsp.ShaderWatch(self.g, self.tmp, self.tmp, pso)
         self.assertEqual(list(watch.pos), ['b', 'a', 'c'])
+
+
+    def test_shader_watch_follows_the_size_order(self):   # dmsh_build.py compiles the largest SPIR-V first: c, last by key, finishing first is 1 shader done, not 3
+        (self.tmp / 'shader_map.tsv').write_text('p.bin\t0\tvs\ta\tsrc\np.bin\t1\tps\tb\tsrc\np.bin\t2\tps\tc\tsrc\n')
+        watch = nsp.ShaderWatch(self.g, self.tmp, self.tmp)
+        w = self.tmp / 'dmsh_test'; w.mkdir()
+        for k, size in (('a', 10), ('b', 20), ('c', 5000)): (w / (k + '.bin')).write_bytes(b'x'); (w / (k + '.spv')).write_bytes(b'x' * size)
+        first = watch()
+        self.assertEqual((first['step'], first['done']), ('compiling', 0))
+        self.assertEqual(list(watch.pos), ['c', 'b', 'a'])
+        time.sleep(0.05); (self.tmp / 'c_b.json').write_text('{}')
+        self.assertEqual(watch()['done'], 1)
 
 
 class EnvFile(Base):

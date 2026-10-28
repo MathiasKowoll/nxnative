@@ -1660,8 +1660,10 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
 class ShaderWatch:
     """Progress of dmsh_build.py, read from the files it writes (it prints nothing until it ends). It works in three phases:
     the cache check (a hit restores <key>_b.json into the library directory b-<chain>/: the iOS one, or the Mac's for a Mac-only build; a miss writes <key>.bin into its temporary folder dmsh_* under WORK),
-    the translation of the misses (<key>.spv in the temporary folder), and the compile, which takes the keys in a fixed order (sorted, the vertex shaders with pixel pairs last)
-    and writes <key>_b.json again for every miss and every pixel shader: the furthest key written so far tells how far it got"""
+    the translation of the misses (<key>.spv in the temporary folder), and the compile, which takes the keys in a fixed order and writes <key>_b.json again for every miss and
+    every pixel shader: the furthest key written so far tells how far it got. The order is dmsh_build.py's: in each phase (the vertex shaders with pixel pairs last) the largest
+    translated SPIR-V first, the key order between equal sizes; the watch takes it from the same files once the compile starts. With the plain key order instead, a large
+    shader late in it, compiled first, made the count jump ahead and then stand still while the rest caught up (an ETA of 75 hours at 59 %)"""
     def __init__(self, g, out, tmp, pso_pairs=None):   # out: the library directory b-<chain>/ (the iOS one, or the Mac's for a Mac-only build)
         keys = set()
         for ln in g.table('shader_map.tsv').read_text(errors='replace').splitlines():   # the keys dmsh_build.py builds: column 4 of the rows from a shader package
@@ -1671,10 +1673,18 @@ class ShaderWatch:
         for path in (g.table('shader_pairs.tsv'), pso_pairs):
             if path and path.is_file():
                 pairs |= {ln.split()[0] for ln in path.read_text(errors='replace').splitlines() if ln.strip() and not ln.startswith('#')}
-        order = sorted(keys - pairs) + sorted(keys & pairs)
+        self.phases = (sorted(keys - pairs), sorted(keys & pairs))
+        order = self.phases[0] + self.phases[1]
         self.pos, self.n = {k: i for i, k in enumerate(order)}, len(order)
         self.out, self.tmp, self.t0, self.t1, self.w = out, tmp, time.time(), None, None
-        self.hits, self.fin, self.top = set(), set(), -1
+        self.hits, self.fin, self.top, self.compile_order = set(), set(), -1, False
+
+    def take_compile_order(self):   # dmsh_build.py's big_first over each phase: sorted by SPIR-V size, largest first, stable (a key without one, a cache hit, counts 0)
+        def size(k):
+            try: return (self.w / (k + '.spv')).stat().st_size
+            except OSError: return 0
+        order = [k for ph in self.phases for k in sorted(ph, key=size, reverse=True)]
+        self.pos = {k: i for i, k in enumerate(order)}; self.compile_order = True
 
     def written(self, keys, since):   # those of keys whose <key>_b.json in the output was written after since
         found = set()
@@ -1697,6 +1707,7 @@ class ShaderWatch:
             self.t1 = time.time()   # the cache check is over: from now on a <key>_b.json is written by the compile
         if ext['.bin'] and not ext['.metal'] and ext['.spv'] < ext['.bin']:
             return {'step': 'translating', 'done': ext['.spv'], 'total': ext['.bin'], 'unit': 'shaders'}
+        if not self.compile_order and self.w: self.take_compile_order()   # the translation is over: every miss has its .spv
         new = self.written(self.pos.keys() - self.fin, self.t1)
         self.fin |= new; self.top = max([self.top] + [self.pos[k] for k in new])
         return {'step': 'compiling' if ext['.bin'] else 'finishing', 'done': max(len(self.fin), self.top + 1), 'total': self.n, 'unit': 'shaders',
