@@ -75,6 +75,13 @@
 
 ## Compressed inputs
 
+### Firmware 22 NSOs fail LZ4 decoding with `ZBIC`
+
+- **Symptom:** the survey or rewrite stops while reading an NSO with an error such as `lz4.block.LZ4BlockError: Decompressor wrote 0 bytes, but 194478320 are required`. The module header has flag bit 7 set and each compressed segment starts with the four bytes `ZBIC`.
+- **Cause:** firmware 22 and later can compress NSO segments with ZBIC, a Zstandard variant whose frame magic is `ZBIC` and whose normalization headers use Binary Interpolative Coding. The regular LZ4 and Zstandard decoders reject those frames.
+- **Fix:** `dm/tools/nso_segments.py` reads NSO flag bit 7 and sends ZBIC frames through `dm/tools/zbic.py`, which builds the ZBIC-enabled Zstandard amalgamation in `dm/third_party/zstd-zbic` once in the game-drive cache. Every tool that decompresses an NSO uses the shared loader. Verified on EA Sports FC 27: all three `main` segments decode to their exact sizes and pass the SHA-256 hashes in the NSO header, and the survey completes.
+- **Found on:** EA Sports FC 27 (survey; no repository profile yet).
+
 ### NSZ decompression rejects `--keys`
 
 - **Symptom:** `decompress NSZ` stops immediately with `nsz: error: unrecognized arguments: --keys …`.

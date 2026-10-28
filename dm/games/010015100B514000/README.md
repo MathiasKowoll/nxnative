@@ -71,6 +71,7 @@ Game-specific findings; the general host changes they led to are listed under [F
 - Integer vertex inputs: 529 of 4,854 vertex shaders are re-translated with `uint` inputs (skinned models read bone indices as integer bits; without it every character was stretched into streaks).
 - Pairs: 331 of 9,043 vertex / pixel pairs failed to link before `vs_pad` (the opening course used none of them; later levels did, about 11,500 failed builds in one 11-minute session). The offline link check: 8,712 linked / 331 failed before, 9,043 / 0 after, 14,603 / 0 for the v0 + 1.2.1 tables.
 - Vertex format `RGB10A2SN` (0x69) → `MTLVertexFormatInt1010102Normalized`.
+- **Resolved: v0 packs carried almost no shaders.** `unzs()` spawned the `zstd` command with image-internal RomFS paths, so all 6,861 plain-`.zs` files failed to decode and the split kept only `main`'s 40 shaders of 12,811; the app ran at 60 fps drawing nothing, with hundreds of `[RED] shader … is not in the shader map`. Fixed in `shader_split.py` by feeding the `zstd` command the bytes already read ([entry](../../../docs/reference/packing.md#the-zstd-command-given-a-path-inside-the-image)).
 
 ## Audio
 
