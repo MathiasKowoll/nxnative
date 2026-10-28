@@ -33,26 +33,42 @@ public enum Shell {
             p.standardOutput = out
             p.standardError = err
             p.standardInput = FileHandle.nullDevice
+
+            // Las dos tuberías se leen a la vez (si una se llena mientras se
+            // lee la otra, el hijo se bloquea) y en hilos PROPIOS: bloquear
+            // hilos de la cola global de GCD, que tiene tantos como núcleos,
+            // dejaba colgadas varias llamadas simultáneas esperando lecturas
+            // que no llegaban a ejecutarse. Nada aquí bloquea un hilo de GCD.
+            let box = Collected()
+            let g = DispatchGroup()
+            g.enter()
+            p.terminationHandler = { _ in g.leave() }
             do {
                 try p.run()
             } catch {
                 cont.resume(returning: Output(status: -1, stdout: "", stderr: error.localizedDescription))
                 return
             }
-            // Leer las dos tuberías a la vez y antes de esperar: si una se
-            // llena mientras leemos la otra, el hijo se bloquea.
-            DispatchQueue.global().async {
-                nonisolated(unsafe) var e = Data()
-                let g = DispatchGroup()
-                DispatchQueue.global().async(group: g) { e = err.fileHandleForReading.readDataToEndOfFile() }
-                let o = out.fileHandleForReading.readDataToEndOfFile()
-                g.wait()
-                p.waitUntilExit()
+            g.enter()
+            Thread.detachNewThread { box.setOut(out.fileHandleForReading.readDataToEndOfFile()); g.leave() }
+            g.enter()
+            Thread.detachNewThread { box.setErr(err.fileHandleForReading.readDataToEndOfFile()); g.leave() }
+            g.notify(queue: .global()) {
                 cont.resume(returning: Output(status: p.terminationStatus,
-                                              stdout: String(decoding: o, as: UTF8.self),
-                                              stderr: String(decoding: e, as: UTF8.self)))
+                                              stdout: String(decoding: box.out, as: UTF8.self),
+                                              stderr: String(decoding: box.err, as: UTF8.self)))
             }
         }
+    }
+
+    /// Lo leído por los dos hilos; el grupo garantiza que se lee al final.
+    private final class Collected: @unchecked Sendable {
+        private let lock = NSLock()
+        private var o = Data(), e = Data()
+        func setOut(_ d: Data) { lock.withLock { o = d } }
+        func setErr(_ d: Data) { lock.withLock { e = d } }
+        var out: Data { lock.withLock { o } }
+        var err: Data { lock.withLock { e } }
     }
 
     /// `/usr/bin/env <tool>`, para lo que vive en el PATH.

@@ -157,10 +157,20 @@ enum Synth {
     }
 
     static func pfs0(_ names: [String]) -> Data {
-        let (strs, offs) = strings(names)
-        var d = Data("PFS0".utf8) + le32(UInt32(names.count)) + le32(UInt32(strs.count)) + le32(0)
-        for (i, _) in names.enumerated() { d += le64(UInt64(i)) + le64(1) + le32(offs[i]) + le32(0) }
-        return d + strs + Data(repeating: 0, count: names.count)
+        pfs0Files(names.map { ($0, Data(repeating: 0, count: 1)) })
+    }
+
+    static func pfs0Files(_ files: [(String, Data)]) -> Data {
+        let (strs, offs) = strings(files.map(\.0))
+        var d = Data("PFS0".utf8) + le32(UInt32(files.count)) + le32(UInt32(strs.count)) + le32(0)
+        var off: UInt64 = 0
+        for (i, f) in files.enumerated() {
+            d += le64(off) + le64(UInt64(f.1.count)) + le32(offs[i]) + le32(0)
+            off += UInt64(f.1.count)
+        }
+        d += strs
+        for f in files { d += f.1 }
+        return d
     }
 
     static func hfs0(_ files: [(String, Data)]) -> Data {
@@ -177,7 +187,11 @@ enum Synth {
     }
 
     static func xci(secure: [String], keyArea: Bool = false) -> Data {
-        let secureData = hfs0(secure.map { ($0, Data(repeating: 0xAB, count: 4)) })
+        xciFiles(secure: secure.map { ($0, Data(repeating: 0xAB, count: 4)) }, keyArea: keyArea)
+    }
+
+    static func xciFiles(secure: [(String, Data)], keyArea: Bool = false) -> Data {
+        let secureData = hfs0(secure)
         let root = hfs0([("update", hfs0([])), ("normal", hfs0([])), ("secure", secureData)])
         var header = Data(repeating: 0, count: 0x200)
         header.replaceSubrange(0x100..<0x104, with: Data("HEAD".utf8))
@@ -187,6 +201,14 @@ enum Synth {
         header.replaceSubrange(0x130..<0x138, with: le64(0x200))
         return Data(repeating: 0, count: prefix) + header + root
     }
+
+    /// Cabeceras NCA3 sintéticas (title ID 010076F0049A2000 y su actualización
+    /// …800, keyrev 14) cifradas XTS con `cryptography` —la implementación de
+    /// referencia, no el AES128 de NXCore— bajo `testKeyHex`. Son el punto de
+    /// comprobación de `NCAHeader` y del descifrado entero.
+    static let testKeyHex = "202326292c2f3235383b3e4144474a4d505356595c5f6265686b6e7174777a7d"
+    static let cnmtBaseCT = Data(hex: "a1648ea9abda647587ad4df847d5a2b1bc58af660fd73114344a98e0fec1d722dcfccfd29a4f2bb5552c6287728c7b7df1edcec5bbd8bc5770e682bc92a9a1cabca8c18abebf432596eab38edb95b4664a22e1475d040c4758328705112c988c88c44dda8b022489185933a2fd202d27b0c7e878f3b5d9d5760138b5236df5da8a303fa1bda52203b6fff37042d57cd1eb3188e2be32f806fe82106e796dc38667af5e6223e454140f34fc802fda33e9b5f6e63ab3b3f50713c79dc7f66bb62010db87e3cd1a6f7f088b13c4d178666f3bf90ac6e61008617bd84bddf15eff1ff08efa399f3014205f6ae34d2ad4c42b697707ed64f5825210b46ddffa551c2a61abf26801aa82c63f6f369bbcbcbbd2874bc19fe0e212a9bd56375ef715ded57242956129863b3ffedbc0a3005f41d52af8a17087a037b68531533fb589ff7d5351d8aa28c595af70d3afd3397a6bd962bca0cf33f7799cae2622e4d3fd1e5ae2c3b21275fb3fe6a2ea4fea89c7ea391176478fd76a3e46935d98b354fbc823597509cb3596773779cb917b6ff3697d394518b4114214ee4786f4376adb95a85757c563657f4a6f557adcbbfa6de6eb9c3b86f43e2a61a6d7ed632d88cbcee7c5c1b4c9067ae5e88b67259eac7a0a694fad596817d324eba4a25170e499ab810f55829e86416e53a27b8c3fec49415e54a7f0e37efc9d141a3e372a2bcb987323123ae426c886eba988a839d7739fbc4becc380d6b6cc2b3854d2483abc1875ea589999685dac09c7595a1638e22c530251c813c13b350055cf362e64a16d5855f12576005ed101bdb5fdf755a79272fdece06bf85f77a67b4f9aa5e18ff2c4a036377c3b299af98477f870bbf1eccfdf7d635b80b3cf43b2697041cc0444e9c3c01f76ccd41e89670b1d96899f6ce764182834d87c696bd2a96bde279058b76850f58a5aebcf51780d492d86b27d98c47e07406c0c3e1bfea9d27101c3c40eee29dc02fc966349edfa0b299a9c08f3aac32dbd25e3cb9143f61abd65ccb7429cea50038648a74552b5c217463d3dcdbaf03a1acb896f95fda794f4d4e519ac2b9e86f7739ade9f522e21d82e7393c058da3462c82dd1f5e2d2a10bf57769f6c17955fc7527d54463b03973d2f5f90ce463d016b6a2f93f2077b2c70f205f02f11b58fd198494cd2534ffac2ce4034125aa84aa4963cb9383837ac5494d5ae48b5e81188bb68d362a42a9f82ad400157c24f6f46225adb866b6d585b52a8276aca399c80217a6326ea4b04fd8f8c223fee58d24dcb26caa196caf054a21616a14b8dcea59aa68d8aad583d111bbc0b411224377887814a876c942925e7a2cb1973f78fe92e78fd1c418b9c8f114ce061b6d591454edf5917866d3344c1189b3eb6861b59cc5b09b849e849131efb15d70d71fa78cfb15c435436758173eb385")!
+    static let cnmtUpdateCT = Data(hex: "a1648ea9abda647587ad4df847d5a2b1bc58af660fd73114344a98e0fec1d722dcfccfd29a4f2bb5552c6287728c7b7df1edcec5bbd8bc5770e682bc92a9a1cabca8c18abebf432596eab38edb95b4664a22e1475d040c4758328705112c988c88c44dda8b022489185933a2fd202d27b0c7e878f3b5d9d5760138b5236df5da8a303fa1bda52203b6fff37042d57cd1eb3188e2be32f806fe82106e796dc38667af5e6223e454140f34fc802fda33e9b5f6e63ab3b3f50713c79dc7f66bb62010db87e3cd1a6f7f088b13c4d178666f3bf90ac6e61008617bd84bddf15eff1ff08efa399f3014205f6ae34d2ad4c42b697707ed64f5825210b46ddffa551c2a61abf26801aa82c63f6f369bbcbcbbd2874bc19fe0e212a9bd56375ef715ded57242956129863b3ffedbc0a3005f41d52af8a17087a037b68531533fb589ff7d5351d8aa28c595af70d3afd3397a6bd962bca0cf33f7799cae2622e4d3fd1e5ae2c3b21275fb3fe6a2ea4fea89c7ea391176478fd76a3e46935d98b354fbc823597509cb3596773779cb917b6ff3697d394518b4114214ee4786f4376adb95a85757c563657f4a6f557adcbbfa6de6eb9c3b86f43e2a61a6d7ed632d88cbcee7c5c1b4c9067ae5e88b67259eac7a0a694fad596817d324eba4a25170e499ab810f55829e86416e53a27b8c3fec49415e54a7f0e37efc9d141a3e372a2bcb987323123ae426c886eba988a839d7739fbcec90557037adc7cbf55552477762c727ea589999685dac09c7595a1638e22c530251c813c13b350055cf362e64a16d5855f12576005ed101bdb5fdf755a79272fdece06bf85f77a67b4f9aa5e18ff2c4a036377c3b299af98477f870bbf1eccfdf7d635b80b3cf43b2697041cc0444e9c3c01f76ccd41e89670b1d96899f6ce764182834d87c696bd2a96bde279058b76850f58a5aebcf51780d492d86b27d98c47e07406c0c3e1bfea9d27101c3c40eee29dc02fc966349edfa0b299a9c08f3aac32dbd25e3cb9143f61abd65ccb7429cea50038648a74552b5c217463d3dcdbaf03a1acb896f95fda794f4d4e519ac2b9e86f7739ade9f522e21d82e7393c058da3462c82dd1f5e2d2a10bf57769f6c17955fc7527d54463b03973d2f5f90ce463d016b6a2f93f2077b2c70f205f02f11b58fd198494cd2534ffac2ce4034125aa84aa4963cb9383837ac5494d5ae48b5e81188bb68d362a42a9f82ad400157c24f6f46225adb866b6d585b52a8276aca399c80217a6326ea4b04fd8f8c223fee58d24dcb26caa196caf054a21616a14b8dcea59aa68d8aad583d111bbc0b411224377887814a876c942925e7a2cb1973f78fe92e78fd1c418b9c8f114ce061b6d591454edf5917866d3344c1189b3eb6861b59cc5b09b849e849131efb15d70d71fa78cfb15c435436758173eb385")!
 }
 
 @Suite struct ContainerTests {
@@ -343,5 +365,226 @@ enum Synth {
     @Test func redAfterTimestamp() {
         #expect(BuildEventParser.isError("[12:00:00] [RED] no keys"))
         #expect(!BuildEventParser.isError("[12:00:00] fine [RED] later"))
+    }
+}
+
+/// La parte del escaneo que necesita `prod.keys`: el AES-128/XTS de NXCore,
+/// el parseo del archivo de claves y la identificación de archivos sin
+/// etiqueta ni ticket. Las cabeceras cifradas vienen de `cryptography`
+/// (referencia), no del propio código, así el test no es circular.
+@Suite struct KeysetTests {
+    let dir: URL = {
+        let d = FileManager.default.temporaryDirectory.appendingPathComponent("nxcore-keys-\(UUID().uuidString)", isDirectory: true)
+        try! FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }()
+
+    func write(_ name: String, _ data: Data) throws -> URL {
+        let u = dir.appendingPathComponent(name)
+        try data.write(to: u)
+        return u
+    }
+
+    var keys: Keyset {
+        get throws { try #require(Keyset(text: "header_key = \(Synth.testKeyHex)")) }
+    }
+
+    /// El vector oficial de la FIPS-197, en los dos sentidos: es la primitiva
+    /// de la que depende todo lo demás aquí.
+    @Test func aesFipsVector() throws {
+        let aes = AES128(try #require(Data(hex: "000102030405060708090a0b0c0d0e0f")))
+        let p = try #require(Data(hex: "00112233445566778899aabbccddeeff"))
+        let c = try #require(Data(hex: "69c4e0d86a7b0430d8cdb78070b4c55a"))
+        #expect(Data(aes.encrypt([UInt8](p))) == c)
+        #expect(Data(aes.decrypt([UInt8](c))) == p)
+    }
+
+    /// Solo se acepta un `header_key` de 32 bytes; el resto del archivo sobra
+    /// y las entradas sin `= no rompen nada.
+    @Test func keysetParses() {
+        #expect(Keyset(text: "línea suelta\nmaster_key_00 = aabbcc\nheader_key = \(Synth.testKeyHex)\n")?.headerKey.count == 32)
+        #expect(Keyset(text: "header_key = aabb") == nil)
+        #expect(Keyset(text: "nada=1") == nil)
+    }
+
+    /// Un XCI solo se sabe por el nombre; con las claves sale de su cnmt.
+    /// Un NSP sin ticket (de los que se convierten desde cartucho) igual.
+    @Test func cartridgeAndTicketlessNSPResolve() throws {
+        let keys = try self.keys
+        let xci = try write("Mario Kart 8.xci", Synth.xciFiles(secure: [("a.nca", Data(repeating: 0, count: 4)), ("m.cnmt.nca", Synth.cnmtBaseCT)]))
+        let f = GameFile(url: xci, size: 100, keyset: keys)
+        #expect(f.titleID?.description == "010076F0049A2000")
+        #expect(f.source == .keyset)
+        // Sin claves sigue sin identificarse: el escaneo no cambia para el resto.
+        #expect(GameFile(url: xci, size: 100).titleID == nil)
+
+        let nsp = try write("Kirby and the Forgotten Land.nsp", Synth.pfs0Files([("a.nca", Data(repeating: 0, count: 4)), ("m.cnmt.nca", Synth.cnmtBaseCT)]))
+        let g = GameFile(url: nsp, size: 100, keyset: keys)
+        #expect(g.titleID?.description == "010076F0049A2000")
+        #expect(g.source == .keyset)
+    }
+
+    /// Un «1G+1U» trae base y actualización: el cartucho es la base aunque la
+    /// actualización venga primero en la tabla.
+    @Test func baseWinsInMultiContentCartridge() throws {
+        let keys = try self.keys
+        let u = try write("Cart.xci", Synth.xciFiles(secure: [("upd.cnmt.nca", Synth.cnmtUpdateCT), ("base.cnmt.nca", Synth.cnmtBaseCT)]))
+        #expect(GameFile(url: u, size: 100, keyset: keys).titleID?.description == "010076F0049A2000")
+    }
+
+    /// Con una clave que no vale no sale la magia NCA3 y el archivo queda sin
+    /// identificar, no identificado de mentira.
+    /// Regla de la carpeta para el script: ticket o etiqueta la hacen legible
+    /// tal cual; claves o asignación a mano no (el script no los lee).
+    @Test func scriptReadabilityFollowsTheSource() throws {
+        let tick = try write("T.nsp", Synth.pfs0(["0100AAAA000000000000000000000004.tik"]))
+        let tagged = try write("B [0100BBBB00000000].xci", Synth.xci(secure: []))
+        let plain = try write("C.xci", Synth.xci(secure: []))
+        let k = try self.keys
+        let byTicket = GameFile(url: tick, size: 100)
+        let byName = GameFile(url: tagged, size: 100)
+        let byKeys = GameFile(url: plain, size: 100, keyset: k)
+        let byHand = GameFile(url: plain, size: 100).assigning(TitleID("0100CCCC00000000")!)
+        for (f, esperado) in [(byTicket, true), (byName, true), (byKeys, false), (byHand, false)] {
+            let g = GameEntry(base: f.titleID ?? TitleID("0100999900000000")!, files: [f], ownFolder: nil)
+            #expect(g.scriptReadable == esperado, Comment(rawValue: "\(f.url.lastPathComponent): fuera \(f.source.map(String.init(describing:)) ?? "nil")"))
+        }
+    }
+
+    @Test func wrongKeyIdentifiesNothing() throws {
+        let wrong = try #require(Keyset(text: "header_key = " + String(repeating: "ab", count: 32)))
+        let xci = try write("Mario Kart 8.xci", Synth.xciFiles(secure: [("m.cnmt.nca", Synth.cnmtBaseCT)]))
+        #expect(GameFile(url: xci, size: 100, keyset: wrong).titleID == nil)
+    }
+}
+
+@Suite struct SaveVaultTests {
+    let base: URL = {
+        let d = FileManager.default.temporaryDirectory.appendingPathComponent("nxvault-\(UUID().uuidString)", isDirectory: true)
+        try! FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }()
+    var save: URL { base.appendingPathComponent("support/save", isDirectory: true) }
+    var vault: SaveVault { SaveVault(root: base.appendingPathComponent("backups"), keepAuto: 3) }
+    let tid = "0100AAAA00000000"
+
+    func writeSave(_ text: String, file: String = "slot0/data.bin") throws {
+        let u = save.appendingPathComponent(file)
+        try FileManager.default.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(text.utf8).write(to: u)
+    }
+
+    func t(_ s: Int) -> Date { Date(timeIntervalSince1970: 1_800_000_000 + Double(s)) }
+
+    @Test func noSaveNoBackup() async throws {
+        #expect(try await vault.autoBackup(saveDir: save, titleID: tid, game: "A", version: "1.0", now: t(0)) == nil)
+        #expect(vault.list(tid).isEmpty)
+    }
+
+    /// La automática se salta si nada cambió, y vuelve a copiar si cambió.
+    @Test func autoSkipsUnchanged() async throws {
+        try writeSave("uno")
+        let first = try await vault.autoBackup(saveDir: save, titleID: tid, game: "A", version: "1.0", now: t(0))
+        #expect(first != nil)
+        #expect(try await vault.autoBackup(saveDir: save, titleID: tid, game: "A", version: "1.0", now: t(10)) == nil)
+        try writeSave("dos, más largo")
+        #expect(try await vault.autoBackup(saveDir: save, titleID: tid, game: "A", version: "1.0", now: t(20)) != nil)
+        #expect(vault.list(tid).map(\.kind) == [.auto, .auto])
+        let firstURL = try #require(first)
+        let m = try #require(await SaveVault.manifest(of: firstURL))
+        #expect(m.titleID == tid && m.files == 1 && m.bytes == 3 && m.game == "A")
+    }
+
+    /// Solo se podan las automáticas; las manuales se quedan.
+    @Test func pruneKeepsManual() async throws {
+        try writeSave("x")
+        try await vault.backup(saveDir: save, titleID: tid, game: "A", version: "", kind: .manual, now: t(0))
+        for i in 1...5 {
+            try writeSave(String(repeating: "x", count: i + 1))
+            try await vault.autoBackup(saveDir: save, titleID: tid, game: "A", version: "", now: t(i * 10))
+        }
+        let l = vault.list(tid)
+        #expect(l.filter { $0.kind == .auto }.count == 3)
+        #expect(l.filter { $0.kind == .manual }.count == 1)
+        #expect(l.first?.date == t(50))
+    }
+
+    @Test func sameSecondDoesNotOverwrite() async throws {
+        try writeSave("x")
+        try await vault.backup(saveDir: save, titleID: tid, game: "A", version: "", kind: .manual, now: t(0))
+        try await vault.backup(saveDir: save, titleID: tid, game: "A", version: "", kind: .manual, now: t(0))
+        #expect(vault.list(tid).count == 2)
+    }
+
+    /// Restaurar deja la partida de la copia, y guarda antes la que había.
+    @Test func restoreKeepsPrevious() async throws {
+        try writeSave("vieja")
+        let old = try #require(try await vault.backup(saveDir: save, titleID: tid, game: "A", version: "", kind: .manual, now: t(0)))
+        try writeSave("nueva")
+        try await vault.restore(old, saveDir: save, titleID: tid, game: "A", version: "")
+        #expect(try String(contentsOf: save.appendingPathComponent("slot0/data.bin"), encoding: .utf8) == "vieja")
+        let kinds = vault.list(tid).map(\.kind)
+        #expect(kinds.contains(.beforeRestore))
+    }
+
+    /// Exportar e importar en otra «instalación», y negarse con otro juego.
+    @Test func exportImportAndWrongGame() async throws {
+        try writeSave("partida")
+        let out = base.appendingPathComponent("Mi partida.zip")
+        try await vault.export(saveDir: save, titleID: tid, game: "A", version: "1.0", to: out)
+        try FileManager.default.removeItem(at: save)   // un desinstalador se la llevó
+        try await vault.restore(out, saveDir: save, titleID: tid, game: "A", version: "1.0")
+        #expect(try String(contentsOf: save.appendingPathComponent("slot0/data.bin"), encoding: .utf8) == "partida")
+
+        await #expect(throws: SaveVault.SaveError.otherGame(expected: "0100BBBB00000000", found: tid, game: "A")) {
+            try await vault.restore(out, saveDir: save, titleID: "0100BBBB00000000", game: "B", version: "")
+        }
+    }
+
+    @Test func notASave() async throws {
+        let junk = base.appendingPathComponent("junk")
+        try FileManager.default.createDirectory(at: junk, withIntermediateDirectories: true)
+        try Data("hola".utf8).write(to: junk.appendingPathComponent("readme.txt"))
+        let zip = base.appendingPathComponent("junk.zip")
+        _ = await Shell.run("/usr/bin/ditto", ["-c", "-k", junk.path, zip.path])
+        await #expect(throws: SaveVault.SaveError.notASave) {
+            try await vault.restore(zip, saveDir: save, titleID: tid, game: "A", version: "")
+        }
+    }
+}
+
+@Suite struct ButtonGlyphsTests {
+    @Test func readAndWrite() throws {
+        var env = EnvFile(text: "DM_RUMBLE=0\n")
+        #expect(ButtonGlyphs.current(in: env) == .nintendo)
+        ButtonGlyphs.playstation.apply(to: &env)
+        #expect(env[ButtonGlyphs.envKey] == ButtonGlyphs.playstation.font?.path)
+        #expect(ButtonGlyphs.current(in: env) == .playstation)
+        ButtonGlyphs.nintendo.apply(to: &env)
+        #expect(env.text == "DM_RUMBLE=0\n")   // volver a Switch deja el archivo como estaba
+    }
+
+    /// Una fuente puesta a mano no es «nintendo» ni «playstation»: no se pisa.
+    @Test func handSetFontIsRespected() {
+        let env = EnvFile(text: "DM_SHARED_FONT_EXT=/Users/x/mi_fuente.ttf\n")
+        #expect(ButtonGlyphs.current(in: env) == nil)
+    }
+
+    /// Con el generador real del checkout y el Python de la app, si están.
+    @Test func generatesWithRealScript() async throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<5 { root.deleteLastPathComponent() }
+        let repo = NXRepository(root: root)
+        try #require(FileManager.default.isExecutableFile(atPath: PythonEnv.python), "sin el venv de la app; se omite")
+        try #require(await PythonEnv.missingPackages(PythonEnv.python).isEmpty, "venv sin fonttools; se omite")
+        let font = try #require(ButtonGlyphs.playstation.font)
+        try? FileManager.default.removeItem(at: font)
+        try await ButtonGlyphs.playstation.ensureFont(repository: repo, python: PythonEnv.python)
+        let size = (try FileManager.default.attributesOfItem(atPath: font.path)[.size] as? NSNumber)?.intValue ?? 0
+        #expect(size > 1000)
+        // La segunda vez no regenera: la fecha no cambia.
+        let before = try FileManager.default.attributesOfItem(atPath: font.path)[.modificationDate] as? Date
+        try await ButtonGlyphs.playstation.ensureFont(repository: repo, python: PythonEnv.python)
+        #expect(try FileManager.default.attributesOfItem(atPath: font.path)[.modificationDate] as? Date == before)
     }
 }

@@ -81,7 +81,7 @@ struct GameDetailView: View {
                 .controlSize(.large)
             } else {
                 Button {
-                    model.runner.launch(game)
+                    model.play(game)
                     tab = .log
                 } label: {
                     Label("Jugar", systemImage: "play.fill")
@@ -107,6 +107,7 @@ struct SettingsFormView: View {
                         ForEach(section.settings) { SettingRow(store: store, setting: $0) }
                     }
                 }
+                ButtonGlyphsSection(store: store)
                 Section {
                     HStack {
                         Text("Se guardan en \(store.game.userEnv.path) y valen también al abrir el juego desde Finder. Solo se escribe lo que difiere del valor probado.")
@@ -126,6 +127,37 @@ struct SettingsFormView: View {
 
     private func sectionTitle(_ s: String) -> String {
         ["Game": "Juego", "Controls": "Controles", "Performance": "Rendimiento"][s] ?? s
+    }
+}
+
+/// Iconos de botones en el texto del juego: los de Switch o los de un mando
+/// de Sony en la misma posición. No viene de launcher.json: es de esta app.
+struct ButtonGlyphsSection: View {
+    @Environment(AppModel.self) private var model
+    @Bindable var store: GameSettingsStore
+    @State private var busy = false
+
+    var body: some View {
+        Section("Iconos de botones") {
+            if let current = store.buttonGlyphs {
+                Picker("Mando", selection: Binding(get: { current }, set: { style in
+                    Task {
+                        busy = true
+                        await store.setButtonGlyphs(style, repository: model.repository, python: model.toolchain.python)
+                        busy = false
+                    }
+                })) {
+                    Text("Switch (A B X Y)").tag(ButtonGlyphs.nintendo)
+                    Text("PlayStation (○ ✕ △ □)").tag(ButtonGlyphs.playstation)
+                }
+                .disabled(busy)
+            } else {
+                Text("El env.txt de este juego apunta a otra fuente (\(ButtonGlyphs.envKey)), puesta a mano: se respeta. Para volver a elegir aquí, quita esa línea en Avanzado.")
+                    .foregroundStyle(.secondary)
+            }
+            Text("Los botones se asignan por posición: el de la derecha es A (○), abajo B (✕), arriba X (△), izquierda Y (□); L/R y ZL/ZR son L1/R1 y L2/R2. Cambia los juegos que dibujan los botones con la fuente del sistema (los de Nintendo, sobre todo); un juego con sus propias imágenes de botones sigue enseñando las suyas. Vale desde el siguiente arranque.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
     }
 }
 

@@ -84,7 +84,7 @@ struct EnvironmentView: View {
             } header: {
                 Text("Claves y herramientas")
             } footer: {
-                Text("Las claves salen de TU consola. La app guarda solo la ruta y nunca abre el archivo: se lo pasa al script con -k.")
+                Text("Las claves salen de TU consola. La app guarda la ruta y solo lee header_key, para descifrar la cabecera del NCA de metadatos e identificar archivos sin etiqueta; nunca muestra los valores. Al script se lo pasa con -k.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
@@ -99,6 +99,17 @@ struct EnvironmentView: View {
 
             Section("Dónde buscar apps de juego") {
                 FolderList(paths: $prefs.appRoots)
+            }
+
+            Section {
+                PathRow(label: "Copias de partidas", path: $prefs.backupsPath, directory: true,
+                        placeholder: SaveVault.defaultRoot.path)
+                Toggle("Copia automática al jugar y al reconstruir", isOn: $prefs.autoBackup)
+            } header: {
+                Text("Partidas")
+            } footer: {
+                Text("Una carpeta en iCloud Drive o en otro disco hace que las copias sobrevivan a un desinstalador que limpie Application Support o a un cambio de Mac. Las copias que ya existan no se mueven solas.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
 
             Section("Firma de las apps de Mac") {

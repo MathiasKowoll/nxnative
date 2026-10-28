@@ -10,8 +10,9 @@ la interfaz que nxnative documenta para front ends (`docs/frontends.md`). Si
 nxnative cambia esa interfaz, el punto de contacto está en `Sources/NXCore`.
 
 > Juegos y claves son tuyos. La app no incluye ni descarga nada de ningún
-> juego, y de `prod.keys` solo guarda la **ruta**: nunca abre el archivo, se lo
-> pasa al script con `-k`.
+> juego, y de `prod.keys` solo guarda la **ruta**: lee `header_key` para
+> identificar archivos sin etiqueta (los valores no se muestran ni se
+> registran) y el archivo entero se lo pasa al script con `-k`.
 
 ## Qué hace
 
@@ -32,11 +33,15 @@ nxnative cambia esa interfaz, el punto de contacto está en `Sources/NXCore`.
   enlace lleva `[title ID][vN]`, que es lo que lee el script cuando no hay
   ticket. Se pone al día antes de cada build. Comprobado contra el script
   real: la busca por el ticket y `nx_extract` abre el destino del enlace.
-- **Title ID sin claves.** De un NSP/NSZ se lee el ticket de su PFS0 (gana a
-  la etiqueta del nombre, como en `title_of()`). Un XCI lo guarda en NCAs
-  cifrados, así que sin claves solo se sabe por el nombre; si no lo lleva, la
-  app sugiere uno por nombre desde la tabla de compatibilidad y el jugador lo
-  confirma. De un XCI sí se lee sin claves cuántos contenidos trae su
+- **Title ID.** De un NSP/NSZ se lee el ticket de su PFS0 (gana a la etiqueta
+  del nombre, como en `title_of()`). Si el archivo no lo dice por fuera —un
+  XCI nunca lo dice, y hay NSP convertidos desde cartucho que no traen
+  ticket— la app descifra la cabecera de su NCA de metadatos con la
+  `header_key` del `prod.keys` configurado: 0x400 bytes por archivo, nunca el
+  contenido (AES-XTS-128 propio, `Sources/NXCore/NCAHeader.swift`). Si aun así
+  no sale —no hay claves configuradas o no valen para ese archivo— la app
+  sugiere uno por nombre desde la tabla de compatibilidad y el jugador lo
+  confirma. De un XCI se lee además sin claves cuántos contenidos trae su
   partición `secure`: más de uno es un «1G+1U», y nxnative solo usa la base.
 
 - **Ajustes de juego**: se dibujan desde `Contents/Resources/dm/launcher.json`
@@ -45,6 +50,21 @@ nxnative cambia esa interfaz, el punto de contacto está en `Sources/NXCore`.
   Finder. Como la app del iPhone, solo se escribe lo que difiere del valor
   probado, para que un build nuevo pueda mejorar los valores por defecto. Las
   líneas escritas a mano en ese archivo se conservan.
+- **HUD de Metal.** macOS mete `MTL_HUD_ENABLED=0` en el entorno de toda
+  app que abre LaunchServices, y Metal lee esa variable al cargar su librería,
+  antes que los constructores del host: el `setenv` del host (sin
+  sobrescribir) nunca lo encendía, aunque el log dijera «HUD on». La app lo
+  pasa en el entorno del arranque, y el lanzador de nxnative de este fork lo
+  pone él mismo (sobrescribiendo), así que también sale al abrir el juego
+  desde Finder en apps construidas después del cambio. Comprobado con capturas,
+  por las dos vías de presentado (clásica y Metal 4).
+- **Iconos de botones de PlayStation.** `make_ext_font.py --style playstation`
+  dibuja, en los mismos puntos de código, el símbolo del botón de un mando de
+  Sony en la misma posición (el host asigna por posición: A = ○, B = ✕,
+  X = △, Y = □). La app la genera en
+  `~/Library/Application Support/NXNativeMac/fonts/` y la activa por juego con
+  `DM_SHARED_FONT_EXT`, sin reconstruir. Solo cambia los juegos que dibujan
+  los botones con la fuente del sistema.
 - **El parser de `env.txt` replica `env_file()` de `dm/mac/launcher.c`**: gana
   la primera aparición, `#` comenta, la clave pierde los espacios finales.
 - **Los juegos se abren por LaunchServices**, no como hijos de esta app: el
@@ -53,8 +73,23 @@ nxnative cambia esa interfaz, el punto de contacto está en `Sources/NXCore`.
   `docs/development.md`). Detener envía SIGTERM al lanzador, que lo reenvía.
 - **El log se colorea, no se interpreta.** nxnative avisa de que sus líneas son
   diagnóstico para personas y no una interfaz.
-- **Restaurar una partida** hace antes una copia de la actual y manda la
-  carpeta vieja a la Papelera: es la única operación que podría perder datos.
+- **Partidas.** Viven en `~/Library/Application Support/nxnative/<title ID>/save`,
+  fuera de la app: reinstalar o reconstruir el juego no las toca. Lo que sí
+  las borra es un desinstalador que limpie Application Support, borrar la
+  carpeta o cambiar de Mac sin migrarla. Por eso:
+  - **Copia automática** antes de jugar desde la app y antes de reconstruir un
+    juego instalado, solo si la partida cambió desde la última (se compara
+    una huella de rutas, tamaños y fechas, sin leer el contenido). Se guardan
+    las 10 más nuevas; las manuales no se borran nunca.
+  - **Exportar / Importar**: un zip con `save/` y `nxnative-save.json`
+    (title ID, juego, versión, huella) que puedes guardar donde quieras.
+    Importar la partida de otro juego se rechaza.
+  - **La carpeta de copias se cambia en Entorno**: en iCloud Drive o en otro
+    disco sobrevive a lo que borre Application Support.
+  - **Restaurar o importar** copia antes la partida actual y manda la carpeta
+    vieja a la Papelera: dos caminos de vuelta.
+  - El build de desarrollo (`--platform mac`) guarda en otro sitio,
+    `<title ID>_build/run/save`, y no es la misma partida que la de la app.
 
 ## Compilar
 
@@ -82,6 +117,7 @@ Sources/NXCore/        Formatos de nxnative, sin UI (se prueba solo)
   EnvFile.swift          env.txt, con las reglas del lanzador
   LauncherSettings.swift dm/launcher.json
   TitleID.swift          title IDs y carpetas NSP
+  NCAHeader.swift        title ID con claves (AES-XTS-128 propio)
   MacGameBundle.swift    apps de juego empaquetadas y sus rutas
   Repository.swift       el checkout: perfiles, tabla de juegos, chain lock, interruptores
   BuildOptions.swift     opciones → argumentos del script

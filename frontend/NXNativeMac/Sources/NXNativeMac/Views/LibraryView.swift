@@ -38,7 +38,7 @@ struct LibraryView: View {
     }
 
     @ViewBuilder private func tileMenu(_ game: MacGameBundle) -> some View {
-        Button("Jugar") { model.runner.launch(game) }
+        Button("Jugar") { model.play(game) }
         Button("Mostrar en Finder") { Finder.reveal(game.url) }
         Button("Abrir el log") { Finder.open(game.log) }
     }

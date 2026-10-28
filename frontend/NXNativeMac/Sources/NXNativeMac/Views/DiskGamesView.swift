@@ -154,7 +154,7 @@ struct GameOnDiskView: View {
                                     Text(url.lastPathComponent)
                                     Spacer()
                                     if url.pathExtension == "app", let g = MacGameBundle(url: url) {
-                                        Button("Jugar") { model.runner.launch(g) }
+                                        Button("Jugar") { model.play(g) }
                                     }
                                     Button("Mostrar") { Finder.reveal(url) }
                                 }
@@ -259,6 +259,7 @@ struct GameOnDiskView: View {
         switch f.source {
         case .ticket: "ticket"
         case .fileName: "nombre"
+        case .keyset: "claves"
         case .assigned: "asignado"
         case nil: ""
         }
@@ -281,9 +282,10 @@ struct GameOnDiskView: View {
     }
 }
 
-/// Archivos sin title ID legible. Un NSP lo lleva en su ticket; un XCI solo
-/// en el nombre, porque el resto está en NCAs cifrados. Aquí se asigna a mano,
-/// con una sugerencia por nombre desde la tabla de compatibilidad.
+/// Archivos sin title ID legible: sin etiqueta en el nombre, sin ticket (los
+/// pocos NSP que no lo traen) y con el NCA de metadatos que no descifra el
+/// `prod.keys` configurado. Aquí se asigna a mano, con una sugerencia por
+/// nombre desde la tabla de compatibilidad.
 struct UnidentifiedView: View {
     @Environment(AppModel.self) private var model
     @State private var typed: [URL: String] = [:]
@@ -291,7 +293,7 @@ struct UnidentifiedView: View {
     var body: some View {
         Form {
             Section {
-                Text("Un XCI guarda su title ID dentro de NCAs cifrados, así que sin claves solo se sabe por el nombre del archivo. Asígnalo aquí: la app no renombra el archivo, lo pone en el nombre del enlace que ve nxnative. Si te equivocas, el script lo detecta al comparar los build IDs con el perfil.")
+                Text("Con el prod.keys configurado en Entorno la app identifica sola estos archivos descifrando la cabecera de su NCA de metadatos; sin claves solo se sabe por el nombre o el ticket. Los que quedan aquí se asignan a mano: la app no renombra el archivo, lo pone en el nombre del enlace que ve nxnative. Si te equivocas, el script lo detecta al comparar los build IDs con el perfil.")
                     .font(.callout).foregroundStyle(.secondary)
             }
             ForEach(model.unidentified) { f in
