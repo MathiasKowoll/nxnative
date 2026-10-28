@@ -46,6 +46,24 @@ final class GameSettingsStore {
         save()
     }
 
+    // MARK: iconos de botones
+
+    /// nil = el env.txt apunta a una fuente puesta a mano, que no se toca.
+    var buttonGlyphs: ButtonGlyphs? { ButtonGlyphs.current(in: env) }
+
+    func setButtonGlyphs(_ style: ButtonGlyphs, repository: NXRepository, python: String?) async {
+        do {
+            if style.font != nil {
+                guard let python else { throw NSError(domain: "NXNativeMac", code: 21, userInfo: [NSLocalizedDescriptionKey: "Hace falta Python con fonttools: pulsa «Preparar Python» en Entorno."]) }
+                try await style.ensureFont(repository: repository, python: python)
+            }
+            style.apply(to: &env)
+            save()
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
     var rawText: String { env.text }
 
     func saveRaw(_ text: String) {

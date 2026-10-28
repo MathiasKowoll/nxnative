@@ -27,7 +27,13 @@ final class GameRunner {
     }
 
     func isRunning(_ game: MacGameBundle) -> Bool {
-        if running[game.titleID] != nil { return true }
+        // La notificación de término de NSWorkspace se puede perder (firma
+        // ad-hoc, salidas por crash): se confirma con isTerminated antes de
+        // creerle al caché, si no el juego se queda «corriendo» para siempre.
+        if let app = running[game.titleID] {
+            if !app.isTerminated { return true }
+            running[game.titleID] = nil
+        }
         // Arrancada desde Finder o desde otra sesión de la app.
         if let app = NSWorkspace.shared.runningApplications.first(where: {
             $0.bundleURL?.standardizedFileURL == game.url.standardizedFileURL }) {
