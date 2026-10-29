@@ -110,8 +110,15 @@ final class Toolchain {
             )
         }
 
-        // El checkout de nxnative.
-        if repo.isValid {
+        // El checkout de nxnative. El payload incluido no es un checkout Git y
+        // no debe intentar ejecutar git dentro de Contents/Resources.
+        if repo.isBundled {
+            repoStatus = "toolchain incluida en NXNativeMac.app"
+            out.append(Check(id: "repo", title: "nxnative", status: .ok,
+                             detail: "Incluida dentro de esta app; no depende de otro checkout."))
+            out.append(Check(id: "profiles", title: "Perfiles", status: .info,
+                             detail: "\(repo.profiles().count) perfiles de juego incluidos"))
+        } else if repo.isValid {
             let head = await Shell.run("/usr/bin/git", ["-C", repo.root.path, "log", "-1", "--format=%h %cs %s"])
             let branch = await Shell.run("/usr/bin/git", ["-C", repo.root.path, "rev-parse", "--abbrev-ref", "HEAD"])
             repoStatus = head.stdout.trimmingCharacters(in: .whitespacesAndNewlines)

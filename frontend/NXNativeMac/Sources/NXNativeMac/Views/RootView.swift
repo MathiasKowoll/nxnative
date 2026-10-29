@@ -1,11 +1,12 @@
 import SwiftUI
 
 enum SidebarItem: String, CaseIterable, Identifiable {
-    case library, folders, builds, compatibility, environment
+    case installer, library, folders, builds, compatibility, environment
     var id: String { rawValue }
 
     var title: String {
         switch self {
+        case .installer: "Instalar FC26/FC27"
         case .library: "Biblioteca"
         case .folders: "Juegos en disco"
         case .builds: "Construcciones"
@@ -16,6 +17,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
 
     var symbol: String {
         switch self {
+        case .installer: "shippingbox"
         case .library: "gamecontroller"
         case .folders: "externaldrive"
         case .builds: "hammer"
@@ -41,6 +43,7 @@ struct RootView: View {
             .safeAreaInset(edge: .bottom) { statusFooter }
         } detail: {
             switch selection ?? .library {
+            case .installer: FC27InstallerView(onBuild: { selection = .builds })
             case .library: LibraryView()
             case .folders: DiskGamesView(onBuild: { selection = .builds })
             case .builds: BuildsView()
@@ -52,6 +55,7 @@ struct RootView: View {
 
     private func badge(for item: SidebarItem) -> Int {
         switch item {
+        case .installer: 0
         case .library: model.games.count
         case .folders: model.library.count
         case .builds: model.builds.pendingCount

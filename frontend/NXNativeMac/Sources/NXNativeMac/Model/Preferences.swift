@@ -9,7 +9,17 @@ import Observation
 final class Preferences {
     private let defaults = UserDefaults.standard
 
-    var repositoryPath: String { didSet { defaults.set(repositoryPath, forKey: "repositoryPath") } }
+    private var repositoryPathWasExplicitlyChosen: Bool {
+        get { defaults.bool(forKey: "repositoryPathExplicit") }
+        set { defaults.set(newValue, forKey: "repositoryPathExplicit") }
+    }
+
+    var repositoryPath: String {
+        didSet {
+            defaults.set(repositoryPath, forKey: "repositoryPath")
+            repositoryPathWasExplicitlyChosen = true
+        }
+    }
     var keysPath: String { didSet { defaults.set(keysPath, forKey: "keysPath") } }
     /// Vacío = buscar uno >= 3.12 automáticamente.
     var pythonPath: String { didSet { defaults.set(pythonPath, forKey: "pythonPath") } }
@@ -17,6 +27,8 @@ final class Preferences {
     var gameRoots: [String] { didSet { defaults.set(gameRoots, forKey: "gameRoots") } }
     /// Carpetas extra donde buscar apps de juego ya empaquetadas.
     var appRoots: [String] { didSet { defaults.set(appRoots, forKey: "appRoots") } }
+    /// Carpeta por defecto para las apps que genera el instalador FC26/FC27.
+    var gameAppsPath: String { didSet { defaults.set(gameAppsPath, forKey: "gameAppsPath") } }
     var macSignIdentity: String { didSet { defaults.set(macSignIdentity, forKey: "macSignIdentity") } }
     /// Dónde van las copias de partidas. Vacío = la carpeta por defecto. Puede
     /// ser iCloud Drive u otro disco, para que sobrevivan a un desinstalador
@@ -35,10 +47,16 @@ final class Preferences {
     init() {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         repositoryPath = defaults.string(forKey: "repositoryPath") ?? "\(home)/Development/nxnative"
+        if defaults.object(forKey: "repositoryPathExplicit") == nil {
+            // Las versiones anteriores guardaban el checkout por defecto. En
+            // una app nueva ese valor no debe impedir usar la toolchain incluida.
+            defaults.set(false, forKey: "repositoryPathExplicit")
+        }
         keysPath = defaults.string(forKey: "keysPath") ?? ""
         pythonPath = defaults.string(forKey: "pythonPath") ?? ""
         gameRoots = defaults.stringArray(forKey: "gameRoots") ?? []
         appRoots = defaults.stringArray(forKey: "appRoots") ?? ["\(home)/Applications", "/Applications"]
+        gameAppsPath = defaults.string(forKey: "gameAppsPath") ?? "\(home)/Applications"
         macSignIdentity = defaults.string(forKey: "macSignIdentity") ?? ""
         backupsPath = defaults.string(forKey: "backupsPath") ?? ""
         autoBackup = defaults.object(forKey: "autoBackup") as? Bool ?? true
@@ -48,7 +66,43 @@ final class Preferences {
         assignedTitleIDs = defaults.dictionary(forKey: "assignedTitleIDs") as? [String: String] ?? [:]
     }
 
-    var repositoryURL: URL { URL(fileURLWithPath: (repositoryPath as NSString).expandingTildeInPath, isDirectory: true) }
+    /// La app instalada usa su payload firmado por defecto. Un checkout
+    /// externo solo se usa después de que la persona lo elija explícitamente.
+    var usesBundledRepository: Bool {
+        !repositoryPathWasExplicitlyChosen && bundledRepositoryURL != nil
+    }
+
+    var bundledRepositoryURL: URL? {
+        guard let resources = Bundle.main.resourceURL else { return nil }
+        let root = resources.appendingPathComponent("nxnative", isDirectory: true)
+        let marker = root.appendingPathComponent(".nxnative-bundled")
+        let script = root.appendingPathComponent("scripts/build_ipa_from_nsp.py")
+        guard FileManager.default.fileExists(atPath: marker.path),
+              FileManager.default.fileExists(atPath: script.path) else { return nil }
+        return root
+    }
+
+    var repositoryURL: URL {
+        if usesBundledRepository, let bundledRepositoryURL { return bundledRepositoryURL }
+        return URL(fileURLWithPath: (repositoryPath as NSString).expandingTildeInPath, isDirectory: true)
+    }
+
+    var bundledFC26URL: URL? {
+        guard let resources = Bundle.main.resourceURL else { return nil }
+        let root = resources.appendingPathComponent("fc26-mac-port", isDirectory: true)
+        let marker = root.appendingPathComponent(".fc26-builder-bundled")
+        let script = root.appendingPathComponent("games/fc26/build.sh")
+        guard FileManager.default.fileExists(atPath: marker.path),
+              FileManager.default.isExecutableFile(atPath: script.path) else { return nil }
+        return root
+    }
+
+    func useBundledRepository() {
+        repositoryPath = ""
+        // repositoryPath's didSet intentionally marks manual edits. This call
+        // is the one exception: return to the embedded payload explicitly.
+        repositoryPathWasExplicitlyChosen = false
+    }
     var keysURL: URL? {
         keysPath.isEmpty ? nil : URL(fileURLWithPath: (keysPath as NSString).expandingTildeInPath)
     }
@@ -60,8 +114,27 @@ final class Preferences {
         backupsPath.isEmpty ? SaveVault.defaultRoot
             : URL(fileURLWithPath: (backupsPath as NSString).expandingTildeInPath, isDirectory: true)
     }
+    var gameAppsURL: URL {
+        URL(fileURLWithPath: (gameAppsPath as NSString).expandingTildeInPath, isDirectory: true)
+    }
     var gameRootURLs: [URL] { gameRoots.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath, isDirectory: true) } }
-    var appRootURLs: [URL] { appRoots.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath, isDirectory: true) } }
+    /// Las raíces configuradas más la carpeta que contiene esta app. Así,
+    /// al poner NXNative.app junto a las apps de juego en un disco externo,
+    /// el selector las encuentra sin guardar una ruta fija del usuario.
+    var appRootURLs: [URL] {
+        var paths = appRoots
+        if !gameAppsPath.isEmpty { paths.append(gameAppsPath) }
+        let bundle = Bundle.main.bundleURL
+        if bundle.pathExtension == "app" {
+            paths.append(bundle.deletingLastPathComponent().path)
+        }
+        var seen = Set<String>()
+        return paths.compactMap { path in
+            let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true)
+                .standardizedFileURL
+            return seen.insert(url.path).inserted ? url : nil
+        }
+    }
 
     static let pythonCandidates = [
         "/opt/homebrew/bin/python3",

@@ -15,6 +15,9 @@ public struct NXRepository: Sendable {
     public var envSwitches: URL { root.appendingPathComponent("docs/env_switches.tsv") }
 
     public var isValid: Bool { FileManager.default.fileExists(atPath: buildScript.path) }
+    public var isBundled: Bool {
+        FileManager.default.fileExists(atPath: root.appendingPathComponent(".nxnative-bundled").path)
+    }
 
     /// Los perfiles registrados: las carpetas de `dm/games` con nombre de
     /// title ID.

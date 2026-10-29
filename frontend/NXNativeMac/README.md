@@ -19,10 +19,18 @@ nxnative cambia esa interfaz, el punto de contacto está en `Sources/NXCore`.
 | Pantalla | Qué hay |
 |---|---|
 | **Biblioteca** | Las apps de juego empaquetadas (`DMTitleID` en su `Info.plist`). Jugar / detener, ajustes por juego, log en vivo, copias de las partidas guardadas, interruptores avanzados. |
+| **Instalar FC26/FC27** | Flujo de un solo paso: eliges tu carpeta con NSP/NSZ/XCI/XCZ, tu `prod.keys` y el destino; el title ID detecta automáticamente FC26 o FC27 y ejecuta el builder correspondiente. El instalador incluye dentro de su propio `.app` la toolchain de nxnative, los perfiles, traductores de shaders y el builder de FC26. El resultado queda autocontenido con runtime, juego, módulos, shaders y launcher. No incluye ni redistribuye el juego ni las claves. |
 | **Juegos en disco** | Base, actualizaciones y DLC agrupados por title ID, estén en una carpeta por juego o todos juntos con los DLC en subcarpetas. Dice si nxnative tiene perfil y avisa de un XCI que trae la actualización en el cartucho. Construye una app de Mac, una IPA o un build de desarrollo, con todas las opciones del script. Benchmark (`scripts/bench.py`) cuando el perfil tiene ruta. |
 | **Construcciones** | Cola de builds de uno en uno, con etapas, progreso, ETA y la consola del script. Cancelar manda SIGINT (el script sale con 130 y deja lo reutilizable). |
 | **Compatibilidad** | La tabla de `dm/games/README.md` cruzada con lo que tienes. Cada juego enlaza a su nota en el checkout. |
 | **Entorno** | Comprobaciones reales: Apple silicon, Metal 4 y arquitectura de la GPU, Python ≥ 3.12, `nsz`, Xcode, versión del compilador de Metal contra `dmsh_chain.lock`, permisos de `prod.keys`, espacio libre. Clonar o actualizar nxnative (`git pull --ff-only`). Mandos que ve macOS. |
+
+El destino por defecto de las apps generadas se configura en **Entorno → Apps
+generadas**. El instalador FC26/FC27 usa esa carpeta y la añade a la biblioteca;
+el botón **Cambiar…** del instalador permite escoger una ubicación distinta
+para una instalación puntual. Si la carpeta anterior contiene apps de juego,
+NXNative pregunta si se deben mover al nuevo destino o conservarlas donde
+están.
 
 ### Detalles que importan
 
@@ -106,7 +114,26 @@ nxnative cambia esa interfaz, el punto de contacto está en `Sources/NXCore`.
 
 ## Compilar
 
-Necesita Xcode (Swift 6) en un Mac con Apple silicon.
+### Instalador de FC26/FC27
+
+La pantalla **Instalar FC26/FC27** no necesita que el juego esté previamente
+indexado en la biblioteca. Selecciona una carpeta que contenga tu copia base,
+actualización y DLC, selecciona tu propio `prod.keys` y pulsa **Generar**. El
+title ID identifica automáticamente el juego: FC27 usa
+`scripts/build_ipa_from_nsp.py --platform mac-app` y su launcher específico;
+FC26 se envía a su builder dedicado. Al compilar `NXNativeMac.app`,
+`build_app.sh` copia esa toolchain a `Contents/Resources/nxnative` y el
+builder de FC26 a `Contents/Resources/fc26-mac-port`. Se excluyen `.git`,
+`work`, resultados anteriores, dumps y claves. Por eso el `.app` se puede
+mover a otro Mac compatible sin conservar el checkout de desarrollo; solo se
+aportan el juego y las claves propias en cada instalación.
+
+Necesita Xcode/Metal Toolchain, las herramientas nativas de macOS y Python
+3.12 o posterior en un Mac con Apple silicon. La app prepara su entorno
+Python de usuario; no instala ni incluye la copia del juego ni las claves.
+Las apps de FC26 y FC27 se firman ad hoc por defecto. Si en **Entorno** se
+elige una identidad válida del llavero, la misma identidad se pasa a ambos
+builders; así se puede usar Developer ID sin cambiar el flujo de instalación.
 
 ```bash
 frontend/NXNativeMac/scripts/build_app.sh

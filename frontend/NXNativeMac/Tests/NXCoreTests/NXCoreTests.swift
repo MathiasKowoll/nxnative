@@ -143,6 +143,58 @@ import Testing
     }
 }
 
+@Suite struct MacGameBundleTests {
+    private func makeApp(info: [String: Any], files: [String: Data] = [:]) throws -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("nxcore-app-\(UUID().uuidString)", isDirectory: true)
+        let app = root.appendingPathComponent("Game.app", isDirectory: true)
+        let contents = app.appendingPathComponent("Contents", isDirectory: true)
+        try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+        let resolved = info.mapValues { value in
+            (value as? String)?.replacingOccurrences(of: "__ROOT__", with: root.path) ?? value
+        }
+        let plist = try PropertyListSerialization.data(fromPropertyList: resolved, format: .xml, options: 0)
+        try plist.write(to: contents.appendingPathComponent("Info.plist"))
+        for (path, data) in files {
+            let url = root.appendingPathComponent(path)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data.write(to: url)
+        }
+        return app
+    }
+
+    @Test func packagedGameUsesDMtitleID() throws {
+        let app = try makeApp(info: ["CFBundleName": "Game", "DMTitleID": "0100aaaa00000000"])
+        let game = try #require(MacGameBundle(url: app))
+        #expect(game.titleID == "0100AAAA00000000")
+    }
+
+    @Test func legacyWrapperUsesExtractionManifest() throws {
+        let manifest = try JSONSerialization.data(withJSONObject: [
+            "nca_inventory": [["title_id": "0100BBBB00000000"]]
+        ])
+        let app = try makeApp(
+            info: ["CFBundleName": "Legacy", "FC26WorkFolder": "__ROOT__/work"],
+            files: ["work/extraction-manifest.json": manifest]
+        )
+        let game = try #require(MacGameBundle(url: app))
+        #expect(game.titleID == "0100BBBB00000000")
+        #expect(game.name == "Legacy")
+    }
+
+    @Test func scanPrefersNewestCopyOfSameTitle() throws {
+        let old = try makeApp(info: ["CFBundleName": "Old", "DMTitleID": "0100CCCC00000000"])
+        let new = try makeApp(info: ["CFBundleName": "New", "DMTitleID": "0100CCCC00000000"])
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 100)], ofItemAtPath: old.path)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 200)], ofItemAtPath: new.path)
+        let games = MacGameBundle.scan(roots: [old.deletingLastPathComponent(), new.deletingLastPathComponent()])
+        #expect(games.count == 1)
+        #expect(games.first?.name == "New")
+    }
+}
+
 /// Contenedores fabricados aquí, con la disposición de switchbrew: sin datos
 /// de ningún juego, solo cabeceras.
 enum Synth {
@@ -307,6 +359,18 @@ enum Synth {
         #expect(a.contains("--allow-damaged"))
         #expect(!a.contains("--show-fps") && !a.contains("--no-show-fps"))
         #expect(a.contains("--keep-extracted"))
+    }
+
+    @Test func oneStepMacAppArguments() {
+        var o = BuildOptions(nspFolder: URL(fileURLWithPath: "/games/FC27"),
+                             keys: URL(fileURLWithPath: "/keys/prod.keys"))
+        o.output = URL(fileURLWithPath: "/Applications/EA Sports FC 27.app")
+        o.appName = "EA Sports FC 27"
+        let a = o.arguments(script: URL(fileURLWithPath: "/repo/scripts/build_ipa_from_nsp.py"))
+        #expect(a.contains("--platform") && a.contains("mac-app"))
+        #expect(a.contains("-o") && a.contains("/Applications/EA Sports FC 27.app"))
+        #expect(a.contains("--app-name") && a.contains("EA Sports FC 27"))
+        #expect(a.contains("-k") && a.contains("/keys/prod.keys"))
     }
 
     @Test func compatibilityTable() {
