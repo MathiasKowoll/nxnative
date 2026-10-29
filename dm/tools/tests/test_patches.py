@@ -62,7 +62,7 @@ class Registry(unittest.TestCase):
                     self.assertTrue(isinstance(off, int) and isinstance(oid, int) and HEX.match(word) and len(word) == 8 and why, f'{p} {bid} {off:#x}')
             for bid, fn in getattr(m, 'FRAME_STEP', {}).items():
                 self.assertTrue(callable(fn), f'{p} {bid}')
-            self.assertFalse({k for k in vars(m) if k.isupper() and k not in ('CUTS', 'CODE', 'OBS', 'FRAME_STEP', 'MATCH_CUTS', 'ACQUIRE_EXCLUSIVES', 'GENERALIZE')} - set(dir(__import__('nso_asm'))),
+            self.assertFalse({k for k in vars(m) if k.isupper() and k not in ('CUTS', 'CODE', 'OBS', 'FRAME_STEP', 'MATCH_CUTS', 'ACQUIRE_EXCLUSIVES', 'CAPABILITIES', 'GENERALIZE')} - set(dir(__import__('nso_asm'))),
                              f'{p}: a table patch_nso.py does not read')
 
     def test_function_match_rules(self):
@@ -199,7 +199,7 @@ class RewriteKey(unittest.TestCase):
         with mock.patch.dict(os.environ, {'DM_GAMES_DIR': ''}):
             self.assertEqual(nsp.patch_files(REPO, tmp / 'exe', ['main']), [REPO / 'dm/tools/sdk_patches.py'])
         with mock.patch.dict(os.environ, {'DM_GAMES_DIR': os.pathsep.join([str(tmp / 'profiles')] * 2)}):
-            self.assertEqual(nsp.patch_files(REPO, tmp / 'exe', ['main']), [mine])
+            self.assertEqual(nsp.patch_files(REPO, tmp / 'exe', ['main']), [REPO / 'dm/tools/sdk_patches.py', mine])
 
 
 if __name__ == '__main__':
