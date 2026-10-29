@@ -128,9 +128,12 @@ builder de FC26 a `Contents/Resources/fc26-mac-port`. Se excluyen `.git`,
 mover a otro Mac compatible sin conservar el checkout de desarrollo; solo se
 aportan el juego y las claves propias en cada instalación.
 
-Necesita Xcode/Metal Toolchain, las herramientas nativas de macOS y Python
-3.12 o posterior en un Mac con Apple silicon. La app prepara su entorno
-Python de usuario; no instala ni incluye la copia del juego ni las claves.
+Necesita Xcode/Metal Toolchain, las herramientas nativas de macOS, Python
+3.12 o posterior, .NET 10, `zstd` y `glslang` en un Mac con Apple silicon.
+Para FC26 también hacen falta las librerías Homebrew `opus` y `libvpx`. La
+pantalla **Entorno** comprueba estas dependencias y el instalador de FC26/FC27
+no inicia el build mientras falte alguna. La app prepara su entorno Python de
+usuario; no instala ni incluye la copia del juego ni las claves.
 Las apps de FC26 y FC27 se firman ad hoc por defecto. Si en **Entorno** se
 elige una identidad válida del llavero, la misma identidad se pasa a ambos
 builders; así se puede usar Developer ID sin cambiar el flujo de instalación.
