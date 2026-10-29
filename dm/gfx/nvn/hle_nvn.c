@@ -886,6 +886,7 @@ NVN(nvnCommandBufferCopyBufferToBuffer, void, NVNcommandBuffer *c, NVNbufferAddr
     (void)flags;
     uint8_t *p = cmd_alloc(CB(c), 32); put_hdr(p, OP_COPY_B2B, 32); uint64_t nn = n;
     memcpy(p + 8, &src, 8); memcpy(p + 16, &dst, 8); memcpy(p + 24, &nn, 8);
+    OLOG("CopyBufferToBuffer cmd=%p src=%#llx dst=%#llx bytes=%llu", (void *)p, (unsigned long long)src, (unsigned long long)dst, (unsigned long long)n);
 }
 // uniform update: the data is copied into command memory at record time (NVN semantics: the caller may modify the original data after recording) and written into the buffer at submit
 NVN(nvnCommandBufferUpdateUniformBuffer, void, NVNcommandBuffer *c, NVNbufferAddress buf, size_t bufsz, ptrdiff_t off, size_t n, const void *data) {
@@ -960,6 +961,23 @@ NVN(nvnCommandBufferSetViewports, void, NVNcommandBuffer *c, int first, int n, c
 NVN(nvnCommandBufferSetScissor, void, NVNcommandBuffer *c, int x, int y, int w, int h) { *REC(c, OP_SCISSOR, p_scissor) = (p_scissor){x, y, w, h}; }
 NVN(nvnCommandBufferSetDepthRange, void, NVNcommandBuffer *c, float n, float f) { *REC(c, OP_DEPTH_RANGE, p_depth_range) = (p_depth_range){n, f}; }
 NVN(nvnCommandBufferBindProgram, void, NVNcommandBuffer *c, const NVNprogram *p, int stages) {
+    static int dbg = -1; if (dbg < 0) { const char *e = getenv("DM_NVN_BINDBG"); dbg = e && *e; }
+    if (dbg && (stages & 0x1f)) {
+        const prog_t *q = (const prog_t *)p;
+        uint32_t magic = q ? q->magic : 0, nstage = q ? q->nstage : 0;
+        char k0[17] = "-", k1[17] = "-"; uint8_t md[8];
+        if (q && nstage && prog_key(q, 0, md)) { for (int j = 0; j < 8; j++) snprintf(k0 + j * 2, 3, "%02x", md[j]); }
+        if (q && nstage > 1 && prog_key(q, 1, md)) { for (int j = 0; j < 8; j++) snprintf(k1 + j * 2, 3, "%02x", md[j]); }
+        char sig[40]; snprintf(sig, sizeof sig, "%s/%s", k0, k1);
+        static char seen[1024][40]; static int nseen;
+        int have = strcmp(k0, "-") == 0 && strcmp(k1, "-") == 0;   // no stage data: deduplicate by pointer below
+        for (int i = 0; i < nseen; i++) if (!strcmp(seen[i], sig)) { have = 1; break; }
+        if (!have && nseen < 1024) {
+            strlcpy(seen[nseen++], sig, sizeof seen[0]);
+            LOG("[nvn] BindProgram %p stages=%#x magic=%#x nstage=%u key0=%s key1=%s serial=%llu", (void *)p, stages,
+                magic, nstage, k0, k1, q ? (unsigned long long)q->serial : 0ull);
+        }
+    }
     *REC(c, OP_BIND_PROGRAM, p_bind_program) = (p_bind_program){(const prog_t *)p, stages};
 }
 static void bind_state(NVNcommandBuffer *c, int kind, const void *st, size_t n) { p_bind_state *r = REC(c, OP_BIND_STATE, p_bind_state); r->kind = kind; memcpy(r->bytes, st, n); }
@@ -1745,7 +1763,11 @@ static void fstep_tick(const win_t *o, int c) {
         if (__builtin_popcount(slow_bits) >= 12) g_fs.screen = 2;
     }
     int n = nvn_fstep_next(&g_fs, shown, cost, kmin, kmax, fixed, cslow || gslow);
-    __atomic_store_n((uint32_t *)(dm_fps_state + 0x20), (uint32_t)n, __ATOMIC_RELAXED); atomic_store(&g_fs_k, g_fs.k);
+    __atomic_store_n((uint32_t *)(dm_fps_state + 0x20), (uint32_t)n, __ATOMIC_RELAXED);
+    __atomic_store_n((uint32_t *)(dm_fps_state + 0x38), (uint32_t)o->presents, __ATOMIC_RELAXED);   // BotW 1.6.0's two VFR callers update its tick once per present
+    if (!fixed && __atomic_load_n((uint32_t *)(dm_fps_state + 0x28), __ATOMIC_RELAXED) == 0x160)       // BotW 1.6.0 counts a step per present, not per VFR caller
+        __atomic_fetch_add((uint64_t *)(dm_fps_state + 0x30), (uint64_t)n, __ATOMIC_RELAXED);
+    atomic_store(&g_fs_k, g_fs.k);
     held[g_fs.k]++; if (fixed) fixed_sum += (uint64_t)n;   // the stubs count only the host's steps
     static int fixed_was, nfix;
     if (fixed != fixed_was && nfix < 40) { nfix++; if (fixed) LOG("[nvn] frame step: the game fixes its own step at %d vsyncs at present %llu", fixed, (unsigned long long)o->presents); else LOG("[nvn] frame step: the game hands the step back to the host at present %llu", (unsigned long long)o->presents); }
@@ -1948,7 +1970,9 @@ NVN(nvnBufferInitialize, NVNboolean, NVNbuffer *buf, const NVNbufferBuilder *b) 
 NVN(nvnBufferFinalize, void, NVNbuffer *buf) { ((buf_t *)buf)->magic = 0; }
 NVN(nvnBufferSetDebugLabel, void, NVNbuffer *buf, const char *s) { (void)buf; (void)s; }
 NVN(nvnBufferGetAddress, NVNbufferAddress, const NVNbuffer *buf) { return (NVNbufferAddress)(BF(buf)->pool->mem + BF(buf)->off); }
-NVN(nvnBufferMap, void *, const NVNbuffer *buf) { return BF(buf)->pool->mem + BF(buf)->off; }
+// Unified backing storage does not make a CPU_NO_ACCESS pool CPU-mappable.
+// Engines subtract the CPU mapping from subresource pointers to form GPU offsets.
+NVN(nvnBufferMap, void *, const NVNbuffer *buf) { const buf_t *b = BF(buf); return (b->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) ? NULL : b->pool->mem + b->off; }
 NVN(nvnBufferGetSize, size_t, const NVNbuffer *buf) { return (size_t)BF(buf)->size; }
 NVN(nvnBufferGetMemoryPool, NVNmemoryPool *, const NVNbuffer *buf) { return (NVNmemoryPool *)BF(buf)->pool; }
 NVN(nvnBufferGetMemoryOffset, ptrdiff_t, const NVNbuffer *buf) { return (ptrdiff_t)BF(buf)->off; }
@@ -1957,7 +1981,7 @@ NVN(nvnBufferInvalidateMappedRange, void, const NVNbuffer *buf, ptrdiff_t off, s
 
 // Memory pool queries
 NVN(nvnMemoryPoolGetFlags, NVNmemoryPoolFlags, const NVNmemoryPool *p) { return (NVNmemoryPoolFlags)((const pool_t *)p)->flags; }
-NVN(nvnMemoryPoolMap, void *, const NVNmemoryPool *p) { return ((const pool_t *)p)->mem; }
+NVN(nvnMemoryPoolMap, void *, const NVNmemoryPool *p) { const pool_t *pool = (const pool_t *)p; return (pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) ? NULL : pool->mem; }
 NVN(nvnMemoryPoolGetSize, size_t, const NVNmemoryPool *p) { return (size_t)((const pool_t *)p)->size; }
 NVN(nvnMemoryPoolInvalidateMappedRange, void, const NVNmemoryPool *p, ptrdiff_t off, size_t n) { (void)p; (void)off; (void)n; }
 NVN(nvnMemoryPoolSetDebugLabel, void, NVNmemoryPool *p, const char *s) { (void)p; (void)s; }
@@ -2137,6 +2161,7 @@ NVN(nvnTextureBuilderSetSwizzle, void, NVNtextureBuilder *b, NVNtextureSwizzle r
 // bits followed the depth values and the hero was drawn as a dithered silhouette inside a dithered square)
 NVN(nvnTextureBuilderSetDepthStencilMode, void, NVNtextureBuilder *b, NVNtextureDepthStencilMode m) { TB(b)->stencil = m == NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL; }
 NVN(nvnTextureBuilderGetStorageClass, NVNstorageClass, const NVNtextureBuilder *b) { (void)b; return 0; }
+NVN_NOPROTO(nvnTextureBuilderGetRawStorageClass, NVNstorageClass, const NVNtextureBuilder *b) { (void)b; return 1; }
 // Used by Bowser's Fury: the texture's channel swizzle (set by TextureBuilderSetSwizzle at build time, identity R G B A when unset) and storage class (the host has none, 0 as for the builder)
 NVN(nvnTextureGetSwizzle, void, const NVNtexture *t, NVNtextureSwizzle *r, NVNtextureSwizzle *g, NVNtextureSwizzle *b, NVNtextureSwizzle *a) {
     unsigned w = tex_swz(CTX(t));
@@ -2211,6 +2236,8 @@ NVN(nvnMultisampleStateGetSampleLocationsGridEnable, NVNboolean, const NVNmultis
 // Builder and pool queries
 NVN(nvnBufferBuilderGetSize, size_t, const NVNbufferBuilder *b) { return (size_t)((const buf_builder_t *)b)->size; }
 NVN(nvnBufferBuilderGetMemoryOffset, ptrdiff_t, const NVNbufferBuilder *b) { return (ptrdiff_t)((const buf_builder_t *)b)->off; }
+// FC 27's Engine.Render.Core2.PlatformNvn NRO reads the storage offset back from its texture builders.
+NVN(nvnTextureBuilderGetMemoryOffset, ptrdiff_t, const NVNtextureBuilder *b) { return (ptrdiff_t)((const tex_builder_t *)b)->off; }
 NVN(nvnTextureBuilderGetTarget, NVNtextureTarget, const NVNtextureBuilder *b) { return (NVNtextureTarget)((const tex_builder_t *)b)->d.target; }
 NVN(nvnTextureBuilderGetWidth, int, const NVNtextureBuilder *b) { return (int)((const tex_builder_t *)b)->d.width; }
 NVN(nvnTextureBuilderGetHeight, int, const NVNtextureBuilder *b) { return (int)((const tex_builder_t *)b)->d.height; }

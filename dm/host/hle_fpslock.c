@@ -11,7 +11,7 @@
 // period, so frames at exactly 16.667 ms came 0.11 ms late each on the Mac (59.6 fps, every 150th frame shown two vsyncs). Slightly shorter, the host's present pacing sets the pace
 // (the acquire waits): Luigi's Mansion 3's display interval p99 18.69 → 16.67 ms, 60.0 fps. Not at 30: with present_interval display the presents follow every vsync and hold no
 // frame for two, so a shorter time showed some frames for one (30.4 fps); 30 writes the game's own 33.333 ms
-enum { FPS_F32, VSYNCS_I32, MS_F32, FPS_I32, VSYNCS_MINUS1_I32 };
+enum { FPS_F32, VSYNCS_I32, MS_F32, FPS_I32, VSYNCS_MINUS1_I32, FPS_F64 };
 #define MS_MARGIN 0.5f
 static float ms_want(int fps) { return 1000.0f / (float)fps - (fps == 60 ? MS_MARGIN : 0); }
 static const struct { const char *build, *what; uint64_t ptr_off; uint32_t field; uint8_t kind, copies; } k_locks[] = {
@@ -68,6 +68,11 @@ static const struct { const char *build, *what; uint64_t ptr_off; uint32_t field
     { "c4df04f647bdc727926348bd9a9918c8", "P5S vsync count", 0, 0x1d584fc, VSYNCS_I32, 1 },
     { "c4df04f647bdc727926348bd9a9918c8", "P5S float frame rate", 0, 0x1d6bfa0, FPS_F32, 1 },
     { "c4df04f647bdc727926348bd9a9918c8", "P5S interval flag", 0, 0x2aefb30, VSYNCS_MINUS1_I32, 1 },
+    // EA SPORTS FC 27 1.8c.cab1: Frostbite's internal frame-rate object is a pointer at main+0xDA19E38;
+    // the double target is at pointer+8 and the game resets it to 30. The public FPSLocker profile for
+    // build FB81983A... writes the same location and blocks its timing block. The game's present interval
+    // 2 is already ignored by present_interval=display, so this row removes the remaining frame-work cap.
+    { "fb81983aa1cc3a2e97402497e2ca6528", "FC27 internal frame rate", 0xda19e38, 8, FPS_F64, 1 },
 };
 #define NLOCKS ((int)(sizeof k_locks / sizeof k_locks[0]))
 
@@ -192,7 +197,18 @@ void dm_fps_lock_tick(void) {
         int k = rows[r]; uint64_t obj = (uint64_t)(uintptr_t)base;
         if (k_locks[k].ptr_off && (!rd((uint64_t)(uintptr_t)(base + k_locks[k].ptr_off), &obj, sizeof obj) || !obj)) continue;   // not created yet
         for (int c = 0; c < k_locks[k].copies; c++) {
-            uint64_t a = obj + k_locks[k].field + 4 * (uint64_t)c; uint32_t cur, want; char was[16];
+            uint64_t a = obj + k_locks[k].field + (k_locks[k].kind == FPS_F64 ? 8 : 4) * (uint64_t)c; uint32_t cur, want; char was[16];
+            if (k_locks[k].kind == FPS_F64) {
+                uint64_t cur64, want64; double f, w = (double)target;
+                memcpy(&want64, &w, sizeof want64);
+                if (!rd(a, &cur64, sizeof cur64)) break;
+                memcpy(&f, &cur64, sizeof f);
+                if (cur64 == want64 || !(f >= 10 && f <= 120)) continue;
+                uint64_t *p = (uint64_t *)(uintptr_t)a;
+                dm_guest_write_prepare(p, sizeof *p); __atomic_store_n(p, want64, __ATOMIC_RELAXED);
+                if (nlog[k] < 8) { nlog[k]++; LOG("main: %s %g → %d fps (%s)", k_locks[k].what, f, target, src); }
+                continue;
+            }
             if (!rd(a, &cur, sizeof cur)) break;
             if (k_locks[k].kind == FPS_F32 || k_locks[k].kind == MS_F32) {
                 int ms = k_locks[k].kind == MS_F32; float f, w = ms ? ms_want(target) : (float)target; memcpy(&f, &cur, sizeof f); memcpy(&want, &w, sizeof want);

@@ -101,6 +101,19 @@ def depth_entries(src):
 
 
 class GeometryReader(unittest.TestCase):
+    def test_capture_preserves_flat_varying_bits(self):
+        for ty in ('float4', 'uint4', 'int4'):
+            with self.subTest(type=ty):
+                source = ('struct main0_out {\n'
+                          'float4 position [[position]];\n'
+                          f'{ty} dm_pad5 [[user(locn5), flat]];\n'
+                          '};\nvertex main0_out main0(uint vid [[vertex_id]]) {\n'
+                          'main0_out out = {};\nreturn out;\n}\n')
+                capture = dmsh_geometry.capture(source)
+                self.assertEqual(capture, dmsh_geometry.capture(source.replace(', flat', '')))
+                for offset, component in enumerate('xyzw', 36):
+                    self.assertIn(f'dm_p[{offset}] = as_type<uint>(out.dm_pad5.{component});', capture)
+
     def test_capture_loads_preserve_input_reads(self):
         source = 'device _22* vertex_output [[id(1)]]; device _22* geometry_vb_output [[id(2)]];'
         self.assertEqual(dmsh_geometry.capture_input(source),

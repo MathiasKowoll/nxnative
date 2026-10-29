@@ -107,6 +107,7 @@ static void probe_dump_once(void) {
     fwrite(m->base + strtoull(o, 0, 16), 1, strtoull(n, 0, 16), fp); fclose(fp);
     LOG("probe dump %s+%s length %s → %s", mod, o, n, f ? f : def);
 }
+static void watch_dynamic_page(ucontext_t *uc);
 static int probe_hit(ucontext_t *uc) {   // Registered by probe_install with the SIGTRAP branch of crash.c
     uint64_t pc = uc->uc_mcontext->__ss.__pc;
     for (int i = 0; i < g_nprobe; i++) if (g_probe[i].at == pc) {
@@ -124,6 +125,7 @@ static int probe_hit(ucontext_t *uc) {   // Registered by probe_install with the
             char nm[128]; probe_heapname(uc->uc_mcontext->__ss.__x[g_probe[i].hreg], nm, sizeof nm);
             if (!strstr(nm, g_hw.want)) { uc->uc_mcontext->__ss.__pc = (uint64_t)g_probe[i].slot; return 1; }
         }
+        watch_dynamic_page(uc);
         probe_dump_once();
         flockfile(stderr);   // One block per hit when threads hit at once
         { extern uint64_t g_t0_ns; uint64_t now_ns(void); uint32_t thr_cur_handle(void); fprintf(stderr, "[dm] PROBE %s #%u [%.4fs] F=%llu T=%x", g_probe[i].name, ++g_probe[i].hits, (now_ns() - g_t0_ns) / 1e9, (unsigned long long)frame, thr_cur_handle()); }
@@ -183,6 +185,18 @@ static void probe_add(module_t *m, uint64_t off, long dump, probe_fn fn) {
 // (a store in that millisecond goes unseen). STEINS;GATE RE:BOOT: the engine object's page takes bursts of stores every frame, and a watch that unprotected the page for each fault missed
 // the one that matters; this one found it at once (main+0x389e90, a setter its start-up code calls with 0: the game renders 1280x720 docked by its own choice)
 static uint64_t g_wat, g_wlen, g_wpg, g_wpsz; static uint8_t *g_walias; static _Atomic int g_warmed;
+static int g_watch_reg = -1;
+static void watch_dynamic_page(ucontext_t *uc) {
+    if (g_watch_reg < 0 || g_wpg) return;
+    uint64_t at = uc->uc_mcontext->__ss.__x[g_watch_reg];
+    if (!at) return;
+    g_wpsz = (uint64_t)getpagesize();
+    g_wpg = at & ~(g_wpsz - 1);
+    g_wat = g_wpg;
+    g_wlen = g_wpsz;
+    LOG("dynamic write watch from x%d=%#llx: page %#llx", g_watch_reg,
+        (unsigned long long)at, (unsigned long long)g_wpg);
+}
 static void watch_where(const char *tag, uint64_t a) {
     module_t *m = module_of((void *)a); Dl_info di;
     if (m) fprintf(stderr, " %s=%s+%#llx", tag, m->name, (unsigned long long)(a - (uint64_t)m->base));
@@ -282,6 +296,7 @@ static int watch_fault(void *addr, int is_write, void *ucv) {
 static void *watch_arm(void *p) {
     (void)p;
     for (;;) {
+        if (!g_wpg) { usleep(1000); continue; }
         if (!atomic_load(&g_warmed)) {
             mach_vm_address_t ra = g_wpg; mach_vm_size_t rs = 0; vm_region_basic_info_data_64_t bi; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj;
             if (!mach_vm_region(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&bi, &cnt, &obj) && ra <= g_wpg && (bi.protection & VM_PROT_WRITE)) {
@@ -349,8 +364,27 @@ static void watch_install(void) {
                if (*end == '=') { g_pwant = 1; g_pval = strtoull(end + 1, 0, 16); }
                if (!g_poll || !g_plen || g_plen > 8) die("DM_PROBE_POLL format: <address>[+<length up to 8>][=<value>] (hex)");
                pthread_t t; pthread_create(&t, NULL, poll_run, NULL); pthread_detach(t); } }
+    const char *dynamic = getenv("DM_PROBE_WATCH_REG");
+    if (dynamic && *dynamic) {
+        if (dynamic[0] != 'x') die("DM_PROBE_WATCH_REG format: xN");
+        char *end; long reg = strtol(dynamic + 1, &end, 10);
+        if (*end || reg < 0 || reg > 30) die("DM_PROBE_WATCH_REG format: xN");
+        g_watch_reg = (int)reg;
+        dm_fault_hook_register(watch_fault);
+        pthread_t t; pthread_create(&t, NULL, watch_arm, NULL); pthread_detach(t);
+    }
     const char *e = getenv("DM_PROBE_WATCH"); if (!e) return;
-    char *end; g_wat = strtoull(e, &end, 16); g_wlen = *end == '+' ? strtoull(end + 1, 0, 16) : 8;
+    uint64_t base = 0;
+    const char *colon = strchr(e, ':');
+    if (colon) {
+        module_t *module = NULL;
+        for (int i = 0; i < g_nmod; i++)
+            if (strlen(g_mod[i].name) == (size_t)(colon - e) && !strncmp(g_mod[i].name, e, (size_t)(colon - e))) module = &g_mod[i];
+        if (!module) die("DM_PROBE_WATCH: unknown module");
+        base = (uint64_t)module->base;
+        e = colon + 1;
+    }
+    char *end; g_wat = base + strtoull(e, &end, 16); g_wlen = *end == '+' ? strtoull(end + 1, 0, 16) : 8;
     if (!g_wat || !g_wlen) die("DM_PROBE_WATCH format: <address>[+<length>] (hex)");
     g_wpsz = (uint64_t)getpagesize(); g_wpg = g_wat & ~(g_wpsz - 1);
     if (g_wat + g_wlen > g_wpg + g_wpsz) die("DM_PROBE_WATCH: the watched bytes must lie in one host page");

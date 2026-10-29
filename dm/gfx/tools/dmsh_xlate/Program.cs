@@ -52,7 +52,10 @@ static class SwshXlate
         public SetBindingPair CreateTextureBinding(int count, bool isBuffer) { int b = _binding; _binding += count; return new(0, b); }
         public ReadOnlySpan<ulong> GetCode(ulong address, int minimumSize) => MemoryMarshal.Cast<byte, ulong>(new ReadOnlySpan<byte>(_code)[(int)address..]);
         public int QuerySamplerArrayLengthFromPool() => 32;
-        public int QueryTextureArrayLengthFromBuffer(int slot) => 32;
+        // BindlessToArray indexes by the absolute cbuf byte offset / 8, not
+        // by NVN slot. Include the whole c2 texture table: separate slot 0
+        // starts at element 45 and slot 127 is element 172.
+        public int QueryTextureArrayLengthFromBuffer(int slot) => slot == 2 ? SampBase / 8 : 32;
         public int QueryTextureArrayLengthFromPool() => 32;
 
         string Get(string table, int slot) => _job[table] is JsonObject t && t[slot.ToString()] is JsonNode n ? (n is JsonObject o ? (string)o["type"] : (string)n) : null;

@@ -121,6 +121,29 @@ int main(void) {
     EXPECT("MemoryPoolInitialize succeeds", 1, P(nvnMemoryPoolInitialize)(&pool, &pb));
     EXPECT("pool GPU address = storage address", (long long)(uintptr_t)poolmem, P(nvnMemoryPoolGetBufferAddress)(&pool));
 
+    // CPU mapping follows the pool flags even on unified memory. In particular,
+    // a GPU-only buffer with a nonzero offset must return NULL, not that offset.
+    {
+        static uint8_t mapmem[4096] __attribute__((aligned(4096)));
+        const int cpu_flags[] = {NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS,
+            NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED, NVN_MEMORY_POOL_FLAGS_CPU_CACHED};
+        for (unsigned i = 0; i < sizeof cpu_flags / sizeof *cpu_flags; i++) {
+            NVNmemoryPoolBuilder mb; NVNmemoryPool mp; NVNbufferBuilder bb; NVNbuffer buffer;
+            P(nvnMemoryPoolBuilderSetDefaults)(&mb); P(nvnMemoryPoolBuilderSetDevice)(&mb, &dev);
+            P(nvnMemoryPoolBuilderSetStorage)(&mb, mapmem, sizeof mapmem);
+            P(nvnMemoryPoolBuilderSetFlags)(&mb, cpu_flags[i] | NVN_MEMORY_POOL_FLAGS_GPU_CACHED);
+            EXPECT("mapping test pool initialized", 1, P(nvnMemoryPoolInitialize)(&mp, &mb));
+            P(nvnBufferBuilderSetDefaults)(&bb); P(nvnBufferBuilderSetDevice)(&bb, &dev);
+            P(nvnBufferBuilderSetStorage)(&bb, &mp, 256, 512);
+            EXPECT("mapping test buffer initialized", 1, P(nvnBufferInitialize)(&buffer, &bb));
+            EXPECT("pool CPU mapping respects access flags", i ? (uintptr_t)mapmem : 0, (uintptr_t)P(nvnMemoryPoolMap)(&mp));
+            EXPECT("buffer CPU mapping respects access flags", i ? (uintptr_t)(mapmem + 256) : 0, (uintptr_t)P(nvnBufferMap)(&buffer));
+            EXPECT("GPU-only pool retains GPU address", (uintptr_t)mapmem, P(nvnMemoryPoolGetBufferAddress)(&mp));
+            EXPECT("GPU-only buffer retains GPU offset", (uintptr_t)(mapmem + 256), P(nvnBufferGetAddress)(&buffer));
+            P(nvnBufferFinalize)(&buffer); P(nvnMemoryPoolFinalize)(&mp);
+        }
+    }
+
     // 4. Texture storage size (block-linear: GOB = 64 B × 8 rows; block height from the GOB count of "height × 1.5": ≥16→16, ≥8→8 ...)
     //    256×256 RGBA8: 1024 B per row = 16 GOBs; height 256 rows = 32 GOB rows, block height 16 GOBs → 2 blocks; 16×2×(512×16) = 262144
     size_t al; EXPECT("256x256 RGBA8 size", 262144, tex_size(NVN_FORMAT_RGBA8, 256, 256, 0, &al));
@@ -498,6 +521,10 @@ int main(void) {
     EXPECT("wait on an unfenced sync = timeout (2)", 2, P(nvnSyncWait)(&s1, 0));
     P(nvnQueueFenceSync)(&q, &s1, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
     EXPECT("wait after fence = already signaled (0)", 0, P(nvnSyncWait)(&s1, 0));
+    { NVNtextureBuilder get; P(nvnTextureBuilderSetDevice)(&get, &dev); P(nvnTextureBuilderSetDefaults)(&get);
+      P(nvnTextureBuilderSetStorage)(&get, &pool, 0x2000);
+      EXPECT("texture builder storage offset", 0x2000, P(nvnTextureBuilderGetMemoryOffset)(&get));
+      EXPECT("texture builder raw storage class", 1, ((int (*)(const NVNtextureBuilder *))proc("nvnTextureBuilderGetRawStorageClass"))(&get)); }
     NVNtexture sc[2]; NVNtextureBuilder tb; P(nvnTextureBuilderSetDevice)(&tb, &dev); P(nvnTextureBuilderSetDefaults)(&tb);
     P(nvnTextureBuilderSetWidth)(&tb, 1280); P(nvnTextureBuilderSetHeight)(&tb, 720); P(nvnTextureBuilderSetFormat)(&tb, NVN_FORMAT_RGBA8);
     P(nvnTextureBuilderSetStorage)(&tb, &pool, 0); P(nvnTextureInitialize)(&sc[0], &tb); P(nvnTextureInitialize)(&sc[1], &tb);

@@ -23,6 +23,32 @@ static NSDictionary *load(const char *key) {
 
 int main(void) { @autoreleasepool {
     nvn_refl r; char err[160] = "";
+    {   // A dynamically indexed driver texture array with one fixed separate sampler.
+        NSDictionary *j = @{@"route": @"B", @"bindings": @[
+            @{@"kind": @"tex_c2a", @"off": @0, @"arg_id": @7, @"msl_name": @"fp_t2d_cb196610_10570000", @"msl_type": @"array<texture2d<float>, 32>"},
+            @{@"kind": @"samp", @"reg": @1, @"arg_id": @39, @"msl_name": @"fp_t2d_cb196610_10570000Smplr", @"msl_type": @"array<sampler, 32>"}]};
+        check("separate driver array converts", 0, nvn_refl_from_json(j, &r, err, sizeof err));
+        check("driver array texture kind", NVN_RB_TEXA, r.b[0].kind);
+        check("driver array texture count", 32, r.b[0].n);
+        check("fixed sampler slot", 1, r.b[1].reg);
+        check("fixed sampler broadcast count", 32, r.b[1].n);
+        check("fixed sampler kind", NVN_RB_SAMP, r.b[1].kind);
+    }
+    {   // Absolute c2 indices include the separate texture table at element 45.
+        NSMutableDictionary *tex = [@{@"kind": @"tex_c2a", @"off": @0, @"arg_id": @7,
+            @"msl_name": @"fp_t2d_cb196610_10570000", @"msl_type": @"array<texture2d<float>, 173>"} mutableCopy];
+        NSDictionary *samp = @{@"kind": @"samp", @"reg": @1, @"arg_id": @180,
+            @"msl_name": @"fp_t2d_cb196610_10570000Smplr", @"msl_type": @"array<sampler, 173>"};
+        NSDictionary *j = @{@"route": @"B", @"bindings": @[tex, samp]};
+        check("full c2 texture table converts", 0, nvn_refl_from_json(j, &r, err, sizeof err));
+        check("full c2 texture array count", 173, r.b[0].n);
+        check("full c2 fixed sampler count", 173, r.b[1].n);
+        check("full c2 sampler argument index", 180, r.b[1].aid);
+        tex[@"off"] = @8;
+        check("driver array past table rejected", 1, nvn_refl_from_json(j, &r, err, sizeof err) != 0);
+        tex[@"off"] = @0; tex[@"msl_type"] = @"array<texture2d<float>, 174>";
+        check("oversized driver array rejected", 1, nvn_refl_from_json(j, &r, err, sizeof err) != 0);
+    }
     {   // native image atomics (dmsh_atomic.py): one read_write image, marked atomic by the build; an image the shader only stores to is not
         NSDictionary *j = @{@"route": @"B", @"bindings": @[
             @{@"kind": @"img", @"reg": @2, @"arg_id": @0, @"msl_name": @"cp_i_cb2_4C_r32ui", @"msl_type": @"texture_buffer<uint, access::read_write>", @"atomic": @YES},

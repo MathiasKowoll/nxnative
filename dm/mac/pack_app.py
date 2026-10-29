@@ -42,8 +42,8 @@ def first_file(d):
     return None
 
 
-def can_clone(src, dst_dir):   # whether src (a file such as a RomFS image, or a folder's first file) can be cloned into dst_dir (the same APFS volume)
-    f = src if src.is_file() else first_file(src)   # os.walk of a file yields nothing
+def can_clone(src, dst_dir):   # whether a file of src can be cloned into dst_dir (the same APFS volume)
+    f = first_file(src)
     if f is None: return False
     t = dst_dir / '.clone_test'
     try:
@@ -84,7 +84,13 @@ def swift_sources():   # the settings window, with the iOS launcher's model and 
     return [HERE / 'Launcher.swift', HERE.parent / 'ios/Sources/LauncherSettings.swift', HERE.parent / 'ios/Sources/LauncherRow.swift']
 
 
-def build_launcher(out, minos, clang, swiftc, sdk):   # launcher.c's main, linked by swiftc with the settings window (no Swift main: -parse-as-library)
+def build_launcher(out, minos, clang, swiftc, sdk, source=None, defines=(), executable='nxnative'):   # generic launcher or a title-specific Cocoa launcher
+    if source:
+        cmd = [clang, '-isysroot', sdk, '-arch', 'arm64', f'-mmacosx-version-min={minos}', '-O2', '-Wall', '-Wextra', '-Werror', '-fobjc-arc']
+        cmd += [f'-D{d}' for d in defines]
+        cmd += [source, '-framework', 'Cocoa', '-o', out]
+        run(cmd)
+        return
     with tempfile.TemporaryDirectory(dir=out.parents[3]) as t:
         obj = Path(t) / 'launcher.o'
         run([clang, '-isysroot', sdk, '-arch', 'arm64', f'-mmacosx-version-min={minos}', '-O2', '-Wall', '-I', HERE.parent / 'host', '-c', '-o', obj, HERE / 'launcher.c'])
@@ -201,7 +207,7 @@ def pack(a):
     except (OSError, ValueError): previous = None
     try:
         a = argparse.Namespace(**vars(a))
-        for name in ('out', 'host', 'patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso', 'pso_pairs', 'env_file', 'settings', 'icon'):
+        for name in ('out', 'host', 'patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso', 'pso_pairs', 'env_file', 'settings', 'icon', 'launcher_source'):
             if getattr(a, name): setattr(a, name, str(Path(getattr(a, name)).resolve()))
         mods, msls, pso, tables, pairs, fonts, files = selected_inputs(a)
         clang = Path(run(['xcrun', '--find', 'clang']).strip()).resolve()
@@ -212,7 +218,8 @@ def pack(a):
         if not codesign: raise SystemExit('codesign is not available')
         codesign = Path(codesign).resolve()
         minos = min_os(a.host)
-        sources = [Path(__file__).resolve(), HERE / 'launcher.c', HERE.parent / 'host/romfs_image.h', HERE.parent / 'tools/romfs.py'] + swift_sources()
+        launcher_sources = [Path(a.launcher_source)] if a.launcher_source else [HERE / 'launcher.c', HERE.parent / 'host/romfs_image.h', HERE.parent / 'tools/romfs.py'] + swift_sources()
+        sources = [Path(__file__).resolve()] + launcher_sources
         inputs = {'options': vars(a), 'files': [(str(p), p.stat().st_mode, digest(p), os.readlink(p) if p.is_symlink() else None) for p in files + sources],
                   'trees': [(p, inventory(Path(p))) for p in (a.romfs, a.aoc) if p],
                   'tools': [[str(c), c.stat().st_mode, c.stat().st_size, c.stat().st_mtime_ns, c.stat().st_ctime_ns, run([c, '--version']).strip()] for c in (clang, swiftc)] + [
@@ -231,29 +238,30 @@ def pack(a):
     c = tmp / 'Contents'; mac, res = c / 'MacOS', c / 'Resources'; dm = res / 'dm'
     for d in (mac, dm / 'font'): d.mkdir(parents=True)
     romfs, msl, aoc = Path(a.romfs), Path(a.msl), Path(a.aoc) if a.aoc else None
-    # each source is probed on its own, as they may lie on different volumes; cp -c copies what it cannot clone, so a probe decides only the free-space check and the step line
-    trees, lists = {'romfs': romfs, 'aoc': aoc}, {'mods': mods, 'msl': msls, 'pso': pso}
-    clone = {k: bool(d) and can_clone(d, res) for k, d in trees.items()} | {k: bool(ps) and can_clone(ps[0], res) for k, ps in lists.items()}
-    need = sum(tree_bytes(d) for k, d in trees.items() if d and not clone[k]) + sum(p.stat().st_size for k, ps in lists.items() if not clone[k] for p in ps)
-    if need:
+    clone = can_clone(romfs, res); pso_clone = bool(pso) and can_clone(Path(a.pso), res)
+    if not clone or (pso and not pso_clone):
+        need = (0 if clone else sum(tree_bytes(d) for d in [romfs] + ([aoc] if aoc else [])) + sum(p.stat().st_size for p in msls)) + (0 if pso_clone else sum(p.stat().st_size for p in pso))
         free = shutil.disk_usage(res).free
         if need + (1 << 30) > free: raise SystemExit(f'the app needs {need / 2**30:.1f} GB on the volume of {out.parent} (no APFS clones from the build there) and {free / 2**30:.1f} GB are free')
-    step(f'launcher and host ({"clones" if clone["romfs"] else "copies"} of the game files)')
-    build_launcher(mac / EXE, minos, clang, swiftc, sdk)
+    step(f'launcher and host ({"clones" if clone else "copies"} of the game files)')
+    launcher_executable = a.launcher_executable or EXE
+    build_launcher(mac / launcher_executable, minos, clang, swiftc, sdk, Path(a.launcher_source) if a.launcher_source else None,
+                   tuple(a.launcher_define or ()), launcher_executable)
     shutil.copy2(a.host, mac / 'dmhost')
-    copy(mods, dm, clone['mods'])
+    copy(mods, dm, clone)
     if tables: copy(tables, dm, False)
     if pairs: shutil.copyfile(pairs, dm / 'pso_pairs.tsv')   # the split's copy, for a profile without the table
     if fonts: copy(fonts, dm / 'font', False)
     if a.env_file: shutil.copyfile(a.env_file, dm / 'env.txt')
     if a.settings: shutil.copyfile(a.settings, dm / 'launcher.json')
-    step('shader libraries'); msl_dst = res / 'msl' / (a.msl_name or msl.name); msl_dst.mkdir(parents=True); copy(msls, msl_dst, clone['msl'])
-    if aoc: step('add-on content'); copy([aoc], res / 'aoc', clone['aoc'])
-    if pso: step('pipeline archive'); (res / 'pso').mkdir(); copy(pso, res / 'pso', clone['pso'])
-    step('game files'); copy([romfs], res / ('romfs.img' if romfs.is_file() else 'romfs'), clone['romfs'])
+    step('shader libraries'); msl_dst = res / 'msl' / (a.msl_name or msl.name); msl_dst.mkdir(parents=True); copy(msls, msl_dst, clone)
+    if aoc: step('add-on content'); copy([aoc], res / 'aoc', clone)
+    if pso: step('pipeline archive'); (res / 'pso').mkdir(); copy(pso, res / 'pso', pso_clone)
+    step('game files'); copy([romfs], res / ('romfs.img' if romfs.is_file() else 'romfs'), clone)
     icon = bool(a.icon)
     if icon: step('icon'); make_icns(a.icon, res / 'AppIcon.icns')
     info = info_plist(a, minos, icon)
+    info['CFBundleExecutable'] = launcher_executable
     info['DMModuleFiles'] = [p.name for p in mods]
     (c / 'Info.plist').write_bytes(plistlib.dumps(info))
     (c / 'PkgInfo').write_text('APPL????')
@@ -292,6 +300,9 @@ def parse(argv):
     ap.add_argument('--title-id', required=True); ap.add_argument('--name', required=True)
     ap.add_argument('--version'); ap.add_argument('--bundle-id'); ap.add_argument('--category'); ap.add_argument('--lang'); ap.add_argument('--marker', help='the profile\'s romfs_marker')
     ap.add_argument('--icon', help='the game icon (icon.jpg from the control data)')
+    ap.add_argument('--launcher-source', help='title-specific Objective-C launcher source; when present it replaces the generic nxnative settings launcher')
+    ap.add_argument('--launcher-define', action='append', help='preprocessor definition for --launcher-source (repeatable)')
+    ap.add_argument('--launcher-executable', help='CFBundleExecutable and file name for --launcher-source (default: nxnative)')
     ap.add_argument('--sign', default='-', help='codesign identity (default: - = ad-hoc)')
     return ap.parse_args(argv)
 

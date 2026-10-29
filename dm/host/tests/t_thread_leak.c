@@ -19,12 +19,16 @@ static void t_free(void *p) { if (!p) return; atomic_fetch_sub(&g_live_blocks, 1
 #undef free
 
 pthread_key_t g_key18, g_keytls, g_keytlr, g_keygate;
+int dm_sdk_major(void) { return 22; }
 void dm_gate(void) {}
 
 static int fails, checks;
 #define EXPECT(name, want, got) do { long w_ = (long)(want), g_ = (long)(got); checks++; printf("%-46s expected %-8ld → got %-8ld %s\n", name, w_, g_, w_ == g_ ? "✓" : "✗"); if (w_ != g_) fails++; } while (0)
 static char g_not_heap[64];
-static void *one(void *a) { (void)a; guest_thread_init(); pthread_setspecific(g_keytls, g_not_heap); pthread_setspecific(g_keytlr, g_not_heap + 32); return NULL; }
+static _Atomic int g_handle_ok;
+static void *one(void *a) { (void)a; guest_thread_init(); guest_thread_set_handle(0x1234); uint8_t *tlr = pthread_getspecific(g_keytlr);
+    if (*(uint32_t *)(tlr + 0x110) == 0x1234) atomic_fetch_add(&g_handle_ok, 1);
+    pthread_setspecific(g_keytls, g_not_heap); pthread_setspecific(g_keytlr, g_not_heap + 32); return NULL; }
 int main(void) {
     enum { N = 200 };
     if (pthread_key_create(&g_key18, NULL) || pthread_key_create(&g_keytls, NULL) || pthread_key_create(&g_keytlr, NULL) || pthread_key_create(&g_keygate, NULL)) { printf("key creation failed\n"); return 2; }
@@ -32,5 +36,6 @@ int main(void) {
     EXPECT("bytes requested by 200 threads (200 × 9744)", 1948800, atomic_load(&g_total_bytes));
     EXPECT("blocks still not freed after all exited", 0, atomic_load(&g_live_blocks));
     EXPECT("free calls (3 blocks per thread)", 600, atomic_load(&g_freed_req));
+    EXPECT("SDK 22 thread handles written", N, atomic_load(&g_handle_ok));
     printf("t_thread_leak: %d checks, %d failed\n", checks, fails); return fails != 0;
 }

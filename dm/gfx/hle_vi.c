@@ -13,6 +13,11 @@ HLE_FORCE("_ZN2nn2vi18OpenDefaultDisplayEPPNS0_7DisplayE", "open default display
 HLE_FORCE("_ZN2nn2vi11CreateLayerEPPNS0_5LayerEPNS0_7DisplayE", "create layer; the host returns a static object", Result, h_vi_CreateLayer, void **out, void *disp) {
     (void)disp; *out = &g_layer; return RES_OK;
 }
+// FC 27 passes a LayerCreationSettings object. The SDK implementation asks the am service for
+// ISelfController and dereferences the proxy the host does not provide.
+HLE_FORCE("_ZN2nn2vi11CreateLayerEPPNS0_5LayerEPNS0_7DisplayEPKNS0_21LayerCreationSettingsE", "create layer from settings; the host returns a static object", Result, h_vi_CreateLayerSettings, void **out, void *disp, const void *settings) {
+    (void)disp; (void)settings; *out = &g_layer; return RES_OK;
+}
 // The overload with the layer's size (SDL3's Switch video driver, Absolum: 1920x1080 docked); the SDK's version calls through the vi service object the host never made (SIGSEGV at +0xe4).
 // An NVN or Vulkan window's textures decide what is presented; an EGL window surface takes the layer's size (dm/gfx/gl/hle_gl.m: Digimon Story Cyber Sleuth sizes its layer
 // itself and draws into the surface at that size)

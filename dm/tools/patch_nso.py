@@ -14,38 +14,60 @@
 # Output: <name>.patched.bin (key page and patch area appended after the image at PATCH_OFF; when that would start beyond 112 MB the patch area sits before the base, see FAR), <name>.fixups.tsv (layout and key page index header), <name>.gates.tsv, <name>.sites.tsv, <name>.cuts.tsv, <name>.obs.tsv
 import struct, re, sys, os, glob, types, importlib.util
 from itertools import combinations
+import nso_segments
 from capstone import *
 from capstone.arm64 import ARM64_OP_IMM, ARM64_OP_MEM, ARM64_OP_REG
-import nso, nso_asm
+import nso_asm
 from nso_asm import *   # the instruction encoders (B, ADRP, LDRX, ...), shared with the per-build patch files
 
 src, outdir, NAME = sys.argv[1], sys.argv[2], sys.argv[3]
-# An NSO, or an NRO (a module the game loads at run time with nn::ro, Super Smash Bros. Ultimate's fighter code), rewritten as an NSO of the same layout would be. nso.py checks the file
-# against its header before anything is allocated (a damaged module stops here with a [RED] line)
-MOD = nso.cli_read(src)
-bss = MOD.bss
+d = open(src, 'rb').read()
+if d[0x10:0x14] == b'NRO0':
+    # An NRO (a module the game loads at run time with nn::ro, Super Smash Bros. Ultimate's fighter code): the file is the image itself, each segment stored at its memory offset
+    # and uncompressed; +0x20 text, +0x28 ro, +0x30 data as {offset, size}, +0x38 bss size, +0x40 the build ID. Rewritten as an NSO of the same layout would be
+    flags, csz = 0, [struct.unpack_from('<II', d, 0x20 + 8 * i)[1] for i in range(3)]
+    segs = [(o, o, sz) for o, sz in (struct.unpack_from('<II', d, 0x20 + 8 * i) for i in range(3))]
+    bss = struct.unpack_from('<I', d, 0x38)[0]
+    # The image as nso_segments.load makes it for an NSO: the three segments at their memory offsets, then the zero bss (removed below when the patch area goes before the base)
+    IMG = bytearray(segs[2][1] + segs[2][2] + bss)
+    for fo, mo, sz in segs: IMG[mo:mo + sz] = d[fo:fo + sz]
+else:
+    assert d[:4] == b'NSO0'
+    IMG, flags, segs, bss, csz = nso_segments.load(d, bss=True)
 # Every jump between the patch area and the code is a B (±128 MB). A patch area appended after the image (with bss) cannot reach the code when it would start beyond 112 MB (leaving 16 MB for the patch area): Metroid Dread's main has about 1.8 GB of bss (the engine's static heap); Engage's main starts its patch area at about 103 MB and keeps it after the image.
 # The patch area then sits FRONT bytes before the module base (PATCH_OFF is negative), and the output file holds only text + ro + data (FILE_IMAGE_LEN) followed by the patch area; the loader supplies zero pages for bss and the key page (IMAGE_SIZE is the whole image).
 # The key page stays after bss (the patch area reaches it through ADRP, ±4 GB). Modules below the limit produce output byte-identical to before
-NEAR_PATCH_OFF = ((((len(MOD.image) + bss + 0x3FFF) & ~0x3FFF) + 0x4000 + 0xFFFF) & ~0xFFFF)   # where an appended patch area would start (as in the else branch below)
+NEAR_PATCH_OFF = ((((segs[2][1] + segs[2][2] + bss + 0x3FFF) & ~0x3FFF) + 0x4000 + 0xFFFF) & ~0xFFFF)   # where an appended patch area would start (as in the else branch below)
 FAR, FRONT = NEAR_PATCH_OFF > 0x7000000, 0x2000000
-# A text segment that ends within 32 MB of the ±128 MB reach (Monster Hunter Rise: 125.3 MB of text) puts the patch area right before the base instead. Its stubs follow the sites in address
-# order, so the last site's stub ends up about as far from it as the text is long. The first pass tries the gap that keeps every site in reach; when the patch area does not fit there
-# (Monster Hunter Rise: 3.6 MB), the rewriter runs again with exactly the size it needs (DM_PATCH_FRONT, set only by that rerun) and B() checks every branch
-BIG_TEXT = FAR and MOD.text_end + FRONT > 0x8000000 - 0x10000
-if BIG_TEXT: FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or (0x8000000 - 0x10000 - MOD.text_end) & ~0xFFFF
-IMG = MOD.image
-if not FAR: IMG.extend(bytes(bss))
-TEXT_END = MOD.text_end
-RO_OFF, DATA_OFF = MOD.segments[1][0], MOD.segments[2][0]
+TEXT_SIZE = segs[0][2]
+HUGE_TEXT = FAR and TEXT_SIZE > 0x8000000   # one direct-branch patch area cannot cover this; use a front and a back area
+if HUGE_TEXT:
+    FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or 0x1000000
+    BIG_TEXT = False
+else:
+    # A text segment that ends within 32 MB of the ±128 MB reach (Monster Hunter Rise: 125.3 MB of text) puts the patch area right before the base instead. Its stubs follow the sites in address
+    # order, so the last site's stub ends up about as far from it as the text is long. The first pass tries the gap that keeps every site in reach (2.6 MB here); when the patch area does not fit there
+    # (Monster Hunter Rise: 3.6 MB), the rewriter runs again with exactly the size it needs (DM_PATCH_FRONT, set only by that rerun) and B() checks every branch
+    BIG_TEXT = FAR and TEXT_SIZE + FRONT > 0x8000000 - 0x10000
+    if BIG_TEXT: FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or (0x8000000 - 0x10000 - TEXT_SIZE) & ~0xFFFF
+if FAR: del IMG[segs[2][1] + segs[2][2]:]   # the patch area goes before the base; the file holds text + ro + data only
+TEXT_END = TEXT_SIZE
+RO_OFF, DATA_OFF = segs[1][1], segs[2][1]
 if FAR:
     FILE_IMAGE_LEN = (len(IMG) + 0x3FFF) & ~0x3FFF
     KEY_PAGE_OFF = (len(IMG) + bss + 0x3FFF) & ~0x3FFF
     IMAGE_SIZE, PATCH_OFF = KEY_PAGE_OFF + 0x4000, -FRONT
+    if HUGE_TEXT:
+        PATCH2_OFF = (KEY_PAGE_OFF + 0x4000 + 0x3FFF) & ~0x3FFF
+        PATCH2_SIZE = int(os.environ.get('DM_PATCH_BACK', '0'), 0) or 0x1000000
+    else:
+        PATCH2_OFF = PATCH2_SIZE = 0
 else:
     KEY_PAGE_OFF = (len(IMG) + 0x3FFF) & ~0x3FFF
     IMG.extend(bytes(0x4000))
     PATCH_OFF = (len(IMG) + 0xFFFF) & ~0xFFFF
+    PATCH2_OFF = PATCH2_SIZE = 0
+
 
 # ---- Registered patches of particular builds, keyed by NSO build ID: dm/tools/sdk_patches.py (Nintendo SDK module builds, which several games can ship) and dm/games/<id>/patches.py
 # (a game's own modules: its profile's builds). Every file is loaded, whatever the game, so a module gets the patches of its build wherever it comes from; a build ID claimed twice stops the rewrite.
@@ -54,6 +76,7 @@ else:
 #   OBS = {build ID: [(offset, number, original instruction word, reason)]}: observation gates. Numbers match OBS_* in the host's hle.h; the original instruction must be position
 #     independent (no PC-relative / branch / anything involving x18 or tpidr), asserted offline; when the host has no callback attached the gate block goes in and out once and returns
 #   FRAME_STEP = {build ID: function(ctx)}: the frame step stubs of a main ("Frame step in whole vsyncs" below)
+#   ACQUIRE_EXCLUSIVES = {build ID: True}: every plain exclusive load that starts a real exclusive window gets the acquire bit (BotW's sead locks)
 #   MATCH_CUTS = {module name: [nso_match rule, ...]}: fallback for modules without registered CUTS. Only the profile selected by DM_GAME participates; a derived profile uses
 #     the repository's rules, an external-only provisional profile its own. Missing or ambiguous matches are reported and skipped; known builds retain their exact CUTS.
 #     A rule of several functions applies whole or not at all. For such a module <name>.match.tsv lists the cuts of the profile's registered builds of it and each patch's result,
@@ -61,8 +84,6 @@ else:
 #   sdk_patches.py's MATCH_CUTS are SDK-wide: every game's module of that name, when its build has no CUTS and the selected game's profile was not brought up on it (its build
 #     rows), so the games' registered builds rewrite as before. They are fixes of Nintendo's code that hold for any game on a platform with a small address space; a build
 #     without a reviewed implementation of one keeps the original code, logged but not red (games without virtual address memory never reach it)
-#   CAPABILITIES = {build ID: (name,...)}: verified main-build features exposed by fixups metadata to the launcher
-#   GENERALIZE = 'note': not read here; whether a general rule could replace the file's patches, listed by dm/tools/docs_patches.py in docs/agents/game-patches.md
 PATCH_FILES = [os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sdk_patches.py')] + sorted(glob.glob(os.path.join(os.path.dirname(os.path.abspath(__file__)), '../games/*/patches.py')))
 # Profiles outside the repository (DM_GAMES_DIR, folders separated by os.pathsep, which is ':' as in dm/games/game.py: the NSP script's provisional profile of a game being brought up) may have a
 # patches.py of their own builds too; they are loaded after the repository's, under the same rule (a build ID claimed twice stops the rewrite)
@@ -71,7 +92,7 @@ patch_paths = {}
 for path in PATCH_FILES: patch_paths.setdefault(os.path.realpath(path), path)   # repeated roots and symlinks name the same file, not competing build claims
 PATCH_FILES = list(patch_paths.values())
 def load_patches():
-    tables, where = {'CUTS': {}, 'OBS': {}, 'FRAME_STEP': {}, 'MATCH_CUTS': {}, 'SDK_MATCH_CUTS': {}, 'CAPABILITIES': {}}, {}
+    tables, where = {'CUTS': {}, 'CODE': {}, 'OBS': {}, 'FRAME_STEP': {}, 'MATCH_CUTS': {}, 'SDK_MATCH_CUTS': {}, 'ACQUIRE_EXCLUSIVES': {}}, {}
     for n, path in enumerate(PATCH_FILES):
         spec = importlib.util.spec_from_file_location(f'patches_{n}', path); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
         for kind, table in tables.items():
@@ -91,7 +112,7 @@ def load_patches():
                 table[bid], where[kind, bid] = v, path
     return tables, where
 PATCHES, PATCH_WHERE = load_patches()
-BUILD_ID = MOD.build_id[:0x10].hex()
+BUILD_ID = d[0x40:0x50].hex()
 cuts = list(PATCHES['CUTS'].get(BUILD_ID, []))
 if BUILD_ID not in PATCHES['CUTS']:
     from nso_match import resolve
@@ -128,9 +149,21 @@ KEYS = {'K18': 508, 'KTLS': 509, 'KTLR': 510, 'KGATE': 511}
 KEY_INDEX = {k: i for i, k in enumerate(('K18', 'KTLS', 'KTLR', 'KGATE'))}
 
 md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
-patch = bytearray(); fix = []; gates = []; stats = {}
+patch_front = bytearray(); patch_back = bytearray()
+AREA_OFFS = (PATCH_OFF, PATCH2_OFF) if HUGE_TEXT else (PATCH_OFF,)
+AREA_BUFS = (patch_front, patch_back) if HUGE_TEXT else (patch_front,)
+AREA = 0
+patch = patch_front
+fix = []; gates = []; stats = {}
 def stat(k): stats[k] = stats.get(k, 0) + 1
-def here(): return PATCH_OFF + len(patch)
+def area_off(): return AREA_OFFS[AREA]
+def here(): return area_off() + len(patch)
+def set_area(addr):
+    global AREA, patch
+    cand = [i for i in range(len(AREA_OFFS)) if abs(addr - (AREA_OFFS[i] + len(AREA_BUFS[i]))) <= 0x8000000 - 0x10000]
+    if not cand: raise RuntimeError(f'no patch area reaches site {addr:#x}')
+    AREA = min(cand, key=lambda i: abs(addr - (AREA_OFFS[i] + len(AREA_BUFS[i]))))
+    patch = AREA_BUFS[AREA]
 def emit(w, kind=None):
     if kind: fix.append((len(patch), kind))
     patch.extend(struct.pack('<I', w & 0xFFFFFFFF))
@@ -186,6 +219,7 @@ def sp_delta(ins):
     return 0
 
 def site_plain(ins):
+    set_area(ins.address)
     S, T = pick(regs_in(ins))
     dlt = sp_delta(ins)
     save = -16 if dlt == 0 else -112          # Instructions that modify sp write below sp, so the scratch save is placed deep in the reserved area
@@ -198,6 +232,7 @@ def site_plain(ins):
     return start
 
 def site_sp(ins):
+    set_area(ins.address)
     """Destination is sp and a source is x18 (Engage's alloca: mov x18, sp; sub x18, x18, x0; mov sp, x18). site_plain saves its scratch relative to the old sp and would restore it relative to the new one:
     copy the old sp into T first, and after the instruction restore S / T relative to T (without writeback, ldp may use the base register as a destination). x18 is not written, so the slot is not written back"""
     S, T = pick(regs_in(ins))
@@ -209,6 +244,7 @@ def site_sp(ins):
     return start
 
 def site_sp_align(ins, n):
+    set_area(ins.address)
     """sub sp, sp, xN (no shift): Horizon leaves stack alignment checking off for user code, Apple's kernel does not, so an sp that is not 16-byte aligned faults (SIGBUS) at the next sp-based access.
     Paper Mario: The Thousand-Year Door's script call bridges (main+0x17c140 and five more beside it, hand-written) reserve the callee's stack arguments as their sizes add up (4 for one int)
     and give the area back with add sp, sp, xN: the callee's first stp faulted. xN is rounded up to 16 first, which the add then gives back too. Compiled code keeps such sizes 16-aligned, so
@@ -219,6 +255,7 @@ def site_sp_align(ins, n):
     return start
 
 def site_cond(ins):
+    set_area(ins.address)
     w = struct.unpack('<I', ins.bytes)[0]
     S, T = pick(regs_in(ins))
     tgt = ins.operands[-1].imm
@@ -236,6 +273,7 @@ def site_cond(ins):
     return start
 
 def site_pcrel(ins):
+    set_area(ins.address)
     tgt = ins.operands[1].imm
     S, T = pick(set())
     start = here()
@@ -247,6 +285,7 @@ def site_pcrel(ins):
     return start
 
 def site_br(ins, base, count):
+    set_area(ins.address)
     """Jump table br x18: target = base + 4i. Stash x16 in the red zone → equally spaced landing pads → restore x16 → original target."""
     start = here()
     emit(STUR(16, 31, -16)); emit(STUR(17, 31, -24))   # x16 / x17 are temporary registers that can stay live within a function; save them to the red zone before borrowing
@@ -269,6 +308,7 @@ def site_br(ins, base, count):
     return start
 
 def site_br_tab(ins, targets):
+    set_area(ins.address)
     """Offset-table br x18 (ldrsw x18,[xB,x18,lsl #2]; add x18,x18,xB): target = table base + signed entry; the table is constant, so all targets are read at rewrite time.
     x16 = guest x18, compared with each target in turn (adrp + add put the target address in x17); on a match restore x16 / x17 and jump to the original target; no match → brk (the original bounds check already stops out-of-range indices)"""
     start = here()
@@ -284,6 +324,7 @@ def site_br_tab(ins, targets):
     return start
 
 def site_blr(ins):
+    set_area(ins.address)
     """blr x18 (Engage main+0x9ff324): x16 = guest x18, x30 = the instruction after the original blr, br x16. At a call site x16 / x17 are intra-procedure-call temporaries under the calling convention, so they need no saving;
     the return address is the original one, so the callee returns straight there (IL2CPP's C++ exceptions look up unwind tables by return address and must not stop in the patch area)"""
     start = here()
@@ -293,12 +334,14 @@ def site_blr(ins):
     return start
 
 def site_br_call(ins):
+    set_area(ins.address)
     """br x18 as an indirect tail call (tail_call): x16 = guest x18, br x16. As at site_blr, x16 / x17 are intra-procedure-call temporaries at a call, and x30 keeps the caller's return address"""
     start = here()
     emit(MRS_TPIDRRO(16)); emit_slot_addr(16, 17, 'K18'); emit(LDRX(16, 16)); emit(BR(16))
     return start
 
 def site_sysreg_read(ins, kind):
+    set_area(ins.address)
     """mrs xN, tpidr_el0 / tpidrro_el0 → xN = thread slot value."""
     N = ins.bytes[0] & 31
     tmp = 16 if N != 16 else 17
@@ -308,6 +351,7 @@ def site_sysreg_read(ins, kind):
     return start
 
 def site_tpidr_write(ins):
+    set_area(ins.address)
     N = struct.unpack('<I', ins.bytes)[0] & 31
     (T,) = pick({N}, 1)
     start = here()
@@ -325,6 +369,7 @@ def emit_gate_call():
     emit(MRS_TPIDRRO(30)); emit_slot_addr(30, 29, 'KGATE'); emit(LDRX(30, 30)); emit(LDRX(29, 31))
 
 def site_gate(ins, kind, arg):
+    set_area(ins.address)
     """svc / mrs cntpct_el0 → host gate. The gate address is taken from thread slot KGATE; the gate looks up gates.tsv by return point (the address of this block's ldp)."""
     start = here()
     emit(STP_PRE(29, 30, 31, -16))
@@ -337,6 +382,7 @@ def site_gate(ins, kind, arg):
     return start
 
 def site_obs(off, oid, word):
+    set_area(off)
     """Observation gate: original entry instruction → enter the host gate (arg = observation number) → restore x29/x30 → execute the original instruction → jump back to off+4.
         The first half of the gate block is word-for-word isomorphic with site_gate; the host only reads registers and does not modify them (the x0–x8 written back by dm_gate are the original values)."""
     ins = dis(word, off)
@@ -378,6 +424,7 @@ def window_adrp(x, S, pc):
     return ADRP(S if rd == 18 else rd, pc, x.operands[1].imm)
 
 def site_window(seg):
+    set_area(seg[0].address)
     used = set()
     for x in seg: used |= regs_in(x)
     S, T = pick(used)
@@ -426,6 +473,7 @@ def retry_block(insl, k, wseg):
     return None
 
 def site_retry_window(parts):
+    set_area(parts[0][0][0].address)
     """A retry block (see retry_block) gets a patch copy of its own: it cannot jump into the window's copy, because the x18 stand-in would have to be loaded
     between its exclusive load and the store. parts = [(retry block, its fall-through), (window from the store on, the window's fall-through)] are copied one
     after the other under one prologue, each followed by its fall-through stub; branches to any copied instruction (between the parts, and the failed store's
@@ -564,7 +612,7 @@ def check_before_copy(insl, ctx, ld, idx):
         if writes(p) & (idx | {src}): return None
     else: return None
     return ctx[k - 2]
-def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False):
+def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False, back=16):
     """The br x18 is preceded by the offset-table form (Engage main+0x12eec94): cmp w18,#N; b.hi; ldrsw x18,[xB,x18,lsl #2]; add x18,x18,xB.
     The index may be another register, and the bounds check may be on a register copied into it: Link's Awakening's GLSLC (subsdk0+0x1be6e8) has
     sub w0,w18,#0xd1; cmp w0,#0x31; b.hi; ldrsw x18,[x17,x0,lsl #2], its movie module (subsdk1+0xae9a4) cmp w21,#7; b.hi; ...; mov w18,w21; ldrsw x18,[x4,x18,lsl #2].
@@ -574,11 +622,26 @@ def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False):
     256 instructions was set further back, and its writer chain is followed to the function's start (table_base far), every target an instruction of the function: ASTRAL CHAIN main+0x6db498
     and +0x6db70c load bases set 441 and 549 instructions before, x24 in the function's first block and x3 after it, which the loop around their dispatches keeps. A function-wide search
     for the one adrp + add pair that fits (table_cands, as jump_adr_offsets does) finds two for x3 there, the other a table of its own further on. Returns all targets, or None if not recognized"""
-    ctx = insl[max(0, j - 16):j]
+    ctx = insl[max(0, j - back):j]
     add = next((p for p in reversed(ctx) if p.mnemonic == 'add' and re.fullmatch(r'x18, x\d+, x\d+', p.op_str)), None)
     if not add: return None
+    if back > 16:
+        # The compiler may schedule whole blocks between the dispatch's add and the br (Persona 5
+        # Strikers main+0x496f20 zeroes twenty-something registers there); valid only if nothing
+        # writes x18 on that stretch.
+        if any('x18' in [p.reg_name(r) for r in p.regs_access()[1]] for p in ctx[ctx.index(add) + 1:]): return None
     _, t, rb = add.op_str.split(', ')   # t = the loaded entry, rb = the table base
     ld = next((p for p in reversed(ctx) if p.mnemonic == 'ldrsw' and re.fullmatch(rf'{t}, \[{rb}, x(\d+), lsl #2\]', p.op_str)), None)
+    if not ld:
+        # Or the add's base is a fresh copy of the register the load indexed with: P5S has
+        # ldrsw x9,[x10,x9,lsl #2]; mov x12,x10; add x18,x9,x12.
+        for p in reversed(ctx[:ctx.index(add)]):
+            m = re.fullmatch(r'(x\d+), (x\d+)', p.op_str) if p.mnemonic == 'mov' else None
+            if not m or m.group(1) != rb: continue
+            src = m.group(2)
+            ld = next((q for q in reversed(ctx[:ctx.index(p)]) if q.mnemonic == 'ldrsw' and re.fullmatch(rf'{t}, \[{src}, x(\d+), lsl #2\]', q.op_str)), None)
+            if ld: rb = src
+            break
     if not ld: return None
     # GLSLC subsdk0+0x2f403c checks a masked copy instead: and w16,w18,#0x3f; cmp w16,#0xe; b.hi; ...; and x18,x18,#0x3f; ldrsw x18,[x15,x18,lsl #2]
     idx = {'w' + re.fullmatch(rf'{t}, \[{rb}, x(\d+), lsl #2\]', ld.op_str).group(1)}   # pyright: ignore[reportOptionalMemberAccess]  # ld was chosen by this match
@@ -1007,6 +1070,7 @@ for fa, fb in funcs:
                 if not tgt: tgt = jump_masked_pred(insl, j)   # the check on a masked copy made in the block, the index masked in the block that branches to it
                 if not tgt: tgt = jump_masked_not(insl, j)   # a complemented low-bit index with its zero case branched away: exactly mask entries
                 if not tgt: tgt = jump_offsets(insl, j, copy_first=True, far_base=True, forward_base=True)   # a unique base initialized in a later block that branches backward
+                if not tgt: tgt = jump_offsets(insl, j, back=64)   # the dispatch computed far before the br (P5S main+0x496f20); last, so sites that rewrote before come out the same
                 assert tgt, f'jump table {ins.address:x}'
                 tabjumps[ins.address] = tgt; continue
             jumps[ins.address] = (base, width)
@@ -1143,9 +1207,11 @@ obs += region_obs
 # a late frame, so motion is even and game time = real time. The steps stay values the games' own logic uses (1 to 3). Age of Calamity's updates are not held by the presents:
 # its stubs run them at the cap, and the host only paces its presents (its patches.py).
 # State page = the page after the key page (zero in the file, read-write in both loaders): +0 float target fps written by the loader (fps_target, DM_FPS_TARGET; 0 = every stub
-# runs the original instructions), +4 30 fps movie/cinematic flag, +8 double lead (TOTK), +0x10 float render scale (TOTK, BotW), +0x18 double game seconds (TOTK),
-# +0x20 u32 step in vsyncs (host; 0 = not decided yet), +0x24 u32 a step the game fixes itself (BotW's VFR override; 0 = none), +0x28 u32 AoC's vsyncs per update, marked by
-# its first stub (0 = off), +0x30 u64 vsyncs stepped (the stubs; logged by the host to check the game's speed). Stub bodies assembled with clang
+# runs the original instructions), +4 30 fps movie/cinematic flag, +8 double lead (TOTK) or BotW 1.6.0's 1/30 s pad tick, +0x10 float render scale (TOTK, BotW),
+# +0x14 float VFR ratio (BotW 1.6.0's interval readers), +0x18 double game seconds (TOTK), +0x20 u32 step in vsyncs (host; 0 = not decided yet), +0x24 u32 a step the game
+# fixes itself (BotW's VFR override; 0 = none), +0x28 u32 AoC's vsyncs per update or BotW 1.6.0's host-count marker (0x160), +0x30 u64 vsyncs stepped
+# (the stubs, or the host for BotW 1.6.0; logged by the host to check the game's speed), +0x38 u32 presents (host) and +0x3c u32 the last present BotW 1.6.0's VFR stub updated its tick
+# for. Stub bodies assembled with clang
 # A build's stubs are FRAME_STEP[build ID](ctx) in its patches.py: ctx.here() / ctx.emit(word) assemble into the patch area, ctx.site(offset, original bytes) asserts a site and that it is
 # no rewrite site, ctx.put(offset, words, reason) writes it (listed with the cuts), ctx.state is the state page's offset, and ctx.render_scale = 1 marks a render-scale stub
 FRAME_STEP = PATCHES['FRAME_STEP']
@@ -1409,6 +1475,7 @@ def spin_region1(T, bes, ban, stores):
     if live[T] & defs: return None
     return {'T': T, 'R': sorted(R), 'nodes': nodes, 'valid': valid}
 def spin_emit(g):
+    set_area(g['T'])
     T, R, nodes, valid = g['T'], g['R'], g['nodes'], g['valid']
     cpy, fixes, tramp = {}, [], {}
     for i, a in enumerate(R):
@@ -1438,7 +1505,7 @@ def spin_emit(g):
         if t not in tramp: tramp[t] = here(); emit(B(here(), t))
         return tramp[t]
     for idx, x, info in fixes:
-        pc = PATCH_OFF + idx
+        pc = area_off() + idx
         if x is None: w = B(pc, cpy.get(info, info))
         elif isinstance(info, tuple): w = spin_rebranch(x, pc, out(info[1]))
         elif info is not None: w = spin_rebranch(x, pc, cpy[info])
@@ -1455,33 +1522,78 @@ def spin_emit(g):
 spin_regions = [g for g in (spin_region(T, spin_cand[T]) for T in sorted(spin_cand)) if g]   # all found on the unchanged image first: emitting patches back-edges
 spin_sites = [(g['T'], sorted(g['valid']), sum(len(g['nodes'][a]['ins']) for a in g['R'])) for g in spin_regions]
 for g in spin_regions: spin_emit(g)
+
+# sead's locks in Breath of the Wild take the lock with a plain exclusive load and only put a release barrier before the unlock. A plain ldxr does
+# not order the loads inside the critical section after the lock is observed free; Apple's cores can satisfy them early, so two workers take the
+# same job index and run one job twice (MacNativeGames found and verified this on 1.6.0). Upgrading a load that opens a real ldxr/stxr window
+# to ldaxr is one bit and the same registers and size: stronger ordering only. This is opt-in per game build because it changes performance on
+# every exclusive loop; it is not a substitute for a reviewed cut where the game relies on relaxed exclusives.
+def exclusive_load(w): return (w & 0x3ffffc00) == 0x085f7c00 or (w & 0xbfff8000) == 0x887f0000   # ldxr{b,h} / ldxp
+def exclusive_store(w): return (w & 0x3fe07c00) == 0x08007c00 or (w & 0xbfe00000) == 0x88200000   # stxr{b,h} / stxp
+def acquire_exclusives(buf, lo=0, hi=None):
+    hi = len(buf) if hi is None else min(hi, len(buf)); out = []
+    for off in range(lo & ~3, hi & ~3, 4):
+        w = struct.unpack_from('<I', buf, off)[0]
+        if not exclusive_load(w) or w & 0x8000: continue
+        rn = (w >> 5) & 31
+        for p in range(off + 4, min(off + 0x44, hi & ~3), 4):
+            x = struct.unpack_from('<I', buf, p)[0]
+            if exclusive_store(x) and (x >> 5) & 31 == rn:
+                out.append(off); struct.pack_into('<I', buf, off, w | 0x8000); break
+    return out
+if PATCHES['ACQUIRE_EXCLUSIVES'].get(BUILD_ID):
+    for off in acquire_exclusives(IMG, 0, TEXT_END):
+        cuts.append((off, struct.pack('<I', struct.unpack_from('<I', IMG, off)[0] & ~0x8000).hex(),
+                     struct.pack('<I', struct.unpack_from('<I', IMG, off)[0]).hex(), 'exclusive load with acquire (sead lock ordering)'))
+    acq_patch = [off for buf in AREA_BUFS for off in acquire_exclusives(buf)]
+    stats['acquire'] = sum(1 for c in cuts if c[3] == 'exclusive load with acquire (sead lock ordering)') + len(acq_patch)
 if os.environ.get('DM_SPIN_LIST'):
     for T, bes, n in spin_sites: print(f'{NAME} spin wait {T:#x} ({n} instructions), back-edges ' + ' '.join(f'{b:#x}' for b in bes))
+
+# Registered executable code caves: build-specific bytes placed in the back
+# patch area. They let a short branch site run more instructions without
+# moving hot text or relying on the assembler's relative branch range.
+for addr, nb, why in PATCHES['CODE'].get(BUILD_ID, []):
+    if not HUGE_TEXT or not (PATCH2_OFF <= addr < PATCH2_OFF + PATCH2_SIZE):
+        raise RuntimeError(f'{NAME}: code cave {addr:#x} is outside the back patch area')
+    off = addr - PATCH2_OFF
+    raw = bytes.fromhex(nb)
+    if len(patch_back) < off + len(raw): patch_back.extend(bytes(off + len(raw) - len(patch_back)))
+    if any(patch_back[off:off + len(raw)]):
+        raise RuntimeError(f'{NAME}: code cave {addr:#x} overlaps generated patch code')
+    patch_back[off:off + len(raw)] = raw
+    stat('code cave')
 
 os.makedirs(outdir, exist_ok=True)
 P = lambda ext: os.path.join(outdir, f'{NAME}.{ext}')
 if FAR:   # patch area before the base: file = text + ro + data (padded to 16K) + patch area
-    if BIG_TEXT and len(patch) > FRONT - 0x4000 and 'DM_PATCH_FRONT' not in os.environ:
-        need = (len(patch) + 0x4000 + 0xFFFF) & ~0xFFFF
-        print(f'{NAME}: patch area of {len(patch):#x} bytes does not fit in {FRONT:#x} before the base; rewriting again with {need:#x}', flush=True)
+    if BIG_TEXT and len(patch_front) > FRONT - 0x4000 and 'DM_PATCH_FRONT' not in os.environ:
+        need = (len(patch_front) + 0x4000 + 0xFFFF) & ~0xFFFF
+        print(f'{NAME}: patch area of {len(patch_front):#x} bytes does not fit in {FRONT:#x} before the base; rewriting again with {need:#x}', flush=True)
         os.execve(sys.executable, [sys.executable] + sys.argv, dict(os.environ, DM_PATCH_FRONT=hex(need)))
-    assert len(patch) <= FRONT - 0x4000, f'patch area of {len(patch):#x} bytes does not fit in the {FRONT:#x} before the base'
-    open(P('patched.bin'), 'wb').write(IMG + bytearray(FILE_IMAGE_LEN - len(IMG)) + patch)
+    assert len(patch_front) <= FRONT - 0x4000, f'patch area of {len(patch_front):#x} bytes does not fit in the {FRONT:#x} before the base'
+    if HUGE_TEXT:
+        assert len(patch_back) <= PATCH2_SIZE - 0x4000, f'back patch area of {len(patch_back):#x} bytes does not fit in {PATCH2_SIZE:#x}'
+        front_file_len = (len(patch_front) + 0x3FFF) & ~0x3FFF
+        back_file_len = (len(patch_back) + 0x3FFF) & ~0x3FFF
+        open(P('patched.bin'), 'wb').write(IMG + bytearray(FILE_IMAGE_LEN - len(IMG)) + patch_front +
+            bytearray(front_file_len - len(patch_front)) + patch_back + bytearray(back_file_len - len(patch_back)))
+    else:
+        open(P('patched.bin'), 'wb').write(IMG + bytearray(FILE_IMAGE_LEN - len(IMG)) + patch_front)
 else:
-    open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch)
+    open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch_front)
+
 import hashlib
 with open(os.path.join(outdir, 'build_src.sha256'), 'w') as f:   # the same for every module: the rewriter and every patch file, by path from dm/tools
-    for src_ in (os.path.abspath(__file__), nso.__file__, nso_code.__file__, nso_asm.__file__, *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__)))}\n')
+    for src_ in (os.path.abspath(__file__), nso_code.__file__, nso_asm.__file__, *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__)))}\n')
 with open(P('fixups.tsv'), 'w') as f:
     f.write(f'# PATCH_OFF\t{PATCH_OFF:#x}\n# KEY_PAGE_OFF\t{KEY_PAGE_OFF:#x}\n# KEY_PAGE_SIZE\t0x4000\n# TEXT_END\t{TEXT_END:#x}\n# RO_OFF\t{RO_OFF:#x}\n# DATA_OFF\t{DATA_OFF:#x}\n')
+    if HUGE_TEXT:
+        f.write(f'# PATCH2_OFF\t{PATCH2_OFF:#x}\n# PATCH2_SIZE\t{PATCH2_SIZE:#x}\n# PATCH2_FILE_OFF\t{FILE_IMAGE_LEN + ((len(patch_front) + 0x3FFF) & ~0x3FFF):#x}\n# PATCH2_LEN\t{(len(patch_back) + 0x3FFF) & ~0x3FFF:#x}\n')
     if FAR: f.write(f'# IMAGE_SIZE\t{IMAGE_SIZE:#x}\n# FILE_IMAGE_LEN\t{FILE_IMAGE_LEN:#x}\n')   # patch area before the base (negative PATCH_OFF): whole image size, length of the image part of the file
     for k in KEY_INDEX: f.write(f'# KEY_{k}_IDX\t{KEY_INDEX[k]}\n')
     if FS_STATE_OFF: f.write(f'# FPS_STATE_OFF\t{FS_STATE_OFF:#x}\n')   # frame step state page (FRAME_STEP): the loader writes the target fps there
     if RENDER_SCALE: f.write('# RENDER_SCALE\t1\n')   # a render-scale stub reads state +0x10 (the loader ignores the key; dm/games/settings.py offers the setting by it)
-    if NAME == 'main':
-        for capability in PATCHES['CAPABILITIES'].get(BUILD_ID, ()):
-            assert re.fullmatch(r'[A-Z][A-Z0-9_]*', capability), f'invalid capability {capability}'
-            f.write(f'# {capability}\t1\n')
     f.write(f'# BUILD_ID\t{BUILD_ID}\n')   # the host identifies the build by it: features with hard-coded addresses only run on the build they belong to
 with open(P('gates.tsv'), 'w') as f:
     for ret, k, arg, orig in gates: f.write(f'{ret:#x}\t{k}\t{arg}\t{orig:#x}\n')
@@ -1498,5 +1610,5 @@ with open(P('cuts.tsv'), 'w') as f:
 with open(P('obs.tsv'), 'w') as f:
     f.write(f'# BUILD_ID\t{BUILD_ID}\n')
     for off, oid, ow, why in obs: f.write(f'{off:#x}\t{oid}\t{ow}\t{why}\n')
-print(NAME, stats, 'cuts', len(cuts), 'obs', len(obs), 'patch', len(patch), 'PATCH_OFF', hex(PATCH_OFF), 'slot_refs', len(fix), 'gates', len(gates))
+print(NAME, stats, 'cuts', len(cuts), 'obs', len(obs), 'patch', len(patch_front) + (len(patch_back) if HUGE_TEXT else 0), 'PATCH_OFF', hex(PATCH_OFF), 'PATCH2_OFF', hex(PATCH2_OFF), 'slot_refs', len(fix), 'gates', len(gates))
 if DATA_BLOCKS: print(NAME, 'data blocks left alone:', ', '.join(f'{s:#x}..{e:#x}' for s, e in DATA_BLOCKS))

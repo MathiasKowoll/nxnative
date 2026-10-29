@@ -4,6 +4,7 @@
 #define TLS_SIZE 8192
 #define TLR_SIZE 0x200
 #define THREAD_OBJ_SIZE 0x400
+#define TLR_CURRENT_THREAD_HANDLE_OFF 0x110
 extern void dm_gate(void);            // entry.S: common gate entry
 static pthread_key_t g_keyown;   // raw pointers of the TLS block / thread-local region this thread allocated (see the end of guest_thread_init)
 static pthread_once_t g_keyown_once = PTHREAD_ONCE_INIT;
@@ -24,4 +25,15 @@ void guest_thread_init(void) {
     pthread_setspecific(g_keytls, own[0]); pthread_setspecific(g_keytlr, tlr);
     void **prev = pthread_getspecific(g_keyown); if (prev) own_free(prev);   // re-initialised on the same thread: free the previous set first (the new one is what the slots now point to)
     pthread_setspecific(g_keyown, own);
+}
+
+// SDK 22's SdkMutexType::IsLockedByCurrentThread reads the current Horizon
+// thread handle from ThreadLocalRegion+0x110. A fresh region has zero there, so
+// an unlocked mutex (whose lock word is zero/one in different SDK layouts) can
+// look owned by the current thread and pthread_mutex_lock aborts. The SDK fills
+// this field for threads it creates; the main thread and host-created guest
+// threads need the handle from the host thread table.
+void guest_thread_set_handle(uint32_t handle) {
+    uint8_t *tlr = pthread_getspecific(g_keytlr);
+    if (tlr && dm_sdk_major() >= 22) *(uint32_t *)(tlr + TLR_CURRENT_THREAD_HANDLE_OFF) = handle;
 }

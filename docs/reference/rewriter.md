@@ -23,6 +23,30 @@ To enroll a cut for any game's own module:
 3. Add the rule under `MATCH_CUTS = {'main': [rule]}` (or the appropriate non-SDK module) in that game's `patches.py`. Record the evidence and remaining runtime validation in the game's note. Do not transplant a workaround into unrelated games.
 4. Verify an unregistered build-ID copy through the rewriter, comparing its output with the known fixed cut, and run `test_nso_match.py`, `test_patches.py` and `test_nro_pack.py`. The matching tests use synthetic modules from two profiles to check relocation, rejection and isolation without game files.
 
+### Exclusive loads with acquire
+
+- **Symptom:** a game's job or render threads occasionally run the same queued item twice and later crash on a
+  pointer read from a structure another thread updates (`h_nvnBufferGetAddress`, a null or float-shaped pointer).
+  It is intermittent and happens more often on Apple's cores than on the Switch's Cortex-A57.
+- **Cause:** the engine's spin lock takes the lock with a plain `ldxr` / `stxr` and puts only a release barrier
+  before the unlock. ARMv8 does not order the loads inside the critical section after a plain `ldxr` observes the
+  lock free; a control dependency is not an acquire. Apple's cores can satisfy the protected load early, before
+  another thread's store is visible, so two threads see the same "next item" and run it twice.
+- **Fix:** a profile can opt a build into `ACQUIRE_EXCLUSIVES = {build ID: True}` in its `patches.py`. The rewriter
+  scans the executable text and the generated patch area for each plain `ldxr` / `ldxrb` / `ldxrh` / `ldxp` that
+  opens a real exclusive window (a matching store-exclusive on the same base register within 16 instructions) and
+  sets the acquire bit (`ldaxr` / `ldaxrb` / `ldaxrh` / `ldaxp`). Register numbers, sizes and the following
+  instructions are unchanged; the result is stronger ordering only. The rewrite records one entry per changed load
+  in `<module>.cuts.tsv` with the reason `exclusive load with acquire`.
+- **Scope:** opt-in per game build, because every exclusive loop pays for the stronger ordering. It is not a
+  substitute for a reviewed cut where the game relies on relaxed atomics; it is for a verified lock whose missing
+  acquire is the fault. `ACQUIRE_EXCLUSIVES` is applied after the normal cuts, observations and spin gates, and
+  also to the copied spin-wait loops in the patch area.
+- **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md#update-160-v786432),
+  1.6.0 `main` `8e9978d5…`: 18,312 real exclusive windows changed; GitHub issue #251's reproducible
+  `h_nvnBufferGetAddress` crash stopped in the local Mac runs. The same instruction pattern is present in 1.9.0
+  and in other sead games, but those builds have not been opted in here.
+
 ## Jump tables
 
 ### Offset jump tables through x18 read at rewrite time
@@ -206,11 +230,15 @@ To enroll a cut for any game's own module:
 - **Fix:** when the text ends within 32 MB of the reach (`BIG_TEXT`), the patch area goes right before the base: the stubs follow the sites in address order, so each site's stub is about as far from it as the text is long. The first pass tries the gap that keeps every site in reach (2.6 MB here); when the patch area is larger (3.6 MB, 34,322 sites), the rewriter runs itself again with exactly that size (`DM_PATCH_FRONT`, set only by the rerun) and `B()` checks every branch.
 - **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) `main`: 125.3 MB of text.
 
-### One patch area cannot cover a text larger than the branch reach
+### Two patch areas cover a text larger than the branch reach
 
 - **Symptom:** `patch_nso.py` rewrites for several minutes, reports a small patch area (for example `0x6b738c` bytes), restarts itself with `DM_PATCH_FRONT`, and then stops in `site_window` at `B()`'s ±128 MB assertion. The text size in the module header is larger than `0x8000000`.
 - **Cause:** a direct Arm64 `b` reaches ±128 MB. A front patch area can cover only part of a text segment larger than that; moving it closer to the end moves it away from the start. FC 27's `main` has 194,478,320 bytes of text (185.5 MB), while its generated patch area is only about 6.7 MB. One front area therefore cannot reach every rewrite site.
-- **Status:** open. ZBIC decoding and the survey are working; the rewriter needs a layout with more than one patch area (or a range-independent site entry) before this module can be rewritten. `DM_PATCH_FRONT` only changes where the unreachable branch fails and is not a fix.
+- **Fix:** `patch_nso.py` now recognizes a text segment larger than the branch reach and emits **two** patch areas:
+  - a front area before the module base, and
+  - a back area after the image.
+  Each site selects the area that keeps its direct branch within ±128 MB. The two areas are padded to 16 KB and written as separate sections in `gen_embed.py`. The loader maps both areas and treats either as part of the module for symbolization.
+- **Validation:** FC 27's `main` rewrites successfully with a 3.6 MB front area and a 3.4 MB back area, and the resulting embedded object assembles with four sections.
 - **Found on:** EA Sports FC 27 (survey; no repository profile yet).
 
 ## Cuts and observation gates

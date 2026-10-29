@@ -268,6 +268,7 @@ extern void dm_thread_enter(uint64_t entry, uint64_t arg, uint64_t sp);   // ent
 uint32_t (*dm_thread_tick_fn)(void);   // Gets the current game tick; registered when diag.c initializes (unit tests do not register it, the tick number is recorded as 0)
 void crash_thread_init(void);
 void guest_thread_init(void);   // thread.c: the single place that sets the per-thread TSD slots (gate, x18, TLS, TLR)
+void guest_thread_set_handle(uint32_t handle);
 // Switch priority → QoS class (DM_QOS_MAP=1; off by default until a phone A/B shows it saves power without dropping frames). Otherwise every guest thread runs at user-interactive
 // whatever its priority, and the performance controller keeps all of them on fast cores at high clocks. Bands: priority <= e1 (the main thread is 44) user-interactive, <= e2 user-initiated,
 // above that utility; DM_QOS_EDGES=e1,e2 moves them (default 44,59). Read once in svc_thread_main_init, before any other guest thread exists
@@ -301,6 +302,7 @@ static void *thread_main(void *p) {
     pthread_mutex_unlock(&G);
     crash_thread_init();
     guest_thread_init();
+    guest_thread_set_handle(t->handle);
     pthread_mutex_lock(&G); while (!t->started) pthread_cond_wait(&t->cv, &G); pthread_mutex_unlock(&G);
     { char nb[48], hn[64]; snprintf(hn, sizeof hn, "%#x %s", t->handle, thr_name(t, nb, sizeof nb)); pthread_setname_np(hn); }   // the guest's name (set before StartThread) for sample / Instruments
     dm_thread_enter(t->entry, t->arg, t->stack_top);   // Does not return: the guest must exit through ExitThread

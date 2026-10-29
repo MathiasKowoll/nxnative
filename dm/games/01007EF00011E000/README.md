@@ -1,23 +1,49 @@
 # The Legend of Zelda: Breath of the Wild (`01007EF00011E000`)
 
-Update 1.9.0 (v1114112) over the base game, SDK 20.5.22. Nintendo EPD's engine (sead / agl / gsys / ksys, NintendoWare G3d / Ui2d / Vfx / Atk, Havok) on NVN. Modules `main`, `subsdk0` (NintendoSDK_movie) and `sdk`; `subsdk0` and `sdk` are the builds Tears of the Kingdom 1.4.3 runs ([0100F2C0115B6000](../0100F2C0115B6000/README.md)). Plays on the iPhone; 60 fps (30 on the Switch) through the host's frame step. The README lists its IPA at about 16 GB.
+Updates 1.6.0 (v786432) and 1.9.0 (v1114112) over the base game. 1.9.0 uses SDK 20.5.22; 1.6.0 ships its own older SDK 20 builds. Nintendo EPD's engine (sead / agl / gsys / ksys, NintendoWare G3d / Ui2d / Vfx / Atk, Havok) on NVN. Modules `main`, `subsdk0` (NintendoSDK_movie) and `sdk`; 1.9.0's `subsdk0` and `sdk` are the builds Tears of the Kingdom 1.4.3 runs ([0100F2C0115B6000](../0100F2C0115B6000/README.md)). Plays on the iPhone at 1.9.0; both updates run at 60 fps (30 on the Switch) through the host's frame step, with the 1.6.0 Mac validation below. The README lists the 1.9.0 IPA at about 16 GB.
 
 ## What it needs
 
 | Setting | Where | Why |
 |---|---|---|
-| Frame step, `fps_target 60` | [`patches.py`](patches.py) `FRAME_STEP` (`main` `cd57b23f…`), [`game.tsv`](game.tsv) | 60 fps at normal speed; see [Frame rate](#frame-rate) |
-| Interval controller floor 2 → 1 (five cuts) and GPU-time path (two cuts) | `patches.py` `CUTS` | the game's own controller at `DM_FPS_TARGET=0` and while its VFR override holds; see [The game's own interval controller](#the-games-own-interval-controller) |
-| Render scale stubs | `patches.py` `frame_step` (`main+0x1266880`, `main+0x126686c`) | `DM_RENDER_SCALE`; see [Render scale](#render-scale) |
+| Frame step, `fps_target 60` | [`patches.py`](patches.py) `FRAME_STEP` (`main` `8e9978d5…` and `cd57b23f…`), [`game.tsv`](game.tsv) | 60 fps at normal speed; see [Frame rate](#frame-rate) |
+| Interval controller floor 2 → 1 (five cuts) and GPU-time path (two cuts) | `patches.py` `CUTS` (`main` `cd57b23f…` only) | the 1.9.0 game's own controller at `DM_FPS_TARGET=0` and while its VFR override holds; see [The game's own interval controller](#the-games-own-interval-controller) |
+| Render scale stubs | `patches.py` `frame_step_190` (`main+0x1266880`, `main+0x126686c`) | `DM_RENDER_SCALE` at 1.9.0; the 1.6.0 equivalent is still open |
 | `gpu_timestamps segment` | `game.tsv` | the interval controller and the dynamic resolution read the GPU time between the frame's two timestamp reports |
 | Integer output rows `8e2cc2671cae6020`, `93aa5e22a8202409` | [`shader_facts_manual.tsv`](shader_facts_manual.tsv) | agl's BC4 block encoder (3D and 2D source) writes `uint`; no PC version gives output types |
 | `pad_layout full` | `game.tsv` | the 3D gamepad layout: the right stick turns the camera |
 | 4 GB layout: `mem_reserve 0x100000000`, `mem_alias 0x10000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | `game.tsv` | no system resource in the NPDM: the game uses `SetHeapSize`. 13 Sentinels' partition (256 MB in front + 256 MB alias + 256 MB stack + 3.25 GB heap) |
-| Node area cut 1 GB → 62 MB | `dm/tools/sdk_patches.py`, `sdk` build `574284b4…` | registered for Tears of the Kingdom's issue #70 on the same `sdk` build, so it applies here too |
+| Node area cut 1 GB → 62 MB | `dm/tools/sdk_patches.py`, `sdk` builds `574284b4…` and `fcf93a41…` | registered for Tears of the Kingdom's issue #70; the SDK-wide function match carries it to 1.6.0's own `sdk` build |
 
 No `tex_flush_upload` (a minute's boot saw it flush 32 CPU-filled textures with data, and it needs none), no `feedback_snap`.
 
 ## Frame rate
+
+### Update 1.6.0 (v786432)
+
+- The NSP's display version is 1.6.0; its `main` is `8e9978d50bdd20b4c8395a106c27ffde`, not 1.9.0's
+  `cd57b23fa4bbad65803d9788c01821ee`. The `main` build row, `subsdk0` and `sdk` are now registered in
+  [`game.tsv`](game.tsv); the shader tables and 1,493-row prewarm list were regenerated from the 1.6.0 files
+  (19,420 shaders, 0 keys absent from the map).
+- `FRAME_STEP` at `main+0x1c01180` replaces the interval argument at `ksys::VFR::update`: a one-vsync step gives
+  ratio 0.5 and delta time 16.67 ms; a two-vsync step gives 1.0 and 33.33 ms. The VFR's own override (+0x29 / +0x2c)
+  still wins. The host's present number at state +0x38 deduplicates the two VFR callers, so game time and the
+  1/30 s pad tick advance once per frame.
+- The readers that take the framework interval directly in 1.6.0 follow the published ratio: the fade at
+  `main+0x1821548`, the UI animation at `main+0x18522e0`, and the sound-link timer rate at
+  `main+0x1c59fac`–`+0x1c5a014`. Physics keeps six substeps (`main+0x1618480`), and the held-button loop at
+  `main+0x126e3b0` plus the pause-menu fast-repeat countdown at `main+0x1214474` use the 1/30 s tick.
+- **macOS crash from issue #251:** sead takes its spin locks with a plain `ldxr` and a release barrier only. Apple's
+  cores can satisfy the critical section's loads before the lock is observed free, so two workers run the same job
+  and the render path calls `nvnBufferGetAddress` with a bad pointer (`main+0x14ef6f8`). The profile opts into
+  `ACQUIRE_EXCLUSIVES`; the rewriter changes 18,312 real `ldxr/stxr` windows to `ldaxr/stxr` (one bit, same
+  registers and size). This removes the reproducible crash in the local runs.
+- **Mac run (M4 Pro, 60 fps target, docked):** from the title through the save and into gameplay, frame time p50
+  16.66–16.71 ms and the 1,800-present log read `game time … (1.001 of real time)` with the first 1,800 frames held
+  at one vsync. The official 130 s build run had no game crash and 0 missing shader keys; the run ended only at its test timeout (`SIGALRM`). Later gameplay windows still show 80–100 ms
+  CPU hitches and occasional 50 ms frame pacing; the `DM_HITCH_DUMP` stacks place the main thread and `Worker`
+  threads in the job-queue spin gate (`main+0x12c0e4c` / `+0x12c0e58`) with `PlacementMgr` yielding on its batch.
+  That is open below; it is separate from the 60 fps frame step.
 
 ### The frame step (current)
 
@@ -218,6 +244,13 @@ General host changes first needed here; each applies to every game:
 - **Resolved: type-compatible views read as not resident** (`tex_fit`): [Compatible views made from the texture under a view](../../../docs/reference/rendering.md#compatible-views-made-from-the-texture-under-a-view). Found by replaying the outdoors frame under shader validation; validation is clean after it, and the replayed digest without validation is unchanged.
 
 ## Open
+
+- **1.6.0 CPU hitches remain:** outdoors, `DM_HITCH_DUMP=80:60` shows the main thread and two `Worker` threads
+  in the job-queue lock/wait loops `main+0x12c0e4c` and `main+0x12c0e58`, with `PlacementMgr` yielding once per
+  batch item. Frames are mostly 16.7 ms but 80–100 ms stalls still appear every few seconds. The stack trace and
+  the 1.6.0 addresses are in [BUILD-1.6.0.md](BUILD-1.6.0.md).
+- **1.6.0 render scale:** the 1.6.0 dynamic-resolution site has not been mapped; `DM_RENDER_SCALE` remains a 1.9.0
+  feature until that is done.
 
 - The shipped pipeline archive without the device's own earlier prebuild files (the test iPhone's `pso_archive/` still held them, [Pipelines on a cold start](#pipelines-on-a-cold-start)): the footprint against the app's memory limit and the frame times after it.
 

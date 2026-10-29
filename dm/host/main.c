@@ -1,12 +1,13 @@
 // Bootstrap: after loading the modules, initialize the SDK runtime in the real order of nn::init::Start (sdk+0x2b0470) in the SDK, then enter nnMain.
 #include "dm.h"
 #include "front.h"
+#include "app_bootstrap.h"
 #include <stdatomic.h>
 #include <sys/resource.h>
 #include <sys/sysctl.h>
 #include <sys/time.h>
 #include <unistd.h>
-void probe_install(void); void hid_keys_init(void); void stubs_report(void); void crash_install(void); void guest_thread_init(void); uint32_t svc_thread_main_init(void);
+void probe_install(void); void hid_keys_init(void); void stubs_report(void); void crash_install(void); void guest_thread_init(void); void guest_thread_set_handle(uint32_t); uint32_t svc_thread_main_init(void);
 typedef void (*fn0)(void); typedef void (*fn2)(uint64_t, uint64_t); typedef void (*fnp)(void *);
 static void *req(const char *n){ void *p=guest_sym(n); if(!p) die("missing symbol %s", n); return p; }
 
@@ -17,6 +18,7 @@ static void guest_main(void) {
     guest_thread_init();
     { void dm_oodle_serve_maybe(int); dm_oodle_serve_maybe(0); }   // DM_OODLE_SERVE tool mode: the game's own Oodle decoder over stdin / stdout (hle_oodle.c, exits when the input ends)
     uint32_t hmain = svc_thread_main_init();   // Main thread handle: x0 of nnosInitialize (stored in an sdk global, used by ThreadManagerImplByHorizon); x1 = pointer to the argument area
+    guest_thread_set_handle(hmain);
     // Copy Start step by step: _init_libc1 = __nnmusl_init_locks (initializes the stdio etc. locks as recursive locks; skipping it self-deadlocks on nested locking in putc) + __init_ssp.
     // The three callbacks passed in by rtld: A only sets an rtld flag (skipped), B = each module's DT_INIT (before nnMain), C = destructors (not done)
     ((fn0)req("_init_libc0"))();
@@ -29,6 +31,10 @@ static void guest_main(void) {
     ((fnp)req("_ZN2nn2os11SetHostArgvEPPc"))(g_argv);
     LOG(">>> nninitStartup"); ((fn0)req("nninitStartup"))();
     ((fn0)req("_init_libc2"))();
+    // SDK startup replaces the provisional main-thread identity with its
+    // internal current-thread marker. Restore the Horizon handle before any
+    // module constructor uses the SDK allocator's non-recursive heap mutex.
+    guest_thread_set_handle(hmain);
     run_module_inits();   // rtld callback B: each module's DT_INIT (global constructors)
     { void dm_guest_spawn_selftest(void); dm_guest_spawn_selftest(); }   // DM_GUEST_SPAWN_TEST self-test of host-created guest threads (hle_guestthread.c)
     { void dm_oodle_serve_maybe(int); dm_oodle_serve_maybe(1); }   // DM_OODLE_SERVE with a decoder that needs the game's malloc (LZ5, hle_oodle.c)
@@ -122,6 +128,7 @@ void dm_host_preload_start(int argc, char **argv) {
     if (pthread_create(&g_pre.th, &a, preload_thread, NULL)) die("dm_host_preload_start: cannot start the thread");
 }
 int main(int argc, char **argv) {
+    if (dm_apply_app_bootstrap()) return 7;
     { int mtl_pso_prebuild_tool(void); if (mtl_pso_prebuild_tool()) return 0; }   // DM_PSO_PREBUILD=tool: the pipeline archive's prebuild alone, no game (nvn_mtl.m)
     if (getenv("DM_PRELOAD")) dm_host_preload_start(argc, argv);   // Exercise the early-start path on Mac (on iOS it is called from the App's main())
     if (atomic_load(&g_pre.started)) {

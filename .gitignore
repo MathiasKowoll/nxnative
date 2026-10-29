@@ -7,3 +7,11 @@ __pycache__/
 # Made from each shader build's Mac outputs (c1_guard.py, cb_extent.py; the NSP script makes them), not committed
 dm/games/*/c1_full.tsv
 dm/games/*/cb_extent.tsv
+# Native test executables and symbol bundles produced by the macOS test Makefile.
+dm/gfx/tests/t_*
+!dm/gfx/tests/t_*.c
+!dm/gfx/tests/t_*.m
+!dm/gfx/tests/t_*.mm
+dm/gfx/tests/*.dSYM/
+# Per-game build products are local inputs/outputs, never profile source.
+dm/games/*/build/

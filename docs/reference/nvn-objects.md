@@ -36,6 +36,14 @@ The game may also write into an NVN object directly, without an NVN call, throug
 
 ## Memory pools
 
+### CPU-inaccessible pools must not return a CPU mapping
+
+- **Symptom:** instanced crowd draws run but the stands remain empty; a pose texture buffer is entirely zero and buffer copies target address zero or a bare subresource offset.
+- **Cause:** `nvnBufferMap` and `nvnMemoryPoolMap` returned the unified backing address even for `CPU_NO_ACCESS` pools. Frostbite correctly uses zero for the CPU subresource pointer of such a pool, then forms a GPU copy destination as `gpuAddress + subresourcePointer - bufferMap + offset`. Returning the GPU base as `bufferMap` cancels the valid address. The captured FC 27 pose buffer had flags `0x21`, 551,712 RGBA32F texels, and 8,827,392 zero bytes; its upload routine at `nro0+0x8e924` exposes the subtraction directly.
+- **Fix:** both map queries return NULL for `NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS`; GPU address queries retain the backing address and buffer offset. Internal Metal access still uses the registered backing storage. This is an API visibility rule, not an allocation change.
+- **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md).
+- **Check:** `t_nvn` exercises CPU cached, uncached and inaccessible pools, including a buffer at nonzero offset, and verifies that GPU addresses remain valid.
+
 ### Heaps cut from a pool at alignment relative to its GPU address
 
 - **Symptom:** a null write as soon as the main thread starts recording a command buffer (13 Sentinels: a constructor at `main+0x2fa9a0` runs on `this = 0` when the prologue enters its first battle).

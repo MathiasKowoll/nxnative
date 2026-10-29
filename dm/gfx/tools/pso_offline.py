@@ -180,6 +180,8 @@ def main(argv=None):
     a.depth = a.depth or 'gl'
     lib_dir, out, work = Path(a.msl), Path(a.out), Path(a.work)
     chain = lib_dir.name[2:] if lib_dir.name.startswith('b-') else sys.exit(f'[RED] pso_offline: {lib_dir} is not a b-<chain version> folder')
+    if not lib_dir.is_dir():
+        sys.exit(f'[RED] pso_offline: shader library directory for chain {chain} does not exist: {lib_dir} (build the {chain} shaders first)')
     archs = sorted({arch_name(x) for x in a.gpu.split(',') if x.strip()})
     if not archs: sys.exit('[RED] pso_offline: no GPU architecture (--gpu)')
     text = pair_text(a.pairs)
@@ -188,6 +190,8 @@ def main(argv=None):
     t0 = time.time()
     pairs = read_pairs(text)
     bases, rest, left = plan(lib_dir, chain, pairs, zero)
+    if pairs and not bases and not rest and left['reflection'] == len(pairs):
+        sys.exit(f'[RED] pso_offline: none of {len(pairs)} pairs has reflection metadata for chain {chain} in {lib_dir}; use the shader cache built for this chain or rebuild the shaders')
     work.mkdir(parents=True, exist_ok=True); out.mkdir(parents=True, exist_ok=True)
     js = work / 'bases.mtl4-json'   # metal-tt takes the format from the extension: .mtl4-json is Metal 4's (.mtlp-json is the Metal 3 format)
     body = json.dumps(script(lib_dir, bases), indent=1).encode()

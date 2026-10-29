@@ -1999,6 +1999,9 @@ def mac_pso(py, repo, work, lib, g, gpus, env, logs):
     if gpus and here and here not in {x if x.startswith('applegpu_') else 'applegpu_' + x for x in gpus.split(',')}:   # PSO_GPUS is shared with the IPA (g18p is an iPhone's)
         say(f'pipeline archive: --gpu / PSO_GPUS ({gpus}) does not name this Mac\'s GPU ({here}): on this Mac the app builds its pipeline bases on its first start (empty = this Mac\'s GPU)')
     arch = gpus or here
+    chain = chain_of(repo)
+    if not lib.is_dir() or not any(lib.glob('*_b.json')):
+        raise BuildError(f'the Mac shader libraries for chain {chain} are missing or incomplete at {lib}; rebuild the shaders before making the pipeline archive')
     PROG.add(1); PROG.stage('Pipeline archive', step=f'{arch} (metal-tt, minutes when its inputs changed)')
     out = work / 'pso/mac'
     cmd = [py, repo / 'dm/gfx/tools/pso_offline.py', '--game', g.id, '--msl', lib, '--out', out, '--work', work / 'pso/mac-work', '--gpu', arch, '--platform', 'macos']
@@ -2028,6 +2031,16 @@ def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, 
     run([py, repo / 'dm/games/settings.py', g.id, patched, game / 'control.nacp', settings], logs / 'mac_settings.log', env=dict(env, GFXAPI=gfx, SETTINGS_PLATFORM='mac', DM_LANG=lang))
     cmd = [py, repo / 'dm/mac/pack_app.py', out, '--host', host, '--patched', patched, '--romfs', rfs.source(game), '--msl', lib, '--tables', g.table('shader_map.tsv').parent,
            '--font', font, '--title-id', f'{app:016X}', '--name', name, '--bundle-id', bundle_id, '--lang', lang, '--sign', sign or '-']
+    # FC profiles may provide their own launcher. It still receives the same
+    # self-contained Resources/ layout as the generic nxnative launcher, but
+    # owns the title-specific settings UI and starts the bundled dmhost.
+    profile_dir = getattr(g, 'dir', None)
+    custom_launcher = profile_dir / 'app/launcher.m' if profile_dir else None
+    if custom_launcher and custom_launcher.is_file():
+        launcher_define = {'0100C49025D3E000': 'FC27_BUNDLED'}.get(g.id.upper())
+        if launcher_define:
+            cmd += ['--launcher-source', custom_launcher, '--launcher-define', f'{launcher_define}=1',
+                    '--launcher-executable', name]
     split_pairs = work / 'shader/pso_pairs.tsv'   # the split's copy of pso_pairs.tsv, for a profile without the table (as mac_run's DM_PSO_PAIRS)
     for opt, v in (('--version', version), ('--category', g.get('app_category')), ('--marker', g.get('romfs_marker')), ('--aoc', aoc), ('--icon', icon),
                    ('--pso', pso), ('--pso-pairs', split_pairs if gfx == 'nvn' and not g.table('pso_pairs.tsv').is_file() and split_pairs.is_file() else None),

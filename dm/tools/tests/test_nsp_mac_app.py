@@ -661,6 +661,9 @@ class Script(unittest.TestCase):
         ran, tmp = [], Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, tmp); self.said = []; self.settings_env = {}
         if kw.get('work'): tmp = kw['work']
         out = tmp / 'G.app'; shutil.rmtree(out, ignore_errors=True)
+        if gfx == 'nvn':   # mac_pso rejects a shader directory without the current chain's reflection before it invokes metal-tt
+            lib = tmp / 'shader/cache/b-0123456789ab'; lib.mkdir(parents=True, exist_ok=True)
+            (lib / 'v_b.json').write_text('{"chain":"0123456789ab"}')
         def fake_run(cmd, log, env=None, cwd=None, on_line=None):
             ran.append([str(c) for c in cmd])
             if str(cmd[1]).endswith('dm/games/settings.py'):   # the launcher settings, before the packer
@@ -685,7 +688,7 @@ class Script(unittest.TestCase):
     def test_pack_command(self):
         o, tmp = self.pack_cmd('nvn')
         self.assertNotIn('--pso-pairs', o)   # no split copy
-        (tmp / 'shader').mkdir(); (tmp / 'shader/pso_pairs.tsv').write_text('v\tf\n')
+        (tmp / 'shader').mkdir(exist_ok=True); (tmp / 'shader/pso_pairs.tsv').write_text('v\tf\n')
         o, tmp2 = self.pack_cmd('nvn', work=tmp)
         self.assertEqual(o['--pso-pairs'], str(tmp / 'shader/pso_pairs.tsv'))   # the profile has no pso_pairs.tsv: the split's copy goes in
         o, tmp = self.pack_cmd('nvn')

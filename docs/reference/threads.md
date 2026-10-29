@@ -97,6 +97,13 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 
 ## Synchronization and address arbitration
 
+### SDK 22 reads the main-thread handle from the thread-local region
+
+- **Symptom:** during the first main-module constructor, `pthread_mutex_lock` in the SDK allocator aborts before `nnMain`: `nn::diag` reports `sdk+0x153c34`, reached from `TlsHeapCentral::LockMutexSlow_` and `StandardAllocator::Allocate`.
+- **Cause:** SDK 22's `SdkMutexType::IsLockedByCurrentThread` reads the current Horizon thread handle from `tpidrro_el0 + 0x110`. The host-created main thread's `ThreadLocalRegion` was zero there, and an unlocked mutex also has zero in the word being compared, so the SDK treated the caller as the owner of a non-recursive mutex. The host initialized the older `ThreadLocalRegion[0x1f8]` thread object, which did not supply this field.
+- **Fix:** `guest_thread_set_handle` stores the thread table's handle in `ThreadLocalRegion+0x110` for SDK 22 and later. The main thread sets it again after `nninitStartup`, because SDK startup rebuilds the thread-local state, and host-created guest threads set it before entering SDK code (`thread.c`).
+- **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md), SDK 22.2.0. With the fix its 3,325 main constructors run, its network threads start, and it loads RomFS data past this abort.
+
 ### `SignalToAddress` type 2 with count ≤ 0
 
 - **Symptom:** none seen; found while investigating [Fire Emblem Engage](../../dm/games/0100A6301214E000/README.md)'s demo crash, which it did not change (that was the address-space shortage, [Size-aligned regions exhaust the alias address space](memory.md#size-aligned-regions-exhaust-the-alias-address-space)).

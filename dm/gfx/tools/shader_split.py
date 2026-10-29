@@ -39,6 +39,7 @@
 #       and of the startup material archive LZSS-compressed in main, see rfrm_shaders and retro_main_forms
 #   · BERG (Snowdrop, Mario + Rabbids Sparks of Hope): shader objects in the individually zstd-compressed records of its SDF data slices, see snowdrop_shaders
 #   · Unreal Engine 3 (Batman: Arkham Knight): shader records in its global shader cache (BMSG) and in the packages (the combined shader cache), whose compressed chunks are Oodle blocks decoded by the game's own decoder in the Mac host, see ue3_body and ue3_shaders
+#   · Frostbite (.cas; EA SPORTS FC): compressed Oodle blocks containing the NVN code immediately followed by its control section, see frostbite_shaders
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
 #   +0x700 = start of the c1 constant segment within the code area; for compute +0x748 thread group xyz (u32 ×3), +0x754 shared memory bytes (checked one by one against PC reflection on D2R's 22 compute shaders).
 # Stage: BNSH uses the stage slot; BAHS uses bits 10..13 of SPH word 0 (1 vertex 2 hull 3 domain 4 geometry 5 pixel), and a compute header means compute.
@@ -1565,7 +1566,7 @@ def smash_arc_shaders(path, rel, ents, out):
             if len(out) == n and b'\x91\x68\x86\x19' in b: out.extend(glslc_shaders(b, label, need=False))
 
 _OODLE = None
-def oodle(comp, n):
+def oodle_maybe(comp, n):
     """The game's own decoder: OodleLZ_Decompress (Trinity's packs are Oodle Mermaid, Pokémon Legends: Arceus's GFPAK entries Oodle Kraken, and Oodle is linked into main), or LZ5_decompress_safe (DRAGON QUEST XI S's legacy Unreal paks):
     one Mac host per worker process in its tool mode (dm/host/hle_oodle.c, DM_OODLE_SERVE), fed over a pipe. DM_OODLE_HOST = the host, DM_OODLE_MODULES = the rewritten modules it loads
     (the NSP script sets both for a game with Trinity packs, Oodle PKZ or GFPAK entries, or legacy Unreal paks, profile_guess.py shader_sources)"""
@@ -1581,9 +1582,95 @@ def oodle(comp, n):
         p.stdin.write(struct.pack('<QQ', len(comp), n)); p.stdin.write(comp); p.stdin.flush()
         got = struct.unpack('<Q', p.stdout.read(8))[0]
     except (BrokenPipeError, struct.error): got = None
-    if got != n:
-        err.seek(0); red(f'the game\'s decoder in the Mac host failed on a {len(comp)} → {n} byte stream; ---- host output ----\n' + err.read().decode(errors='replace')[-3000:])
+    if got != n: return None
     return p.stdout.read(n)
+
+def oodle(comp, n):
+    """The strict form used by the archive readers: a failed request ends the current file with the host's diagnostic."""
+    data = oodle_maybe(comp, n)
+    if data is None:
+        p, err = _OODLE
+        err.seek(0); red(f'the game\'s decoder in the Mac host failed on a {len(comp)} → {n} byte stream; ---- host output ----\n' + err.read().decode(errors='replace')[-3000:])
+    return data
+
+
+FROSTBITE_OODLE = re.compile(b'[\x8c\xcc][\x06\x0a\x0c\x86\x8a\x8c\xc6\xca\xcc]')
+def frostbite_find(d, label, out, start=0, end=None):
+    """Stored NVN records in Frostbite data: code area immediately before its control section."""
+    pos, end = start, len(d) if end is None else end
+    while True:
+        i = d.find(CTL_MAGIC, pos, end)
+        if i < 0: break
+        pos = i + 1
+        if i & 3 or i + 0x708 > len(d): continue
+        nctl = struct.unpack_from('<I', d, i + 0x20)[0]
+        ncode = struct.unpack_from('<I', d, i + 0x704)[0]
+        start = i - ncode
+        if not (0x760 <= nctl <= 1 << 20 and 0x30 <= ncode <= 16 << 20 and start >= 0 and i + nctl <= len(d)): continue
+        ctl, code = bytes(d[i:i + nctl]), bytes(d[start:i])
+        if code[:4] not in (GFX_MAGIC, CS_MAGIC): continue
+        st = sph_stage(code)
+        if st and not check(label, st, ctl, code): out.append((f'{label}#RAW@{i:#x}', st, ctl, code))
+
+def frostbite_block(d, off):
+    """(raw size, kind, payload size) of a valid Frostbite block at off, or None."""
+    if off < 0 or off + 8 > len(d): return None
+    raw, kind, flags, low = struct.unpack_from('>IBBH', d, off)
+    if flags & 0xf0 != 0x70 or not 1 <= raw <= 1 << 20: return None
+    size = (flags & 0xf) << 16 | low
+    if not 0 < size <= 2 << 20 or off + 8 + size > len(d) or kind not in (0x00, 0x19): return None
+    payload = d[off + 8:off + 9]
+    if kind == 0x00 and size != raw: return None
+    if kind == 0x19 and (len(payload) != 1 or payload[0] & 0x0f != 0x0c): return None
+    return raw, kind, size
+
+def frostbite_shaders(path, rel, out, start=0, end=None):
+    """Shaders in a Frostbite .cas. A block's header is big-endian {raw size u32, kind u8,
+    0x70 | payload-size bits 16..19, payload-size bits 0..15}; kind 0x19 is Oodle. Search the
+    compressed streams by their headers rather than walking a 1 GiB package one byte at a time.
+    A code area and its control section can cross decoded blocks, so consecutive streams keep a
+    tail while they are scanned. Raw NVN records are found directly as well."""
+    from romfs import mmap
+    label = '/' + rel
+    with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
+        end = len(d) if end is None else end
+        frostbite_find(d, label, out, start, end)
+
+        stream = bytearray()
+        window, tail, pos = 8 << 20, 2 << 20, start
+        for m in FROSTBITE_OODLE.finditer(d, start, end):
+            if m.start() < pos: continue
+            off = m.start() - 8
+            h = frostbite_block(d, off)
+            if not h:
+                pos = m.start() + 1; continue
+            label_at = m.start()
+            while (h := frostbite_block(d, off)):
+                raw, kind, size = h
+                payload = d[off + 8:off + 8 + size]
+                rawdata = oodle_maybe(bytes(payload), raw) if kind == 0x19 else bytes(payload)
+                off += 8 + size
+                if rawdata is None: continue
+                stream += rawdata
+                if len(stream) > window:
+                    found = []; frostbite_find(bytes(stream), f'{label}#BLOCK@{label_at:#x}', found); out.extend(found)
+                    del stream[:max(0, len(stream) - tail)]
+            pos = max(off, m.start() + 1)
+        if stream:
+            found = []; frostbite_find(bytes(stream), f'{label}#BLOCK@end', found); out.extend(found)
+
+FROSTBITE_CHUNK = 64 << 20
+FROSTBITE_OVERLAP = 2 << 20
+def frostbite_jobs(files):
+    """Overlapping ranges of large Frostbite .cas packages, scanned in parallel."""
+    jobs, taken = [], set()
+    for path, rel in files:
+        if not path.lower().endswith('.cas'): continue
+        size = os.path.getsize(path); taken.add(path)
+        for a in range(0, size, FROSTBITE_CHUNK):
+            b = min(size, a + FROSTBITE_CHUNK)
+            jobs.append((path, rel, ('frostbite', max(0, a - FROSTBITE_OVERLAP), min(size, b + FROSTBITE_OVERLAP))))
+    return jobs, taken
 
 def trinity_shaders(path, rel, packs, out):
     """A range of Trinity packs (trpfs_jobs). Pack table: 0 file hashes [u64], 1 files [{1 compression i8 (3 = Oodle; stored otherwise), 2 level u8, 3 length u64, 4 data [u8]}]; each file is scanned like a loose one"""
@@ -1762,6 +1849,9 @@ def arh_jobs(files, parts=64):
         jobs += [(ard, rel[:-4] + '.ard', (b'ARH1', entries[i:i + step])) for i in range(0, len(entries), step)]
         used.update((path, ard))
     return jobs, used
+
+
+MONOLITH_CONTAINERS = (b'HCPS', b'xbc1', b'DRSM', b'DMXM', b'DMSM', b'1RAS')
 
 
 def xbc_data(d, off):
@@ -2113,7 +2203,7 @@ NEST = 16   # archives in archives scan_blob opens (SARC, PlatinumGames' DAT): r
             # member point at the same inner archive, its work doubling with each level: the members a file's archives open may add up to at most NEST times the file
 def scan_blob(d, label, out, depth=0, left=None):
     if depth > NEST: red(f'{label}: archives nested more than {NEST} deep')
-    if d[:4] in (b'HCPS', b'xbc1', b'DRSM') or d[:8] == b'cmp\0zlib':
+    if d[:4] in MONOLITH_CONTAINERS or d[:4] in (b'HCPS', b'xbc1', b'DRSM') or d[:8] == b'cmp\0zlib':
         monolith_shaders(d, label, out)
         return
     for m in re.finditer(b'SLCT\x03\x10\0\0', d): out.extend(slct_shaders(d, m.start(), label))
@@ -2228,6 +2318,10 @@ def scan_file_in(args):
     if ext in ('.data', '.patch', '.debug', '.nxpc') and os.path.exists(stem + '.dict'): return rel, {}, set(), {}   # read through its Next Level Games index (nlg_shaders)
     with open(path, 'rb') as f: head = f.read(16)
     found = []; trees = {}
+    if head[:4] in MONOLITH_CONTAINERS:
+        with open(path, 'rb') as f:
+            monolith_shaders(f.read(), '/' + rel, found)
+        return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and args[2][0] == b'ARH1':
         arh_shaders(path, rel, args[2][1], found)
         return rel, uniq_keys(found), var_pairs(found), trees
@@ -2263,6 +2357,12 @@ def scan_file_in(args):
         return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2:   # a range of LINKDATA entries (linkdata_jobs)
         linkdata_shaders(path, rel, args[2], found)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if len(args) > 2 and args[2][0] == 'frostbite':   # an overlapping range of a Frostbite package
+        frostbite_shaders(path, rel, found, args[2][1], args[2][2])
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if ext.lower() == '.cas':   # Frostbite packages (EA SPORTS FC): Oodle blocks and stored NVN records
+        frostbite_shaders(path, rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == SPKG or head[:4] == b'\0\0\1\0' and path.endswith('.gz'):   # Three Houses' loose shader packages and chunked zlib files (kt_shaders)
         kt_shaders(open(path, 'rb').read(), '/' + rel, found)
@@ -2411,8 +2511,9 @@ def main():
     ck_jobs, cpks = cpk_jobs(files)   # Bayonetta 2's CRI CPK archives (CRILAYLA entries)
     zp_jobs, zips = zip_jobs(files)   # Portal's game.zip (Deflate members)
     ah_jobs, arhs = arh_jobs(files)   # Monolith's ARH1/ARD archives and embedded XBC1/HCPS programs
-    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + zp_jobs + ah_jobs
-    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in zips and p not in arhs]
+    fz_jobs, fzs = frostbite_jobs(files)   # Frostbite packages: 64 MiB overlapping ranges
+    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + zp_jobs + ah_jobs + fz_jobs
+    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in zips and p not in arhs and p not in fzs]
     with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts)) as ex:
         n = len(big) + len(files)
         results += pooled(ex, big, n) + pooled(ex, files, n, len(big), chunk=16)

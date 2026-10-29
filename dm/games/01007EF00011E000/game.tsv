@@ -1,6 +1,6 @@
-# Game profile of The Legend of Zelda: Breath of the Wild (Switch, base game v0 + update 1.9.0 = v1114112). In bring-up
+# Game profile of The Legend of Zelda: Breath of the Wild (Switch, base game v0 + update 1.6.0 = v786432 or update 1.9.0 = v1114112). In bring-up
 # Format: see dm/games/README.md
-# Nintendo EPD's engine (sead / agl / gsys / ksys, NintendoWare G3d / Ui2d / Vfx / Atk, Havok), SDK 20.5.22, NVN; modules main + subsdk0 (NintendoSDK_movie) + sdk.
+# Nintendo EPD's engine (sead / agl / gsys / ksys, NintendoWare G3d / Ui2d / Vfx / Atk, Havok), SDK 20.5.22 at 1.9.0 and its own older SDK 20 builds at 1.6.0, NVN; modules main + subsdk0 (NintendoSDK_movie) + sdk.
 # RomFS is almost all Yaz0 (.s* extensions) and SARC (Pack/*.pack). Shaders: Shader/*.sbfsha (BNSH) and the gsys / ksys resource packs in Pack/Bootup_Graphics.pack, the terrain resource pack in TitleBG.pack, particle effects in Effect/*.sesetlist, layouts in .sblarc
 
 # ---- Identity ----
@@ -31,10 +31,12 @@ present_snap	on
 pso_mtl4	on
 
 # ---- Versions ----
-# only the merged 1.9.0 copy is extracted; the base game's own build IDs are added when needed
+# 1.6.0's own main, movie module and SDK builds; the shader tables and notes were made on this version. 1.9.0 remains registered with its
+# own cuts and frame-step sites, and a folder holding only 1.9.0 builds its shader tables from that version as a derived profile.
+build	v786432	1.6.0	main=8e9978d50bdd20b4c8395a106c27ffde	subsdk0=93ff8252d975adf07230cb86c83301c5	sdk=fcf93a41b08c5193a1410d262602dc62
 build	v1114112	1.9.0	main=cd57b23fa4bbad65803d9788c01821ee	subsdk0=f39f4c431234c72eb520cfdd1001bbcf	sdk=574284b40c06cf1821a44857939083be
-package	v1114112
-shader_versions	v1114112
+package	v786432
+shader_versions	v786432
 
 # ---- Files ----
 modules	main subsdk0 sdk

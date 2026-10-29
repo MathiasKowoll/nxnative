@@ -1,7 +1,7 @@
 # The Legend of Zelda: Breath of the Wild (01007EF00011E000): the rewriter's patches of this game's own builds. dm/tools/patch_nso.py loads every profile's patches.py and applies those of a module's NSO build ID;
 # CUTS, OBS and FRAME_STEP as described there ("Registered patches"). Patches of Nintendo SDK module builds are in dm/tools/sdk_patches.py
 import struct
-from nso_asm import ADRP, B, LDRX
+from nso_asm import ADRP, B, LDRX, NOP
 CUTS = {
   # The Legend of Zelda: Breath of the Wild 1.9.0 (v1114112) main: 60 fps. The main loop of sead::GameFrameworkNx (main+0x112660c) runs a dynamic interval (framework +0x267 = 1):
   # every frame it computes how many vsyncs the last frame needed (rounded up), clamped to [2, max 3] (the max comes from the interval controller +0xc, constructed at main+0x1126c04); it steps up after 3 overrunning frames in a row,
@@ -34,7 +34,7 @@ CUTS = {
 # 1 at main+0xc609d8, set and cleared by game scenes) wins in the VFR:
 # a stub there publishes it at state +0x24 so the host holds frames that long, and the setter stub leaves the framework's interval to the game while it is set. x16 / x17 are free
 # at both entries
-def frame_step(ctx):
+def frame_step_190(ctx):
     here, emit, fs_site, fs_put, FS_STATE_OFF = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state
     fs_site(0x11269b8, 'fd7bbea9'); fs_site(0x151d3d0, 'fd7bbea9')
     start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
@@ -110,7 +110,172 @@ def frame_step(ctx):
     emit(B(here(), 0x1266880)); emit(B(here(), 0x1266950))   # apply the host's scale; skip: the original branch
     fs_put(0x126686c, [B(0x126686c, start)], 'scale apply block taken every frame when the host render scale is not 1.0')
 
-FRAME_STEP = {'cd57b23fa4bbad65803d9788c01821ee': frame_step}
 
-# Whether a general rule could replace these patches (dm/tools/docs_patches.py lists it in docs/agents/game-patches.md)
-GENERALIZE = "No for the hook sites: sead::GameFrameworkNx's interval controller and ksys::VFR in this build; Tears of the Kingdom shares sead but not this code. The frame-step state page they use is general"
+# Breath of the Wild 1.6.0 (v786432) uses a different VFR and GameFrameworkNx layout from 1.9.0. The sites below are taken from MacNativeGames'
+# verified 1.6.0 real-time patch (games/totk/runtime/game_patches_botw.c) and checked here against main 8e9978d50bdd20b4c8395a106c27ffde.
+# The host's frame step is written into VFR::update's interval argument: the VFR's ratio (+0x3c) and delta time (+0x138) follow it, so a one-vsync
+# step advances half a 30 fps tick and the game keeps normal speed at 60 fps. The VFR's own override (+0x29 flag, +0x2c interval) still wins and is
+# published for the host at state +0x24. The ratio is also published at state +0x14 for readers that in 1.6.0 take the framework interval directly:
+# one fade (main+0x1821548), the UI animation step (main+0x18522e0) and the sound-link timer rate (main+0x1c59fac..0x1c5a014). Physics keeps six
+# substeps a frame (main+0x1618480), as at the shipped 30 fps. At fps_target 0 or before the host has decided the first step, the ratio is 1.0
+# and the original 30 fps behavior remains.
+def frame_step_160(ctx):
+    here, emit, fs_site, fs_put, FS_STATE_OFF = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state
+    # VFR::update (main+0x1c01180): replace its entry with a stub that chooses the host's step, publishes the ratio, and then runs the original entry.
+    fs_site(0x1c01180, '08a45129')
+    start = here(); code = []; labels = {}; fix = []
+    def pc(): return start + 4 * len(code)
+    def mark(name): labels[name] = pc()
+    def word(w): code.append(w)
+    def branch(kind, name, rt=0, cond=0): fix.append((len(code), kind, name, rt, cond)); code.append(0)
+    word(ADRP(16, pc(), FS_STATE_OFF))
+    for w in (0x1e2e1000,   # fmov s0,#1.0           default ratio at 30 fps
+              0xbd001600,   # str s0,[x16,#0x14]
+              0xb900261f,   # str wzr,[x16,#0x24]  no game override until read below
+              0xb9400211):  # ldr w17,[x16]         target fps (0 = original)
+        word(w)
+    branch('cbz', 'tick_default', 17)   # target fps 0
+    for w in (0x52802c0d,   # mov w13,#0x160        host counts the stepped vsyncs once per present
+              0xb9002a0d):  # str w13,[x16,#0x28]
+        word(w)
+    word(0x3940a411)            # ldrb w17,[x0,#0x29]   VFR override
+    branch('cbz', 'host', 17)   # no override
+    word(0xb9402c0f)   # ldr w15,[x0,#0x2c]    the game's fixed interval
+    word(0xb900260f)   # str w15,[x16,#0x24]
+    # VFR::update has two callers in 1.6.0 and some scenes reach both in one frame. The host writes the present number at
+    # state +0x38; update the tick and the stepped-vsync count once per present, not once per caller.
+    for w in (0xb9403a0e,   # ldr w14,[x16,#0x38]  present number
+              0xb9403e0d,   # ldr w13,[x16,#0x3c]  last present the tick used
+              0x6b0d01df):  # cmp w14,w13
+        word(w)
+    word(0x2a1f03ec)   # mov w12,wzr
+    branch('bcond', 'fixed_old', cond=0)   # b.eq
+    word(0x5280002c)   # mov w12,#1
+    word(0xb9003e0e)   # str w14,[x16,#0x3c]
+    mark('fixed_old')
+    branch('b', 'selected')
+    mark('host')
+    for w in (0xb900261f,   # str wzr,[x16,#0x24]  host step
+              0xb940220f):  # ldr w15,[x16,#0x20]
+        word(w)
+    branch('cbz', 'tick_default', 15)   # first frame: no host step decided yet
+    for w in (0xb9403a0e,   # ldr w14,[x16,#0x38]  present number
+              0xb9403e0d,   # ldr w13,[x16,#0x3c]  last present the tick used
+              0x6b0d01df):  # cmp w14,w13
+        word(w)
+    branch('bcond', 'host_old', cond=0)   # b.eq
+    for w in (0x5280002c,   # mov w12,#1
+              0xb9003e0e):  # str w14,[x16,#0x3c]
+        word(w)
+    branch('b', 'selected')
+    mark('host_old')
+    word(0x2a1f03ec)   # mov w12,wzr
+    mark('selected')
+    for w in (0x2a0f03e1,   # mov w1,w15
+              0x1e2301e0,   # ucvtf s0,w15          ratio = step / 2
+              0x1e2c1001,   # fmov s1,#0.5
+              0x1e210800,   # fmul s0,s0,s1
+              0xbd001600):  # str s0,[x16,#0x14]
+        word(w)
+    branch('cbz', 'orig', 12)   # a second VFR caller this frame: ratio only
+    # The 1.6.0 pad loop counts whole button-hold frames. A tick once per 1/30 s of game time keeps its delays, pulses and
+    # the pause menu's fast-repeat countdown in real time; at step 2 or more one tick a frame is the original behavior.
+    # The host's present number is in w14: with step 1, its low bit alternates 1/0; with step 2+ every frame ticks.
+    word(0x710005ff)   # cmp w15,#1
+    branch('bcond', 'tick_each', cond=1)   # b.ne
+    word(0x120001cd)   # and w13,w14,#1
+    word(0xb9000a0d)   # str w13,[x16,#8]
+    branch('b', 'orig')
+    mark('tick_each')
+    word(0x5280002d)   # mov w13,#1
+    word(0xb9000a0d)   # str w13,[x16,#8]
+    branch('b', 'orig')
+    mark('tick_default')
+    word(0x5280002d)   # mov w13,#1
+    word(0xb9000a0d)   # str w13,[x16,#8]
+    mark('orig')
+    word(0x2951a408)   # ldp w8,w9,[x0,#0x8c]  the original first instruction
+    word(B(pc(), 0x1c01184))
+    def fixup():
+        for i, kind, name, rt, cond in fix:
+            off = labels[name] - (start + 4 * i); assert -(1 << 20) <= off < (1 << 20) and off % 4 == 0
+            rel = (off >> 2) & 0x7ffff
+            code[i] = (0x14000000 | rel) if kind == 'b' else \
+                      (0x34000000 | (rel << 5) | rt) if kind == 'cbz' else \
+                      (0x35000000 | (rel << 5) | rt) if kind == 'cbnz' else \
+                      (0x54000000 | (rel << 5) | cond)
+    fixup()
+    for w in code: emit(w)
+    fs_put(0x1c01180, [B(0x1c01180, start)], 'VFR::update: the host step (or the VFR override) chooses the game-time ratio; target 0 keeps the original')
+
+    # The 1.6.0 fade and UI animation step still read the framework interval (2 at the shipped 30 fps). Take the published ratio instead; the
+    # 1.6.0 originals and the replacement lengths are MacNativeGames' verified sites. s0 and the flags are dead after each replaced block.
+    for off, orig in ((0x1821568, '080140b9'), (0x182156c, '1f010071'), (0x1821570, '08159f1a'),
+                      (0x1821574, '0001231e'), (0x1821588, '00082b1e')):
+        fs_site(off, orig)
+    fs_put(0x1821568, [ADRP(8, 0x1821568, FS_STATE_OFF), 0xbd401500, NOP, NOP], 'fade step follows the VFR ratio')
+    fs_put(0x1821588, [NOP], 'fade step follows the VFR ratio')
+    for off, orig in ((0x18522ec, '080140b9'), (0x18522f0, '1f010071'), (0x18522f4, '08159f1a'),
+                      (0x18522f8, '0001231e'), (0x1852300, '0008211e')):
+        fs_site(off, orig)
+    fs_put(0x18522ec, [ADRP(8, 0x18522ec, FS_STATE_OFF), 0xbd401500, NOP, NOP], 'UI animation step follows the VFR ratio')
+    fs_put(0x1852300, [NOP], 'UI animation step follows the VFR ratio')
+
+    # Physics: the frame loop passes the VFR ratio to the solver, which runs round(6 x ratio) substeps. Keep six substeps a frame.
+    fs_site(0x1618480, '090140bd')
+    fs_put(0x1618480, [0x1e2e1009], 'physics keeps six solver substeps a frame at any VFR ratio')
+
+    # sead::ControllerBase::updateDerivativeParams_ (main+0x126e3b0) counts a held button once per frame at 30 fps. The
+    # patched loop below counts on the tick published by VFR::update (state +8), so menus and sticks do not repeat twice as
+    # fast at 60 fps. The pause menu's fast-repeat countdown (main+0x12125b0) uses the same tick.
+    pad_loop = (
+        0xb9410268, 0x7100051f, 0xb901166b, 0xb900127f, 0x5400044b, 0x2a1f03e8,
+        0xaa1f03e9, 0x320003ea, 0x14000002, 0xb941166b, 0x1ac9214c, 0x6a0c017f,
+        0x54000180, 0x8b09026e, 0x394341cd, 0x8b090a6b, 0x340001ed, 0xb940316f,
+        0x3942c1ce, 0x6b0e01ee, 0x540000e1, 0x2a0c0108, 0xb9001268, 0x14000008,
+        0x8b090a6b, 0xb900317f, 0x14000008, 0x54000089, 0x1acd09cf, 0x1b0db9ed,
+        0x34fffeed, 0xb940316c, 0x1100058c, 0xb900316c, 0xb981026b, 0x91000529,
+        0xeb0b013f, 0x54fffc8b,
+    )
+    pad_ticked = (
+        0xb9410268, 0x7100051f, 0xb901166b, 0xb900127f, 0x5400044b, 0x2a1f03e8,
+        0xaa1f03e9, 0x00000000, 0xb9400a10, 0x5280002a, 0x1ac9214c, 0x8b090a71,
+        0x6a0c017f, 0x54000180, 0x34000290, 0x8b09026e, 0x394341cd, 0x340001cd,
+        0xb940322f, 0x3942c1ce, 0x6b0e01ee, 0x540000c1, 0x2a0c0108, 0xb9001268,
+        0x14000007, 0xb900323f, 0x14000008, 0x54000089, 0x1acd09cf, 0x1b0db9ed,
+        0x34ffff0d, 0xb940322c, 0x1100058c, 0xb900322c, 0xb981026f, 0x91000529,
+        0xeb0f013f, 0x54fffcab,
+    )
+    menu_cd = (
+        0x8b0a136a, 0x5289400b, 0x72a000cb, 0x8b0b014b, 0xb940016c, 0x37f80acc,
+        0x5100058d, 0xb900016d, 0x35000a6c,
+    )
+    menu_cd_ticked = (
+        0x8b0a136a, 0x9141914b, 0x00000000, 0xb94009ad, 0x34000aed, 0xb94a016c,
+        0x5100058d, 0xb90a016d, 0x35000a6c,
+    )
+    pad_ticked = list(pad_ticked); pad_ticked[7] = ADRP(16, 0x126e490 + 7 * 4, FS_STATE_OFF)
+    fs_site(0x126e490, ''.join(struct.pack('<I', w).hex() for w in pad_loop))
+    fs_put(0x126e490, pad_ticked, 'held-button repeat and hold counts follow the 1/30 s game-time tick')
+    menu_cd_ticked = list(menu_cd_ticked); menu_cd_ticked[2] = ADRP(13, 0x1214474 + 2 * 4, FS_STATE_OFF)
+    fs_site(0x1214474, ''.join(struct.pack('<I', w).hex() for w in menu_cd))
+    fs_put(0x1214474, menu_cd_ticked, 'pause-menu fast-repeat countdown follows the 1/30 s game-time tick')
+
+    # Sound-link timers use max(raw VFR ratio, 1.0) in 1.6.0, so at 60 fps their sequences would count rendered frames. A veneer stores the
+    # measured ratio instead; x9 and s0 are free there, and the original continuation is a single following instruction.
+    fs_site(0x1c5a014, '008500bd')
+    sound = here()
+    for w in (ADRP(9, here(), FS_STATE_OFF), 0xbd401520, 0xbd008500, B(here() + 12, 0x1c5a018)):
+        emit(w)
+    fs_put(0x1c5a014, [B(0x1c5a014, sound)], 'sound-link timers follow the VFR ratio')
+
+
+FRAME_STEP = {
+    'cd57b23fa4bbad65803d9788c01821ee': frame_step_190,
+    '8e9978d50bdd20b4c8395a106c27ffde': frame_step_160,
+}
+
+# Breath of the Wild: sead's spin locks take the lock with a plain ldxr and only a release barrier before the unlock. Apple's cores can satisfy
+# the loads inside the critical section before the lock is observed free, so two workers run the same job (main+0x14ef6f8's nvnBufferGetAddress
+# crash). The acquire bit is one instruction bit with the same registers and size, and is verified by MacNativeGames on the same 1.6.0 build.
+ACQUIRE_EXCLUSIVES = {'8e9978d50bdd20b4c8395a106c27ffde': True}

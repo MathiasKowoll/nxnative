@@ -1,0 +1,41 @@
+# Game profile of EA SPORTS FC 27 (Switch base + update 1.8c.cab1). The validated RomFS reaches nnMain and the render loop; shader coverage remains under development.
+
+# ---- Identity ----
+title_id	0100C49025D3E000
+program_id	0100C49025D3E000
+
+# ---- App ----
+name	EA SPORTS FC 27
+ipa	EASPORTSFC27.ipa
+app_category	public.app-category.sports-games
+
+# ---- Versions ----
+build	v262144	1.8c.cab1	main=fb81983aa1cc3a2e97402497e2ca6528	sdk=fed212d6e0963706f9f4b16ea5d65879
+package	v262144
+shader_versions	v262144
+
+# ---- Files ----
+modules	main sdk
+romfs_marker	Data/NX/ui.toc
+zip_store	.cas:.toc:.nro:.bin
+
+# ---- Memory ----
+mem_reserve	0x184000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x600000
+
+# ---- Shader split ----
+shader_groups	/=romfs
+shader_note	EA SPORTS FC 27 shaders (provisional profile)
+
+# ---- After the rewrite ----
+mem_used	0x4600000
+
+# ---- Frame rate ----
+# Frostbite keeps its internal target as a double behind main+0xDA19E38. The host writes 60 there
+# on every present; present_interval display ignores the game's interval 2. Address from FPSLocker's
+# build-gated profile FB81983AA1CC3A2E.yaml and verified against main build fb81983aa1cc3a2e....
+fps_target	60
+present_interval	display

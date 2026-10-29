@@ -807,7 +807,7 @@ static void ser_gate(void) {
 }
 // Metal 4 conservative barriers (first version): a consumer barrier at the start of an encoder (all prior work → this encoder) and a producer barrier at the end (this encoder and earlier → later encoders).
 // Only the one at the start is not enough: t_rt_range 'pass 1 → pass 2 → copy' read back black, and after adding the end barrier it is 19/19. Old-queue encoders (upload / diagnostics / present) do not go through these barriers.
-static int g_pass_swrite;   // the open draw pass has shader writes (swrite_note)
+static int g_pass_swrite, g_pass_ordered;   // prior shader writes / an ordering barrier inside this open pass
 static void img_fit_upgrade(void); static int g_imfit_npend;   // textures an image slot needs a format view of (img_fit), upgraded before the next draw pass opens
 static int g_last_end_relaxed, g_game_barrier;   // the last encoder ended was a draw pass with the relaxed end barrier (nothing else since); the game issued nvnCommandBufferBarrier since the last draw pass began
 static uint64_t g_bar_skip, g_bar_full;            // draw passes begun without / with the consumer barrier (DM_NVN_BARRIER=game)
@@ -1015,10 +1015,20 @@ static id<MTL4ComputeCommandEncoder> blit(void) {
 }
 
 void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n) {
-    pend_add(dst, n, 2); g_mdx_epoch++;
     void *sb, *db; uint64_t so, dof;
-    if (!mtl_addr(src, n, &sb, &so) || !mtl_addr(dst, n, &db, &dof))
-        MDIE("buffer copy address is in no memory pool src=%#llx dst=%#llx n=%#llx", (unsigned long long)src, (unsigned long long)dst, (unsigned long long)n);
+    if (!mtl_addr(src, n, &sb, &so)) {
+        static int once;
+        if (!once++) MLOG("[RED] buffer copy skipped: source is in no memory pool src=%#llx dst=%#llx n=%#llx",
+                          (unsigned long long)src, (unsigned long long)dst, (unsigned long long)n);
+        return;
+    }
+    if (!mtl_addr(dst, n, &db, &dof)) {
+        static int once;
+        if (!once++) MLOG("[RED] buffer copy skipped: destination is in no memory pool src=%#llx dst=%#llx n=%#llx",
+                          (unsigned long long)src, (unsigned long long)dst, (unsigned long long)n);
+        return;
+    }
+    pend_add(dst, n, 2); g_mdx_epoch++;
     if (src != dst && src < dst + n && dst < src + n) { static int once;   // Metal leaves an overlapping copy undefined; seen only in Cuphead while its pool allocator gave out overlapping blocks (hle_nvn.c zcull_size)
         if (!once++) MLOG("[RED] buffer copy with overlapping source and destination (src %#llx dst %#llx, %llu bytes): the result is undefined", (unsigned long long)src, (unsigned long long)dst, (unsigned long long)n); }
     enc_b_copy_buffer(blit_buf(src, src + n, dst, dst + n), (__bridge id<MTLBuffer>)sb, so, (__bridge id<MTLBuffer>)db, dof, n);
@@ -3201,7 +3211,8 @@ static void bare_dims(NSUInteger *w, NSUInteger *h);
 static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
     if (g_enc) return g_enc;
     memset(g_zskip_cand_ok, 0, sizeof g_zskip_cand_ok);
-    g_enc_mode = clear_only; g_enc_geo_nocolor = g_geo_omit_colors; g_pass_swrite = 0; g_sm_pass = 0;
+    g_enc_mode = clear_only; g_pass_swrite = g_pass_ordered = 0; g_sm_pass = 0;
+    g_enc_geo_nocolor = g_geo_omit_colors;
     if (!R.has_rt) { RED_ONCE(3, "no render target set before the draw"); return nil; }
     if (g_imfit_npend) img_fit_upgrade();   // no pass is open here: the upgrade's copy may run (img_fit)
     // The version of the attachment-range candidate is taken before capturing any attachment; if it changes during setup, there is no continuation.
@@ -3504,7 +3515,8 @@ static void shmap_load(void) {
     warm_start();
 }
 
-@interface NvShader : NSObject { @public id<MTLFunction> fn, tf_fn, discard_fn, fn_u, fn_m, fn_d, geo_fn; uint8_t mask_m;   // fn_u: the integer-output entry point (dmsh_build.py fs_uint), for pipelines whose colour attachments are all unsigned integer (pso_desc); fn_m: the mixed one, its outputs in mask_m unsigned integer; fn_d: the dual-source one (dmsh_build.py fs_dual)
+@interface NvShader : NSObject { @public id<MTLFunction> fn, tf_fn, discard_fn, fn_u, fn_u_or, fn_m, fn_d, geo_fn; uint8_t mask_m;   // fn_u: the integer-output entry point (dmsh_build.py fs_uint), for pipelines whose colour attachments are all unsigned integer (pso_desc); fn_m: the mixed one, its outputs in mask_m unsigned integer; fn_d: the dual-source one (dmsh_build.py fs_dual)
+    id<MTLFunction> fn_dual;   // output 1 becomes color(0), index(1) only for source-1 blending
     uint16_t tf_stride[4]; uint32_t cb_ext[16], sb_ro; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, layer_out; const char *builtin; uint64_t logged; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
     uint32_t geo_vertices, geo_invocations, geo_output, geo_stride, geo_index_stride;
     id<MTLComputePipelineState> geo_pso; int geo_pso_failed;
@@ -3729,6 +3741,11 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
         for (NSUInteger b = 0; b < 4 && b < ts.count; b++) o->tf_stride[b] = (uint16_t)[ts[b] unsignedIntValue];
         if (!o->tf_fn) MLOG("[RED] shader %s: no transform feedback entry point %s in its library", pc.UTF8String, [j[@"entry_tf"] UTF8String]);
     }
+    if (stage == 1 && j[@"entry_dual"]) {
+        o->fn_dual = fn4_note([lib newFunctionWithName:j[@"entry_dual"]], lib, j[@"entry_dual"], nil);
+        if (!o->fn_dual) MLOG("[RED] shader %s: no dual-source entry point in its library", pc.UTF8String);
+    }
+    if (stage == 1 && j[@"entry_u_or"]) { o->fn_u_or = fn4_note([lib newFunctionWithName:j[@"entry_u_or"]], lib, j[@"entry_u_or"], nil); }
     if (stage == 1 && j[@"entry_u"]) { o->fn_u = fn4_note([lib newFunctionWithName:j[@"entry_u"]], lib, j[@"entry_u"], nil); if (!o->fn_u) MLOG("[RED] shader %s: no integer-output entry point %s in its library", pc.UTF8String, [j[@"entry_u"] UTF8String]); }
     if (stage == 1 && j[@"entry_m"]) { o->fn_m = fn4_note([lib newFunctionWithName:j[@"entry_m"]], lib, j[@"entry_m"], nil); o->mask_m = (uint8_t)[j[@"uint_mask_m"] unsignedIntValue];
         if (!o->fn_m) MLOG("[RED] shader %s: no mixed integer-output entry point %s in its library", pc.UTF8String, [j[@"entry_m"] UTF8String]); }
@@ -3736,6 +3753,8 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
     if (o->fn.functionConstantsDictionary.count) {
         NSError *fe = nil; MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new]; id<MTLFunction> f = fn4_note([lib newFunctionWithName:entry constantValues:cv error:&fe], lib, entry, cv);
         if (f) o->fn = f; else MLOG("[RED] shader %s: specializing its function constants failed: %s", pc.UTF8String, fe.localizedDescription.UTF8String);
+        if (o->fn_dual) { f = fn4_note([lib newFunctionWithName:j[@"entry_dual"] constantValues:cv error:&fe], lib, j[@"entry_dual"], cv); o->fn_dual = f; }
+        if (o->fn_u_or) { f = fn4_note([lib newFunctionWithName:j[@"entry_u_or"] constantValues:cv error:&fe], lib, j[@"entry_u_or"], cv); o->fn_u_or = f; }
         if (o->fn_u) { f = fn4_note([lib newFunctionWithName:j[@"entry_u"] constantValues:cv error:&fe], lib, j[@"entry_u"], cv); o->fn_u = f; }
         if (o->fn_m) { f = fn4_note([lib newFunctionWithName:j[@"entry_m"] constantValues:cv error:&fe], lib, j[@"entry_m"], cv); o->fn_m = f; }
         if (o->fn_d) { f = fn4_note([lib newFunctionWithName:j[@"entry_d"] constantValues:cv error:&fe], lib, j[@"entry_d"], cv); o->fn_d = f; }
@@ -4203,11 +4222,15 @@ static inline __attribute__((always_inline)) void *tex_fast(int tid) {
 static id<MTLTexture> dummy_tex(int dtt, int dpf); static uint64_t g_dummy_tex_rid[8][4];
 static id<MTLTexture> tex_fit(int tid, id<MTLTexture> t, MTLTextureType want, uint64_t *rid) {
     MTLTextureType have = t.textureType; NSUInteger ns = 0;
+    id<MTLTexture> view_src = t;   // a cube view is made over the 2D-array base; Metal cannot view a cube back to a 2D array
     if (want == MTLTextureType2D && have == MTLTextureType2DArray) ns = 1;
     else if (want == MTLTextureType2DArray && have == MTLTextureType2D) ns = 1;
     else if (want == MTLTextureTypeCube && have == MTLTextureType2DArray && t.arrayLength >= 6) ns = 6;
     else if (want == MTLTextureTypeCubeArray && have == MTLTextureType2DArray && t.arrayLength >= 6) ns = t.arrayLength / 6 * 6;
     else if (want == MTLTextureTypeCube && have == MTLTextureTypeCubeArray) ns = 6;   // a cube array read as a cube: the first cube
+    else if (want == MTLTextureType2DArray && (have == MTLTextureTypeCube || have == MTLTextureTypeCubeArray) && t.parentTexture && t.parentTexture.textureType == MTLTextureType2DArray) {
+        view_src = t.parentTexture; ns = view_src.arrayLength;   // the faces of the base array, as the hardware exposes the cube
+    }
     // A one-layer 2D texture in a cube slot has no cube view (Pokémon Legends: Z-A binds one to a cube sampler on its character creation screen, a placeholder for an environment map): the zero cube,
     // a defined read, instead of a type mismatch whose reads are undefined. The same for a 2D array of fewer than 6 layers, which is how the host holds some 2D textures (Mario Kart 8 Deluxe binds
     // an NVN 2D texture, format 0x44, at slot 10 of two pixel shaders that declare a cube there, as a race loads)
@@ -4220,9 +4243,7 @@ static id<MTLTexture> tex_fit(int tid, id<MTLTexture> t, MTLTextureType want, ui
     treg_t *r = &g_treg[tid];
     if (r->alt && r->alt_of == (__bridge void *)t && r->alt_type == (uint8_t)want) { *rid = r->alt_rid; return (__bridge id<MTLTexture>)r->alt; }
     if (r->alt) { defer_obj_unref((__bridge id)r->alt); CFRelease(r->alt); r->alt = r->alt_of = NULL; r->alt_rid = 0; }
-    // Made from the texture under t, with t's levels, slices and swizzle: Metal takes a view's residency from the texture it was made from, and t is often a view itself (the view
-    // cache's). A view of it read as not resident although the texture under both is in the residency set (shader validation, "Texture is not resident": Breath of the Wild's
-    // 64x64 cube read from a 2D-array view, found with nvn_replay); such reads are undefined
+    // Made from the texture under t, with t's levels, slices and swizzle: Metal takes a view's residency from the texture it was made from, and t is often a view itself.
     id<MTLTexture> base = t; NSUInteger l0 = 0, s0 = 0;
     while (base.parentTexture) { l0 += base.parentRelativeLevel; s0 += base.parentRelativeSlice; base = base.parentTexture; }
     id<MTLTexture> v = [base newTextureViewWithPixelFormat:t.pixelFormat textureType:want levels:NSMakeRange(l0, t.mipmapLevelCount) slices:NSMakeRange(s0, ns) swizzle:t.swizzle];
@@ -4514,11 +4535,14 @@ static void bare_dims(NSUInteger *w, NSUInteger *h) {
 // behind the full consumer barrier. FINAL FANTASY TACTICS - The Ivalice Chronicles composites its UI into the window texture in software, a read-modify-write of the image by draw after
 // draw in one attachment-less pass with barrier bits 0x12 between them: without the split a later element read the window before the earlier one had landed and wrote the old pixels
 // back (the dialog boxes had holes the size of their text)
-static void swrite_note(NvProg *pr) {
-    if (!pr) return;
-    if (g_pass_swrite) { g_vbuf_write_epoch++; return; }   // further shader writes also invalidate aligned vertex snapshots
+static int shader_writes(NvProg *pr) {
+    if (!pr) return 0;
     for (int st = 0; st < 6; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
-        for (int i = 0; i < sh->rf.nb; i++) if (sh->rf.b[i].rw && (sh->rf.b[i].kind == NVN_RB_IMG || sh->rf.b[i].kind == NVN_RB_SBUFP)) { g_pass_swrite = 1; g_vbuf_write_epoch++; return; } }
+        for (int i = 0; i < sh->rf.nb; i++) if (sh->rf.b[i].rw && (sh->rf.b[i].kind == NVN_RB_IMG || sh->rf.b[i].kind == NVN_RB_SBUFP)) return 1; }
+    return 0;
+}
+static void swrite_note(NvProg *pr) {
+    if (g_pass_swrite || shader_writes(pr)) { g_pass_swrite = 1; g_vbuf_write_epoch++; }
 }
 static void udc_note_draw(NvProg *pr) {
     int td = tbdr_on();
@@ -5072,18 +5096,22 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
             break; } }
     if (fs && fs->fn_u && !fsfn && d.fragmentFunction == fs->fn && pso_all_uint(k, fs, merged)) d.fragmentFunction = fs->fn_u;   // integer colour targets (dmsh_build.py fs_uint)
     else if (fs && fs->fn_m && !fsfn && d.fragmentFunction == fs->fn && pso_mixed_uint(k, fs, merged)) d.fragmentFunction = fs->fn_m;   // integer and float colour targets
-    // Dual-source blending: target 0 reads the shader's output 1 as its second source. The dual-source entry point returns that output as [[color(0), index(1)]] (dmsh_build.py fs_dual),
-    // and output 1 is then no colour output: Maxwell leaves the attachment of output 1 as it was. A shader without that entry point blends with zero for the second source, as an
-    // unwritten one (blend_zero_src1): passing the state to Metal as it is makes Metal 4's blend compiler crash (MTLCompilerService in buildBlendFactor, Pokémon Legends: Arceus)
-    int dual = fs && !fsfn && fs->rf.color_known && (fs->rf.color_mask & 2) && d.fragmentFunction == fs->fn && pso_reads_src1(k, merged), dual_fn = 0;
-    if (dual && fs->fn_d) { d.fragmentFunction = fs->fn_d; dual_fn = 1; }
-    else if (dual) { want_note(&g_dual_want, fs->key);
-        RED_ONCE(121, "shader %s writes output 1 and a pipeline blends with it as the second source, but it has no dual-source entry point: the second source counts as zero "
-                 "(add its key to the profile's dual_want.tsv; DM_NVN_DUAL_WANT=<file> lists every such shader)", fs->key); }
+    if (fs && fs->fn_u_or && d.fragmentFunction == fs->fn_u && k->logic_op == NVN_LOGIC_OP_OR &&
+        mtl_fmt_uint((MTLPixelFormat)k->cfmt[0]) && (!merged || k->lmap[0] == 0)) d.fragmentFunction = fs->fn_u_or;
     if (vs->layer_out && k->fsfn != GEO_MARK) d.inputPrimitiveTopology = vs->geo_output == 1 ? MTLPrimitiveTopologyClassPoint : vs->geo_output == 6 ? MTLPrimitiveTopologyClassLine : MTLPrimitiveTopologyClassTriangle;
     if (k->fsfn == AMP_MARK) d.maxVertexAmplificationCount = 2;   // a slice-merged pass's pipeline: the view mapping's layer offset applies (see g_sm_plan)
     if (k->fsfn == TF_MARK || k->fsfn == GEO_MARK) { d.vertexFunction = k->fsfn == GEO_MARK ? vs->geo_fn : vs->tf_fn; d.fragmentFunction = nil; d.rasterizationEnabled = NO; }   // transform feedback capture (tf_draw)
     if (k->fsfn == DISCARD_MARK) { d.vertexFunction = vs->discard_fn; d.fragmentFunction = nil; d.rasterizationEnabled = NO; }
+    // NVN routes output 1 into the secondary blend source. Keep the original
+    // MRT shader for ordinary blending; a fetch/remapped shader has its own ABI.
+    int dual = 0;
+    if (fs && fs->fn_dual && !fsfn && !merged && d.fragmentFunction == fs->fn &&
+        k->cfmt[0] && !pf_int_kind((MTLPixelFormat)k->cfmt[0]) && (k->blend_en & 1)) {
+        blend_st bl = adv_blend(k->blend[0]);
+        dual = blend_zero_src1(bl.src_rgb) != bl.src_rgb || blend_zero_src1(bl.dst_rgb) != bl.dst_rgb ||
+               blend_zero_src1(bl.src_a) != bl.src_a || blend_zero_src1(bl.dst_a) != bl.dst_a;
+        if (dual) d.fragmentFunction = fs->fn_dual;
+    }
     d.rasterSampleCount = k->samples ? k->samples : 1;
     d.alphaToCoverageEnabled = k->a2c;
     for (int i = 0; i < 8; i++) {
@@ -5095,7 +5123,10 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
         // Output numbers the fragment shader does not write: zero write mask, no blending. Maxwell writes only the targets in the shader's output map and leaves the others untouched (whatever the blend state and channel mask);
         // on Metal an attachment the shader does not write has undefined contents, and with blending enabled that undefined value is blended in. Super Mario 3D World + Bowser's Fury's volume draws after the G-buffer (50d813761ca3f1f9 and others) write only outputs 0 and 2,
         // while targets 1 (normals) and 3 (pre-lighting) have SRC_ALPHA blending and all channels enabled
-        int unwritten = fs && fs->rf.color_known && !fsfn && l != 0xff && (!(fs->rf.color_mask >> l & 1) || (dual_fn && l == 1));
+        // A vertex-only pipeline has no colour source at all, including when a
+        // bound fragment failed to load. Metal 4's blend compiler can crash if
+        // stale colour/dual-source blend state reaches such a descriptor.
+        int unwritten = !d.fragmentFunction || (dual && l == 1) || (fs && fs->rf.color_known && !fsfn && l != 0xff && !(fs->rf.color_mask >> l & 1));
         if (unwritten) m = 0;
         c.writeMask = (m & 1 ? MTLColorWriteMaskRed : 0) | (m & 2 ? MTLColorWriteMaskGreen : 0) | (m & 4 ? MTLColorWriteMaskBlue : 0) | (m & 8 ? MTLColorWriteMaskAlpha : 0);
         // Integer targets: no blending. Maxwell ignores the blend enable on them; Metal refuses the pipeline (an assertion even without the API validation layer): Luigi's Mansion 3's integer G-buffer (PR #105)
@@ -5559,7 +5590,7 @@ static void pso_key_fill(pso_key *k, NvShader *vs, NvShader *fs, const uint32_t 
     memset(k, 0, sizeof *k);
     k->vs = (__bridge void *)vs; k->fs = (__bridge void *)fs;
     memcpy(k->cfmt, cfmt, sizeof k->cfmt); k->dfmt = dfmt; k->sfmt = sfmt; k->samples = samples;
-    k->blend_en = S.color.blend_en; k->chmask = S.chmask.mask; k->a2c = S.ms.a2c;
+    k->blend_en = S.color.blend_en; k->chmask = S.chmask.mask; k->a2c = S.ms.a2c; k->logic_op = S.color.logic_op;
     for (int i = 0; i < 8; i++) if (k->cfmt[i] || lmap) k->blend[i] = S.blend[i];
     const nvn_refl *rf = &vs->rf;
     for (int v = 0; v < rf->nv; v++) { int a = rf->v[v].nvn; if (a < 16 && a < S.nattr) { k->attr[a] = S.attr[a]; int st = S.attr[a].stream; if (st < 16) k->stream[st] = S.stream[st]; } }
@@ -6532,8 +6563,13 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
         } else if (b->kind == NVN_RB_SAMP || b->kind == NVN_RB_SAMPT || b->kind == NVN_RB_SAMPU || b->kind == NVN_RB_SAMPI) {   // SAMPT: the sampler part of a combined handle (texture ID | sampler ID << 20); SAMPU: the same, with the handle in a uniform buffer
             int sid = b->kind == NVN_RB_SAMPU ? ubo_samp_id(ubo_handle(nvn_stage, reg, b->off)) :
                       b->kind == NVN_RB_SAMPI ? (int)reg : b->kind == NVN_RB_SAMPT ? (reg < NTEX ? (int)(S.tex[nvn_stage][reg] >> 20) : 0) : reg < 128 ? (int)(S.samp[nvn_stage][reg] >> 20) : 0;   // SAMPI: a sampler ID the shader names as a constant
+            if (sid && (sid < 0 || sid >= g_nsreg || !g_sreg_ok[sid]) && !(sh->logged & 16)) {
+                sh->logged |= 16;
+                MLOG("[RED] shader %s stage%d sampler source kind%d reg%d off%#x resolves unregistered ID %d (pool base %d)", sh->key, nvn_stage, b->kind, reg, b->off, sid, S.samp_base);
+            }
             __unsafe_unretained id<MTLSamplerState> ss = sid ? (__bridge id<MTLSamplerState>)samp_fast(sid) : nil;
-            slots[aid] = sid && sid < g_nsreg && g_srid[sid] ? g_srid[sid] : dummy_samp_rid();
+            uint64_t srid = sid && sid < g_nsreg && g_srid[sid] ? g_srid[sid] : dummy_samp_rid();
+            for (int k = 0; k < (b->n ? b->n : 1); k++) slots[aid + k] = srid;
             USE(ss ? ss : dummy_samp(), MTLResourceUsageRead);
             if (bl && sid > 0) { int ok = sid < g_nsreg && g_sreg_ok[sid]; samp_par sp = ok ? g_sreg[sid] : (samp_par){0};   // g_rmu is already held in this section
                 if (ok) PD("B %llu st%d samp reg%d sid=%d mag=%d min=%d (0 nearest / 1 linear; 2–5 with mips) wrap=%d,%d,%d border=%g,%g,%g,%g lod=%g..%g bias=%g aniso=%g cmp=%d/%d %s", g_stat_pass, nvn_stage, reg, sid, (int)sp.magf, (int)sp.minf,
@@ -6602,18 +6638,18 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             if (!(sh->logged & 1)) { sh->logged |= 1; static int nlog; if (nlog++ < 32) MLOG("shader %s (stage %d): dynamic texture handles, slots %#llx of its %d-entry array hold %s", sh->key, nvn_stage,
                 (unsigned long long)real, b->n, b->dtt == (uint8_t)MTLTextureTypeTextureBuffer ? "buffer textures" : "textures"); }
         } else if (b->kind == NVN_RB_TEXA) {   // an array of the driver table's handles that the shader indexes at run time (nvn_refl.h): element k = the texture of the c2 word at off + 8k
-            uint64_t real = 0;
+            unsigned real = 0;
             for (int k = 0; k < b->n; k++) {
                 int tid = (int)(c2_handle(nvn_stage, b->off + 8u * k) & 0xfffff);
                 void *tv = NULL; uint64_t trid = tid ? tex_fast_rid(tid, &tv) : 0; __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
                 if (t && t.textureType != (MTLTextureType)b->dtt) { uint64_t r2 = 0; id<MTLTexture> v = tex_fit_elem(tid, t, (MTLTextureType)b->dtt, &r2); t = v; trid = v ? r2 : 0; }   // an element the shader does not pick here may be another kind
-                if (!t) { t = dummy_tex(b->dtt, b->dpf); trid = g_dummy_tex_rid[b->dtt & 7][b->dpf & 3]; } else real |= 1ull << k;
+                if (!t) { t = dummy_tex(b->dtt, b->dpf); trid = g_dummy_tex_rid[b->dtt & 7][b->dpf & 3]; } else real++;
                 if (bl && tid) PD("B %llu st%d texa [%d] tid=%d %s", g_stat_pass, nvn_stage, k, tid, tv ? "real" : "dummy");
                 if (b->dtt == (uint8_t)MTLTextureTypeTextureBuffer) t = tbuf_shadow(t, &trid);   // see tbuf_shadow
                 slots[aid + k] = trid;
                 USE(t, MTLResourceUsageRead);
             }
-            if (!(sh->logged & 8)) { sh->logged |= 8; static int nlog; if (nlog++ < 32) MLOG("shader %s (stage %d): an array of %d driver-table handles from c2 byte %#x, elements %#llx hold textures", sh->key, nvn_stage, b->n, b->off, (unsigned long long)real); }
+            if (!(sh->logged & 8)) { sh->logged |= 8; static int nlog; if (nlog++ < 32) MLOG("shader %s (stage %d): an array of %d driver-table handles from c2 byte %#x, %u elements hold textures", sh->key, nvn_stage, b->n, b->off, real); }
         } else if (b->kind == NVN_RB_SAMPA) {   // its samplers: element k = the sampler of the combined handle at c2 byte off + 8k
             for (int k = 0; k < b->n; k++) {
                 int sid = (int)(c2_handle(nvn_stage, b->off + 8u * k) >> 20);
@@ -6899,7 +6935,7 @@ static int first_draw_covers(int i, id<MTLTexture> t, NSUInteger level) {
     NvShader *vs = pr->sh[0], *fs = pr->sh[1];
     if (!vs || !fs || vs->rf.pos_attr < 0 || fs->rf.may_discard || fs->rf.writes_smask || !(fs->rf.color_mask >> i & 1)) return g_fd_why = 2, 0;
     if (!t || t.sampleCount != 1 || t.textureType == MTLTextureType3D) return g_fd_why = 3, 0;
-    if ((S.color.blend_en >> i & 1) || ((S.chmask.mask >> (4 * i)) & 0xf) != 0xf || S.ms.a2c || S.poly.mode != NVN_POLYGON_MODE_FILL) return g_fd_why = 4, 0;
+    if (S.color.logic_op != NVN_LOGIC_OP_COPY || (S.color.blend_en >> i & 1) || ((S.chmask.mask >> (4 * i)) & 0xf) != 0xf || S.ms.a2c || S.poly.mode != NVN_POLYGON_MODE_FILL) return g_fd_why = 4, 0;
     if (R.rt.depth && ((S.ds.dt && S.ds.df != NVN_DEPTH_FUNC_ALWAYS) || S.ds.st)) return g_fd_why = 5, 0;
     if (n < 3 || n > 64) return g_fd_why = 6, 0;
     float P[64][4]; int why = attr_read(vs->rf.pos_attr, dw, di, P);
@@ -8088,6 +8124,7 @@ static int fz_p2_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di, uint8_
     for (int c = 0; c < 8; c++) if (fs->rf.color_mask >> c & 1) { if (g_fz.p2map[c] < 0) { PD("F %llu not provable: output color %d has no matching attachment", g_stat_pass, c); return 0; } lmap[g_fz.p2map[c]] = (uint8_t)c; }
     int ident = !fbmask; for (int c = 0; c < 8; c++) if ((fs->rf.color_mask >> c & 1) && g_fz.p2map[c] != c) ident = 0;
     if (ident) { for (int q = 0; q < 8; q++) if (lmap[q] != 0xff) g_fz.wrote[q] = 1; if (fz_check_on()) fz_snap_take(dw, di); return 1; }   // Does not read the tile and the output is not shifted: use the original version (the write mask still follows the mapping)
+    if (S.color.logic_op == NVN_LOGIC_OP_OR) return 0;
     if (!fs->rf.nfo) { bf_want_note(fs->key); PD("F %llu not provable: no readable-tile version (outputs would need moving)", g_stat_pass); return 0; }
     *fn = bf_fn(fs, fx, fbmask, lmap);
     if (!*fn) return 0;
@@ -8873,6 +8910,8 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     __unsafe_unretained NvProg *pr = g_geo_program ? g_geo_program : prog_get(S.prog);
     image_prepare(pr, 0x1f);
     draw_gs_check(pr);   // a geometry stage left with no function (see prog_fold_gs)
+    // ORDER_PRIMITIVES also protects earlier READS from this later writer.
+    if (g_enc && g_pass_ordered && shader_writes(pr)) rp_end();
     if (!g_geo_program && S.rast_discard && S.tf_on) { tf_draw(pr, dw, di); return; }
     // Feedback captures rasterized draws too (Donkey Kong Country: Tropical Freeze's fur).
     if (!g_geo_program && S.tf_on && pr && pr->sh[0] && pr->sh[0]->tf_fn) tf_draw(pr, dw, di);
@@ -9252,7 +9291,7 @@ static void dispatch(const p_dispatch *dp) {
         return;
     }
     const uint16_t *tg = cs->rf.tg;
-    if (!tg[0]) { RED_ONCE(29, "compute shader lacks threadgroup size reflection"); return; }
+    if (!tg[0]) { RED_ONCE(29, "compute shader %s lacks threadgroup size reflection", cs->key); return; }
     if (g_nubd && ubd_conflict_cs(cs, dp->ind)) { g_ubd_conflicts++; ubd_land(); }   // see ubd_conflict_cs
     rp_end();
     image_prepare(prog_get(S.cprog), 0x20);
@@ -9590,6 +9629,28 @@ static void copy_t2t(const p_copy_t2t *c) {
     PD("t src=%llu lv%u sl%u xyz=%d,%d,%d dst=%llu lv%u sl%u xyz=%d,%d,%d size=%d,%d,%d", c->src->serial, sl, sz0, c->sr.xoffset, c->sr.yoffset, c->sr.zoffset,
        c->dst->serial, dl, dz0, c->dr.xoffset, c->dr.yoffset, c->dr.zoffset, c->sr.width, c->sr.height, c->sr.depth);
     int s3 = c->src->d.target == 2, d3 = c->dst->d.target == 2, nz = c->sr.depth ? c->sr.depth : 1;
+    /* FC27 copies a full 1920x1080 D24S8 depth-stencil texture into D32F. NVN formats 260 and 252
+       live as Metal D32S8 / D32F. Metal cannot create a D32F view of a D32S8 texture, so extract the
+       32-bit depth plane to a staging buffer with MTLBlitOptionDepthFromDepthStencil and upload it to
+       the D32F destination. The generic format-converting draw path deliberately excludes depth. */
+    if (s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 && d.pixelFormat == MTLPixelFormatDepth32Float &&
+        !s3 && !d3 && c->sr.width == c->dr.width && c->sr.height == c->dr.height && !(c->flags & (NVN_COPY_FLAGS_MIRROR_X_BIT | NVN_COPY_FLAGS_MIRROR_Y_BIT))) {
+        NSUInteger row = (NSUInteger)c->sr.width * 4, image = row * (NSUInteger)c->sr.height;
+        id<MTLBuffer> staging = [g_dev newBufferWithLength:image options:MTLResourceStorageModeShared];
+        if (!staging) { RED_ONCE(86, "depth-stencil → depth copy: cannot allocate the %lu-byte staging buffer", (unsigned long)image); return; }
+        id<MTL4ComputeCommandEncoder> b = blit();
+        for (int z = 0; z < nz; z++) {
+            [b copyFromTexture:s sourceSlice:sz0 + z sourceLevel:sl sourceOrigin:MTLOriginMake(c->sr.xoffset, c->sr.yoffset, 0)
+                     sourceSize:MTLSizeMake(c->sr.width, c->sr.height, 1) toBuffer:staging destinationOffset:0
+              destinationBytesPerRow:row destinationBytesPerImage:image options:MTLBlitOptionDepthFromDepthStencil];
+            [b copyFromBuffer:staging sourceOffset:0 sourceBytesPerRow:row sourceBytesPerImage:image
+                     sourceSize:MTLSizeMake(c->sr.width, c->sr.height, 1) toTexture:d destinationSlice:dz0 + c->dr.zoffset + z
+             destinationLevel:dl destinationOrigin:MTLOriginMake(c->dr.xoffset, c->dr.yoffset, 0) options:MTLBlitOptionNone];
+        }
+        defer_obj_release(staging);
+        static int once; if (!once++) MLOG("depth-stencil → depth texture copy: first case %dx%dx%d D24S8 → D32F", c->sr.width, c->sr.height, nz);
+        return;
+    }
     // The copy's bytes belong in the destination's storage: written there now from the source's storage when that holds its content and the copy is a plain one (the same Metal format: a
     // format change is drawn below and converts the bytes), else read back after the copy (decided before the draw path gives the destination render-target use, which makes it GPU-owned from then on)
     int rb = !d3 && tex_storage_dst(c->dst);
@@ -10020,8 +10081,11 @@ void mtl_exec(const uint8_t *p) {
             // Do not mark dirty if the state did not change (the game often re-sends the same program / state block / vertex format before each draw; the dirty flag only decides whether to re-fetch the pipeline / depth-stencil object, and equal values mean the same object)
             case OP_BIND_PROGRAM: { const p_bind_program *b = a; state_op(h.op,a);
                 if (passdump()) { NvProg *pr = S.prog ? prog_get(S.prog) : nil;
-                    PD("Y bind_program cmd=%p program=%p stages=%#x vs=%s fs=%s gs=%s",p,(void *)b->prog,b->stages,
-                       pr && pr->sh[0] ? pr->sh[0]->key : "-", pr && pr->sh[1] ? pr->sh[1]->key : "-",pr && pr->sh[2] ? pr->sh[2]->key : "-"); }
+                    char rk0[17] = "-", rk1[17] = "-"; uint8_t rmd[8]; const prog_t *bp = b->prog;
+                    if (bp && bp->nstage > 0 && prog_key(bp, 0, rmd)) for (int j = 0; j < 8; j++) snprintf(rk0 + j * 2, 3, "%02x", rmd[j]);
+                    if (bp && bp->nstage > 1 && prog_key(bp, 1, rmd)) for (int j = 0; j < 8; j++) snprintf(rk1 + j * 2, 3, "%02x", rmd[j]);
+                    PD("Y bind_program cmd=%p program=%p stages=%#x nstage=%u raw0=%s raw1=%s vs=%s fs=%s gs=%s",p,(void *)b->prog,b->stages,
+                       bp ? bp->nstage : 0, rk0, rk1, pr && pr->sh[0] ? pr->sh[0]->key : "-", pr && pr->sh[1] ? pr->sh[1]->key : "-",pr && pr->sh[2] ? pr->sh[2]->key : "-"); }
                 break; }
             case OP_SCISSOR: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF: case OP_BIND_VBUF1:
             case OP_BIND_UBO: case OP_BIND_UBO_SMALL: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL:
@@ -10042,6 +10106,7 @@ void mtl_exec(const uint8_t *p) {
                 int split = g_enc && g_pass_swrite && (bits & (NVN_BARRIER_ORDER_PRIMITIVES_BIT | NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT));
                 PD("I %llu barrier bits %#x%s", g_stat_pass, bits, split ? ": ends the pass (shader writes)" : g_enc ? " (render pass open)" : "");
                 if (split) { rp_end(); static int once; if (!once++) MLOG("a game barrier (bits %#x) after shader writes in a draw pass: the pass ends there (first case pass %llu)", bits, (unsigned long long)g_stat_pass); }
+                if (g_enc && (bits & (NVN_BARRIER_ORDER_PRIMITIVES_BIT | NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT))) g_pass_ordered = 1;
                 if (bits) g_game_barrier = 1; break; }
             case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: state_op(h.op, a); break;
             default: break;
