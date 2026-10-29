@@ -148,7 +148,7 @@ final class Toolchain {
                              detail: "\(repo.profiles().count) perfiles de juego en dm/games"))
         } else {
             out.append(Check(id: "repo", title: "nxnative", status: .failure,
-                             detail: "No hay checkout en \(repo.root.path). Clónalo desde Entorno."))
+                             detail: "La toolchain no está dentro de esta app. Debe reconstruirse el instalador."))
         }
 
         // El script de mac-app comprueba estas herramientas de forma

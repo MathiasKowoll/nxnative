@@ -243,7 +243,7 @@ final class AppModel {
 
     private func enqueue(_ job: BuildJob) -> String? {
         guard let python = toolchain.python else { return "No hay python3 >= 3.12: revisa Entorno." }
-        guard repository.isValid else { return "No hay checkout de nxnative: revisa Entorno." }
+        guard repository.isValid else { return "La toolchain de nxnative no está disponible dentro de esta app." }
         builds.enqueue(job, python: python, repository: prefs.repositoryURL)
         return nil
     }
@@ -424,33 +424,4 @@ final class AppModel {
         await toolchain.refresh(prefs)
     }
 
-    // MARK: - El checkout de nxnative
-
-    static let upstream = "https://github.com/MathiasKowoll/nxnative.git"
-
-    func cloneRepository() async {
-        if prefs.usesBundledRepository {
-            notice = "La toolchain incluida ya está lista; elige un checkout externo solo si quieres sustituirla."
-            return
-        }
-        let dest = prefs.repositoryURL
-        notice = "Clonando \(Self.upstream)…"
-        let r = await Shell.run("/usr/bin/git", ["clone", Self.upstream, dest.path])
-        notice = r.ok ? "Clonado en \(dest.path)" : "git clone falló: \(r.stderr)"
-        await refresh()
-    }
-
-    /// Solo avance rápido: si hay cambios locales o ramas divergentes, git se
-    /// niega y se dice; la app no resuelve conflictos por su cuenta.
-    func updateRepository() async {
-        if prefs.usesBundledRepository {
-            notice = "La toolchain incluida es de solo lectura; no necesita git pull."
-            return
-        }
-        notice = "Actualizando nxnative…"
-        let r = await Shell.run("/usr/bin/git", ["-C", prefs.repositoryURL.path, "pull", "--ff-only"])
-        notice = r.ok ? r.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-                      : "git pull --ff-only falló: \(r.stderr.trimmingCharacters(in: .whitespacesAndNewlines))"
-        await refresh()
-    }
 }

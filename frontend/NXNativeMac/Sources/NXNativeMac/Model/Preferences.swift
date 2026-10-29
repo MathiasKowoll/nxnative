@@ -9,17 +9,6 @@ import Observation
 final class Preferences {
     private let defaults = UserDefaults.standard
 
-    private var repositoryPathWasExplicitlyChosen: Bool {
-        get { defaults.bool(forKey: "repositoryPathExplicit") }
-        set { defaults.set(newValue, forKey: "repositoryPathExplicit") }
-    }
-
-    var repositoryPath: String {
-        didSet {
-            defaults.set(repositoryPath, forKey: "repositoryPath")
-            repositoryPathWasExplicitlyChosen = true
-        }
-    }
     var keysPath: String { didSet { defaults.set(keysPath, forKey: "keysPath") } }
     /// Vacío = buscar uno >= 3.12 automáticamente.
     var pythonPath: String { didSet { defaults.set(pythonPath, forKey: "pythonPath") } }
@@ -46,12 +35,6 @@ final class Preferences {
 
     init() {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        repositoryPath = defaults.string(forKey: "repositoryPath") ?? "\(home)/Development/nxnative"
-        if defaults.object(forKey: "repositoryPathExplicit") == nil {
-            // Las versiones anteriores guardaban el checkout por defecto. En
-            // una app nueva ese valor no debe impedir usar la toolchain incluida.
-            defaults.set(false, forKey: "repositoryPathExplicit")
-        }
         keysPath = defaults.string(forKey: "keysPath") ?? ""
         pythonPath = defaults.string(forKey: "pythonPath") ?? ""
         gameRoots = defaults.stringArray(forKey: "gameRoots") ?? []
@@ -66,12 +49,6 @@ final class Preferences {
         assignedTitleIDs = defaults.dictionary(forKey: "assignedTitleIDs") as? [String: String] ?? [:]
     }
 
-    /// La app instalada usa su payload firmado por defecto. Un checkout
-    /// externo solo se usa después de que la persona lo elija explícitamente.
-    var usesBundledRepository: Bool {
-        !repositoryPathWasExplicitlyChosen && bundledRepositoryURL != nil
-    }
-
     var bundledRepositoryURL: URL? {
         guard let resources = Bundle.main.resourceURL else { return nil }
         let root = resources.appendingPathComponent("nxnative", isDirectory: true)
@@ -83,8 +60,12 @@ final class Preferences {
     }
 
     var repositoryURL: URL {
-        if usesBundledRepository, let bundledRepositoryURL { return bundledRepositoryURL }
-        return URL(fileURLWithPath: (repositoryPath as NSString).expandingTildeInPath, isDirectory: true)
+        if let bundledRepositoryURL { return bundledRepositoryURL }
+        // Fallback solo para ejecuciones de desarrollo fuera del bundle. Las
+        // apps distribuidas siempre llevan el payload dentro de Resources.
+        let root = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Development/nxnative", isDirectory: true)
+        return root
     }
 
     var bundledFC26URL: URL? {
@@ -97,12 +78,6 @@ final class Preferences {
         return root
     }
 
-    func useBundledRepository() {
-        repositoryPath = ""
-        // repositoryPath's didSet intentionally marks manual edits. This call
-        // is the one exception: return to the embedded payload explicitly.
-        repositoryPathWasExplicitlyChosen = false
-    }
     var keysURL: URL? {
         keysPath.isEmpty ? nil : URL(fileURLWithPath: (keysPath as NSString).expandingTildeInPath)
     }

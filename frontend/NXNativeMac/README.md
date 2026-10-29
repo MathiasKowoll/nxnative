@@ -22,8 +22,8 @@ nxnative cambia esa interfaz, el punto de contacto está en `Sources/NXCore`.
 | **Instalar FC26/FC27** | Flujo de un solo paso: eliges tu carpeta con NSP/NSZ/XCI/XCZ, tu `prod.keys` y el destino; el title ID detecta automáticamente FC26 o FC27 y ejecuta el builder correspondiente. El instalador incluye dentro de su propio `.app` la toolchain de nxnative, los perfiles, traductores de shaders y el builder de FC26. El resultado queda autocontenido con runtime, juego, módulos, shaders y launcher. No incluye ni redistribuye el juego ni las claves. |
 | **Juegos en disco** | Base, actualizaciones y DLC agrupados por title ID, estén en una carpeta por juego o todos juntos con los DLC en subcarpetas. Dice si nxnative tiene perfil y avisa de un XCI que trae la actualización en el cartucho. Construye una app de Mac, una IPA o un build de desarrollo, con todas las opciones del script. Benchmark (`scripts/bench.py`) cuando el perfil tiene ruta. |
 | **Construcciones** | Cola de builds de uno en uno, con etapas, progreso, ETA y la consola del script. Cancelar manda SIGINT (el script sale con 130 y deja lo reutilizable). |
-| **Compatibilidad** | La tabla de `dm/games/README.md` cruzada con lo que tienes. Cada juego enlaza a su nota en el checkout. |
-| **Entorno** | Comprobaciones reales: Apple silicon, Metal 4 y arquitectura de la GPU, Python ≥ 3.12, `nsz`, Xcode, versión del compilador de Metal contra `dmsh_chain.lock`, permisos de `prod.keys`, espacio libre. Clonar o actualizar nxnative (`git pull --ff-only`). Mandos que ve macOS. |
+| **Compatibilidad** | La tabla de `dm/games/README.md` cruzada con lo que tienes. Cada juego enlaza a su nota dentro de la toolchain incluida. |
+| **Entorno** | Comprobaciones reales: Apple silicon, Metal 4 y arquitectura de la GPU, Python ≥ 3.12, `nsz`, Xcode, herramientas de build, versión del compilador de Metal contra `dmsh_chain.lock`, permisos de `prod.keys`, espacio libre. Mandos que ve macOS. |
 
 El destino por defecto de las apps generadas se configura en **Entorno → Apps
 generadas**. El instalador FC26/FC27 usa esa carpeta y la añade a la biblioteca;

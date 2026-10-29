@@ -44,30 +44,9 @@ struct EnvironmentView: View {
             }
 
             Section("nxnative") {
-                if prefs.usesBundledRepository {
-                    Label("Toolchain incluida en esta app", systemImage: "shippingbox.fill")
-                    Text("Incluye los scripts, perfiles y técnicas de extracción, reescritura, shaders y empaquetado de FC27, además del builder de FC26. El juego, las claves y los resultados se mantienen fuera del bundle.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    HStack {
-                        Button("Elegir checkout externo…") {
-                            if let url = Finder.chooseFolder() { prefs.repositoryPath = url.path }
-                        }
-                        Button("Abrir en Finder") { Finder.open(model.repository.root) }
-                    }
-                } else {
-                    PathRow(label: "Checkout", path: $prefs.repositoryPath, directory: true)
-                    HStack {
-                        if model.repository.isValid {
-                            Button("Actualizar (git pull --ff-only)") { Task { await model.updateRepository() } }
-                        } else {
-                            Button("Clonar \(AppModel.upstream)") { Task { await model.cloneRepository() } }
-                        }
-                        Button("Volver a la toolchain incluida") { model.prefs.useBundledRepository() }
-                            .disabled(model.prefs.bundledRepositoryURL == nil)
-                        Button("Abrir en Finder") { Finder.open(model.prefs.repositoryURL) }
-                            .disabled(!model.repository.isValid)
-                    }
-                }
+                Label("Toolchain incluida en esta app", systemImage: "shippingbox.fill")
+                Text("Incluye los scripts, perfiles y técnicas de extracción, reescritura, shaders y empaquetado de FC27, además del builder de FC26. El juego, las claves y los resultados se mantienen fuera del bundle.")
+                    .font(.caption).foregroundStyle(.secondary)
                 if let n = model.notice { Text(n).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
             }
 
@@ -195,7 +174,6 @@ struct EnvironmentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .GCControllerDidDisconnect)) { _ in refreshControllers() }
         .onChange(of: model.prefs.gameRoots) { Task { await model.refresh() } }
         .onChange(of: model.prefs.appRoots) { Task { await model.refresh() } }
-        .onChange(of: model.prefs.repositoryPath) { Task { await model.refresh() } }
         .onChange(of: model.prefs.keysPath) { Task { await model.toolchain.refresh(model.prefs) } }
         .onChange(of: model.prefs.pythonPath) { Task { await model.toolchain.refresh(model.prefs) } }
         .confirmationDialog("¿Mover las apps generadas?", isPresented: $showingMoveAppsPrompt,
