@@ -8,6 +8,10 @@ struct EnvironmentView: View {
     var compact: Bool
     @State private var identities: [String] = []
     @State private var controllers: [String] = []
+    @State private var pendingAppsOrigin: URL?
+    @State private var pendingAppsDestination: URL?
+    @State private var pendingApps: [URL] = []
+    @State private var showingMoveAppsPrompt = false
 
     var body: some View {
         @Bindable var prefs = model.prefs
@@ -40,15 +44,29 @@ struct EnvironmentView: View {
             }
 
             Section("nxnative") {
-                PathRow(label: "Checkout", path: $prefs.repositoryPath, directory: true)
-                HStack {
-                    if model.repository.isValid {
-                        Button("Actualizar (git pull --ff-only)") { Task { await model.updateRepository() } }
-                    } else {
-                        Button("Clonar \(AppModel.upstream)") { Task { await model.cloneRepository() } }
+                if prefs.usesBundledRepository {
+                    Label("Toolchain incluida en esta app", systemImage: "shippingbox.fill")
+                    Text("Incluye los scripts, perfiles y técnicas de extracción, reescritura, shaders y empaquetado de FC27, además del builder de FC26. El juego, las claves y los resultados se mantienen fuera del bundle.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        Button("Elegir checkout externo…") {
+                            if let url = Finder.chooseFolder() { prefs.repositoryPath = url.path }
+                        }
+                        Button("Abrir en Finder") { Finder.open(model.repository.root) }
                     }
-                    Button("Abrir en Finder") { Finder.open(model.prefs.repositoryURL) }
-                        .disabled(!model.repository.isValid)
+                } else {
+                    PathRow(label: "Checkout", path: $prefs.repositoryPath, directory: true)
+                    HStack {
+                        if model.repository.isValid {
+                            Button("Actualizar (git pull --ff-only)") { Task { await model.updateRepository() } }
+                        } else {
+                            Button("Clonar \(AppModel.upstream)") { Task { await model.cloneRepository() } }
+                        }
+                        Button("Volver a la toolchain incluida") { model.prefs.useBundledRepository() }
+                            .disabled(model.prefs.bundledRepositoryURL == nil)
+                        Button("Abrir en Finder") { Finder.open(model.prefs.repositoryURL) }
+                            .disabled(!model.repository.isValid)
+                    }
                 }
                 if let n = model.notice { Text(n).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
             }
@@ -99,6 +117,21 @@ struct EnvironmentView: View {
 
             Section("Dónde buscar apps de juego") {
                 FolderList(paths: $prefs.appRoots)
+                Text("La carpeta que contiene NXNative.app también se revisa automáticamente; las apps de juego pueden quedar junto a este selector.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("Apps generadas") {
+                LabeledContent("Destino por defecto") {
+                    HStack {
+                        Text(prefs.gameAppsPath.isEmpty ? "~/Applications" : prefs.gameAppsPath)
+                            .lineLimit(1).truncationMode(.middle)
+                            .foregroundStyle(.secondary)
+                        Button("Elegir…") { chooseGeneratedAppsDestination() }
+                    }
+                }
+                Text("El instalador FC26/FC27 dejará aquí la app final si no eliges otro destino. Esta carpeta también se añade automáticamente a la biblioteca.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
 
             Section {
@@ -165,6 +198,88 @@ struct EnvironmentView: View {
         .onChange(of: model.prefs.repositoryPath) { Task { await model.refresh() } }
         .onChange(of: model.prefs.keysPath) { Task { await model.toolchain.refresh(model.prefs) } }
         .onChange(of: model.prefs.pythonPath) { Task { await model.toolchain.refresh(model.prefs) } }
+        .confirmationDialog("¿Mover las apps generadas?", isPresented: $showingMoveAppsPrompt,
+                            titleVisibility: .visible) {
+            Button("Mover \(pendingApps.count) \(pendingApps.count == 1 ? "app" : "apps")") {
+                applyPendingDestination(moveApps: true)
+            }
+            Button("Cambiar destino sin mover") {
+                applyPendingDestination(moveApps: false)
+            }
+            Button("Cancelar", role: .cancel) { clearPendingDestination() }
+        } message: {
+            Text("La carpeta actual contiene \(pendingApps.count) app(s) de juego generada(s). ¿Quieres moverlas a la nueva ubicación?")
+        }
+    }
+
+    private func chooseGeneratedAppsDestination() {
+        guard let destination = Finder.chooseFolder(prompt: "Elegir destino de las apps generadas") else { return }
+        let origin = model.prefs.gameAppsURL.standardizedFileURL
+        let selected = destination.standardizedFileURL
+        guard origin != selected else { return }
+        let apps = MacGameBundle.scan(roots: [origin], depth: 0).map(\.url)
+        guard !apps.isEmpty else {
+            model.prefs.gameAppsPath = destination.path
+            Task { await model.refresh() }
+            return
+        }
+        pendingAppsOrigin = origin
+        pendingAppsDestination = destination
+        pendingApps = apps
+        showingMoveAppsPrompt = true
+    }
+
+    private func applyPendingDestination(moveApps: Bool) {
+        guard let destination = pendingAppsDestination else { return }
+        var moved = 0
+        var skipped = 0
+        var failure: String?
+        if moveApps {
+            do {
+                try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+                for app in pendingApps {
+                    let target = destination.appendingPathComponent(app.lastPathComponent, isDirectory: true)
+                    if FileManager.default.fileExists(atPath: target.path) {
+                        skipped += 1
+                        continue
+                    }
+                    do {
+                        try FileManager.default.moveItem(at: app, to: target)
+                        moved += 1
+                    } catch {
+                        failure = "No se pudo mover \(app.lastPathComponent): \(error.localizedDescription)"
+                        break
+                    }
+                }
+            } catch {
+                failure = "No se pudo preparar el destino: \(error.localizedDescription)"
+            }
+        }
+        model.prefs.gameAppsPath = destination.path
+        if let origin = pendingAppsOrigin,
+           !moveApps || moved < pendingApps.count,
+           !model.prefs.appRoots.contains(origin.path) {
+            // Si una app se queda atrás, mantener la carpeta visible en la
+            // biblioteca aunque deje de ser el destino por defecto.
+            model.prefs.appRoots.append(origin.path)
+        }
+        if let failure {
+            model.notice = failure
+        } else if moveApps {
+            let suffix = skipped == 0 ? "" : " \(skipped) quedaron en la ubicación anterior porque ya existían en el destino."
+            model.notice = "Se movieron \(moved) app(s) generada(s).\(suffix)"
+        } else {
+            model.notice = "Destino cambiado. Las apps existentes se mantienen en su ubicación anterior."
+        }
+        clearPendingDestination()
+        Task { await model.refresh() }
+    }
+
+    private func clearPendingDestination() {
+        pendingAppsOrigin = nil
+        pendingAppsDestination = nil
+        pendingApps = []
+        showingMoveAppsPrompt = false
     }
 
     private func refreshControllers() {

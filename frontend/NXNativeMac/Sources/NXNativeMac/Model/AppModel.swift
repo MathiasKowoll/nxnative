@@ -130,6 +130,85 @@ final class AppModel {
         return enqueue(job)
     }
 
+    enum FCInstallTarget: Sendable, Equatable {
+        case fc26, fc27
+
+        var title: String { self == .fc26 ? "EA Sports FC 26" : "EA Sports FC 27" }
+        var titleID: TitleID {
+            TitleID(self == .fc26 ? "01004FF021942000" : "0100C49025D3E000")!
+        }
+    }
+
+    /// Identifica FC26/FC27 leyendo los title IDs de los NSP/NSZ/XCI/XCZ.
+    /// El nombre de la carpeta solo se usa como último fallback para dumps sin
+    /// etiqueta que todavía no se pueden descifrar con las claves elegidas.
+    func detectFCInstallTarget(gameFolder: URL, keys: URL) -> FCInstallTarget? {
+        let keyset = Keyset(url: keys)
+        let files = GameLibrary.collect(root: gameFolder, depth: 3, readHeaders: true, keyset: keyset)
+        let bases = Set(files.compactMap { $0.titleID?.base.description.uppercased() })
+        if bases.contains("01004FF021942000") { return .fc26 }
+        if bases.contains("0100C49025D3E000") { return .fc27 }
+        let name = gameFolder.path.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+        if name.localizedCaseInsensitiveContains("fc26") { return .fc26 }
+        if name.localizedCaseInsensitiveContains("fc27") { return .fc27 }
+        return nil
+    }
+
+    /// Flujo de instalación de un juego que el usuario ya posee. Detecta FC26
+    /// o FC27 y envía el mismo formulario al builder específico correspondiente.
+    func startOneStepMacApp(gameFolder: URL, keys: URL, output: URL,
+                            appName: String = "EA Sports FC 27") -> String? {
+        guard let target = detectFCInstallTarget(gameFolder: gameFolder, keys: keys) else {
+            return "No pude identificar FC26 o FC27 en la carpeta seleccionada. Verifica que incluya el juego y prod.keys."
+        }
+        if target == .fc26 { return startFC26Build(gameFolder: gameFolder, keys: keys, output: output) }
+        var options = BuildOptions(nspFolder: gameFolder, keys: keys)
+        options.platform = .macApp
+        options.output = output
+        options.appName = appName
+        // Cadena vacía = firma ad hoc. Si la persona eligió una identidad
+        // instalada en Entorno, build_ipa_from_nsp.py la usa para el app.
+        options.macSign = prefs.macSignIdentity
+
+        do {
+            try FileManager.default.createDirectory(at: output.deletingLastPathComponent(),
+                                                     withIntermediateDirectories: true)
+        } catch {
+            return "No se pudo preparar el destino: \(error.localizedDescription)"
+        }
+        let job = BuildJob(title: "Instalar \(appName)", folder: gameFolder,
+                           arguments: options.arguments(script: repository.buildScript),
+                           resultDirectory: output.deletingLastPathComponent())
+        return enqueue(job)
+    }
+
+    private func startFC26Build(gameFolder: URL, keys: URL, output: URL) -> String? {
+        let fc26Root = prefs.bundledFC26URL
+            ?? URL(fileURLWithPath: "/Users/mathias/Development/fc26-mac-port", isDirectory: true)
+        let script = fc26Root.appendingPathComponent("games/fc26/build.sh")
+        guard FileManager.default.isExecutableFile(atPath: script.path) else {
+            return "Detecté FC26, pero no encuentro su builder en \(script.path). Configura el checkout fc26-mac-port."
+        }
+        let files = GameLibrary.collect(root: gameFolder, depth: 3, readHeaders: true, keyset: Keyset(url: keys))
+        let scan = GameLibrary.group(files)
+        guard let game = scan.games.first(where: { $0.base == FCInstallTarget.fc26.titleID }),
+              let base = game.baseFiles.first?.url else {
+            return "Detecté FC26, pero no pude separar el NSP base de la actualización."
+        }
+        let update = game.updates.max { ($0.version ?? 0) < ($1.version ?? 0) }?.url
+        let parent = output.deletingLastPathComponent()
+        let work = parent.appendingPathComponent("FC26_build", isDirectory: true)
+        var args = [script.path, "--base", base.path, "--keys", keys.path, "--work", work.path, "--app", output.path, "--self-contained"]
+        if let update { args += ["--update", update.path] }
+        if !prefs.macSignIdentity.isEmpty { args += ["--mac-sign", prefs.macSignIdentity] }
+        do { try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true) }
+        catch { return "No se pudo preparar el destino: \(error.localizedDescription)" }
+        let job = BuildJob(title: "Construir EA Sports FC 26", folder: gameFolder, arguments: args,
+                           resultDirectory: output.deletingLastPathComponent(), executable: URL(fileURLWithPath: "/bin/bash"),
+                           workingDirectory: fc26Root)
+        return enqueue(job)
+    }
+
     /// `scripts/bench.py <build>`: la ruta fija del perfil, con percentiles de
     /// tiempo de fotograma. Exige un build `--platform mac` previo.
     func startBenchmark(_ game: GameEntry, runs: Int = 2) -> String? {
@@ -266,9 +345,9 @@ final class AppModel {
     /// Los lanzadores nuevos ya lo hacen solos; esto cubre las apps hechas
     /// antes de ese cambio.
     ///
-    /// `DM_LAUNCHER=0`: los lanzadores nuevos enseñan su propia ventana de
-    /// ajustes antes del juego; un front end que dibuja los ajustes, como
-    /// esta app, la salta así (`docs/frontends.md`). Los viejos lo ignoran.
+    /// `DM_LAUNCHER=0`: el launcher genérico no muestra su ventana porque esta
+    /// app administra los ajustes desde su propia interfaz. Los launchers FC
+    /// específicos se integrarán en el bundle final de cada juego.
     ///
     /// `globals`: los valores para todos los juegos (Entorno), salvo los que
     /// el juego fija en su propio env.txt.
@@ -329,6 +408,10 @@ final class AppModel {
     static let upstream = "https://github.com/MathiasKowoll/nxnative.git"
 
     func cloneRepository() async {
+        if prefs.usesBundledRepository {
+            notice = "La toolchain incluida ya está lista; elige un checkout externo solo si quieres sustituirla."
+            return
+        }
         let dest = prefs.repositoryURL
         notice = "Clonando \(Self.upstream)…"
         let r = await Shell.run("/usr/bin/git", ["clone", Self.upstream, dest.path])
@@ -339,6 +422,10 @@ final class AppModel {
     /// Solo avance rápido: si hay cambios locales o ramas divergentes, git se
     /// niega y se dice; la app no resuelve conflictos por su cuenta.
     func updateRepository() async {
+        if prefs.usesBundledRepository {
+            notice = "La toolchain incluida es de solo lectura; no necesita git pull."
+            return
+        }
         notice = "Actualizando nxnative…"
         let r = await Shell.run("/usr/bin/git", ["-C", prefs.repositoryURL.path, "pull", "--ff-only"])
         notice = r.ok ? r.stdout.trimmingCharacters(in: .whitespacesAndNewlines)

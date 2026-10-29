@@ -4,7 +4,9 @@
 # puede escribir allí).
 # Uso: scripts/build_app.sh [--no-install] [identidad de codesign]
 set -euo pipefail
-cd "${0:A:h}/.."
+script_dir="${0:A:h}"
+cd "$script_dir/.."
+repo_root="$script_dir/../../.."
 
 install=1
 if [[ "${1:-}" == "--no-install" ]]; then install=0; shift; fi
@@ -34,7 +36,44 @@ if [[ ! -f "$icns" || scripts/make_icon.swift -nt "$icns" ]]; then
 fi
 cp "$icns" "$app/Contents/Resources/AppIcon.icns"
 
-version="$(git describe --tags --always 2>/dev/null || echo 0.1)"
+# El builder se entrega con la toolchain que necesita para crear las apps de
+# juego. No se incluyen dumps, claves, el checkout Git ni los resultados de
+# builds anteriores: el usuario aporta su propio juego y prod.keys, y todo lo
+# que se genera queda fuera del bundle, en la carpeta que elija.
+payload="$app/Contents/Resources/nxnative"
+mkdir -p "$payload"
+rsync -a \
+    --exclude '/.git/' \
+    --exclude '/.codex/' \
+    --exclude '/.build/' \
+    --exclude '/.venv/' \
+    --exclude '/build/' \
+    --exclude '/frontend/' \
+    --exclude '/work/' \
+    --exclude '/dm/host/gen/' \
+    --exclude '*.nsp' --exclude '*.nsz' --exclude '*.xci' --exclude '*.xcz' \
+    --exclude '*.keys' --exclude 'prod.keys' \
+    "$repo_root/" "$payload/"
+touch "$payload/.nxnative-bundled"
+
+# FC26 mantiene su builder en un checkout hermano de nxnative. Si existe al
+# construir esta app, también se congela dentro del bundle. FC26 no lleva aquí
+# el juego ni sus claves: solo fuentes, scripts y herramientas del builder.
+fc26_source="${FC26_REPO:-$repo_root/../fc26-mac-port}"
+if [[ -f "$fc26_source/games/fc26/build.sh" ]]; then
+    fc26_payload="$app/Contents/Resources/fc26-mac-port"
+    mkdir -p "$fc26_payload"
+    rsync -a \
+        --exclude '/.git/' \
+        --exclude '/work/' \
+        --exclude '/build/' \
+        --exclude '*.nsp' --exclude '*.nsz' --exclude '*.xci' --exclude '*.xcz' \
+        --exclude '*.keys' --exclude 'prod.keys' \
+        "$fc26_source/" "$fc26_payload/"
+    touch "$fc26_payload/.fc26-builder-bundled"
+fi
+
+version="$(git -C "$repo_root" describe --tags --always 2>/dev/null || echo 0.1)"
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

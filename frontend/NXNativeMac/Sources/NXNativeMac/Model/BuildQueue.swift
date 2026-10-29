@@ -14,6 +14,11 @@ final class BuildJob: Identifiable {
     let folder: URL
     /// Los argumentos de python: el script y sus opciones.
     let arguments: [String]
+    /// Ejecutable alternativo para builders externos (por ejemplo, el build.sh
+    /// de FC26). nil = usar el Python del checkout de nxnative.
+    let executable: URL?
+    /// Carpeta de trabajo del ejecutable alternativo. nil = el checkout de nxnative.
+    let workingDirectory: URL?
     /// La carpeta que enseñar al terminar (la salida, o los resultados).
     let resultDirectory: URL?
     /// `<carpeta>/<title ID>_build/logs`, donde el script deja un log por paso.
@@ -27,12 +32,15 @@ final class BuildJob: Identifiable {
     private var process: Process?
     private var splitter = LineSplitter()
 
-    init(title: String, folder: URL, arguments: [String], resultDirectory: URL? = nil, logsDirectory: URL? = nil) {
+    init(title: String, folder: URL, arguments: [String], resultDirectory: URL? = nil, logsDirectory: URL? = nil,
+         executable: URL? = nil, workingDirectory: URL? = nil) {
         self.title = title
         self.folder = folder
         self.arguments = arguments
         self.resultDirectory = resultDirectory
         self.logsDirectory = logsDirectory
+        self.executable = executable
+        self.workingDirectory = workingDirectory
     }
 
     var isActive: Bool { status == .queued || status == .running }
@@ -44,10 +52,12 @@ final class BuildJob: Identifiable {
 
     func start(python: String, repository: URL) {
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: python)
+        let program = executable ?? URL(fileURLWithPath: python)
+        p.executableURL = program
         p.arguments = arguments
-        p.currentDirectoryURL = repository
-        var env = Shell.environment(extraPath: [URL(fileURLWithPath: python).deletingLastPathComponent().path])
+        p.currentDirectoryURL = workingDirectory ?? repository
+        var env = Shell.environment(extraPath: [URL(fileURLWithPath: python).deletingLastPathComponent().path,
+                                                 program.deletingLastPathComponent().path])
         env["PYTHONUNBUFFERED"] = "1"
         p.environment = env
         p.standardInput = FileHandle.nullDevice
@@ -78,9 +88,9 @@ final class BuildJob: Identifiable {
             process = p
             status = .running
             started = Date()
-            append("$ \(([python] + (p.arguments ?? [])).joined(separator: " "))")
+            append("$ \(([program.path] + (p.arguments ?? [])).joined(separator: " "))")
         } catch {
-            append(BuildEventParser.redPrefix + "No se pudo lanzar python: \(error.localizedDescription)")
+            append(BuildEventParser.redPrefix + "No se pudo lanzar el builder: \(error.localizedDescription)")
             status = .failed(-1)
             finished = Date()
         }
