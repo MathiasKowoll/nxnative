@@ -773,6 +773,11 @@ def vs_depth(src):
     single = src[:m.start()] + gl
     return single, single + '\n' + re.sub(r'\bmain0\s*\(', 'main0_z(', body, count=1)
 
+def fs_early(src, enabled=False):
+    """Add an opt-in early-fragment-tests attribute before a fragment entry point."""
+    if enabled is not True or re.search(r'\[\[early_fragment_tests\]\]\s*fragment\b', src): return src
+    return re.sub(r'\bfragment\s+', '[[early_fragment_tests]] fragment ', src, count=1)
+
 def fs_uint(src):
     """Integer colour targets. With no PC version the translator declares every fragment output float; a shader writes an integer as the float with its bits (as_type<float>(…)), and Metal
     refuses a pipeline whose float output meets an integer attachment. Luigi's Mansion 3 draws its whole scene into an R32Uint + RGBA8Uint G-buffer (1,377 of its 4,307 pixel shaders write
@@ -784,6 +789,8 @@ def fs_uint(src):
     integer attachments are exactly those. → (the source with main0_u (and main0_m) added, the main0_m mask or 0), or (None, 0)"""
     m = re.search(r'^.*\bfragment\s+main0_out\s+main0\s*\(', src, re.M); st = re.search(r'struct main0_out\s*\{(.*?)\};', src, re.S)
     if not m or not st: return None, 0
+    before = re.search(r'\[\[early_fragment_tests\]\]\s*$', src[:m.start()])
+    function_start = before.start() if before else m.start()
     mem = re.findall(r'^\s*(\w+)\s+(\w+)\s*(\[\[[^\]]*\]\])?;', st.group(1), re.M)
     cols = {nm: ty for ty, nm, at in mem if 'color(' in at and ty.startswith('float')}
     # The hardware writes an output's bits to an integer target whatever the shader computed, so main0_u is right for any pixel shader; only those that look like integer writers get one
@@ -795,8 +802,17 @@ def fs_uint(src):
     def entry(sfx, as_uint):   # main0 again as main0_<sfx>, returning the outputs in as_uint as the unsigned integer vectors of their bits (dmsh_fetch.py cuts the source at main0_out_u)
         struct = f'struct main0_out_{sfx}\n{{\n' + ''.join(f'    {uty(cols[nm]) if nm in as_uint else ty} {nm} {at};\n' for ty, nm, at in mem) + '};\n\n'
         ret = f'return main0_out_{sfx}{{' + ', '.join(f'as_type<{uty(cols[nm])}>(out.{nm})' if nm in as_uint else f'out.{nm}' for _, nm, _ in mem) + '};'
-        return '\n' + struct + re.sub(r'\bfragment\s+main0_out\s+main0\s*\(', f'fragment main0_out_{sfx} main0_{sfx}(', src[m.start():], count=1).replace('return out;', ret)
+        return '\n' + struct + re.sub(r'\bfragment\s+main0_out\s+main0\s*\(', f'fragment main0_out_{sfx} main0_{sfx}(', src[function_start:], count=1).replace('return out;', ret)
     out, mask = src + entry('u', set(cols)), 0
+    if len(mem) == 1 and len(cols) == 1 and 'color(0)' in mem[0][2]:
+        nm = mem[0][1]
+        body = entry('u', set(cols)); body = body[body.index('};') + 2:].replace('main0_u(', 'main0_u_or(', 1)
+        end = body.find(')\n{')
+        if end >= 0:
+            arg = f'{uty(cols[nm])} dm_logic_previous [[color(0)]]'
+            body = body[:end] + ('' if body[end - 1] == '(' else ', ') + arg + body[end:]
+            body = body.replace(f'as_type<{uty(cols[nm])}>(out.{nm})}};', f'as_type<{uty(cols[nm])}>(out.{nm}) | dm_logic_previous}};')
+            out += '\n' + body
     if from_int and set(cols) - from_int:   # some outputs from integer bits, some not: the mixed entry point
         out += entry('m', from_int)
         mask = sum(1 << int(re.search(r'color\((\d+)\)', at).group(1)) for _, nm, at in mem if nm in from_int)
@@ -985,6 +1001,7 @@ def finish(key, w, j, c1):
         plain = full
         full, lay = vs_layer_entry(full)   # layer entry points for a slice-writing geometry shader (see vs_layer_entry)
         open(msl, 'w').write(full)
+    if j['stage'] == 'ps': src = fs_early(src, j.get('early_fragment_tests')); open(msl, 'w').write(src)
     fu, fmask = fs_uint(src) if j['stage'] == 'ps' else (None, 0)   # the integer-output entry points (see fs_uint); the analysis below uses the source with only main0
     fd = fs_dual(src) if j['stage'] == 'ps' and key in DUAL_WANT else None   # the dual-source entry point (see fs_dual), from the source with only main0
     if fu or fd: plain = src; open(msl, 'w').write((fu or src) + (fd or ''))
