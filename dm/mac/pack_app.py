@@ -84,7 +84,13 @@ def swift_sources():   # the settings window, with the iOS launcher's model and 
     return [HERE / 'Launcher.swift', HERE.parent / 'ios/Sources/LauncherSettings.swift', HERE.parent / 'ios/Sources/LauncherRow.swift']
 
 
-def build_launcher(out, minos, clang, swiftc, sdk):   # launcher.c's main and the host's cloud-save code (its send after the host exits), linked by swiftc with the settings window (no Swift main: -parse-as-library)
+def build_launcher(out, minos, clang, swiftc, sdk, source=None, defines=()):   # generic SwiftUI launcher, or a title-specific Cocoa launcher
+    if source:
+        cmd = [clang, '-isysroot', sdk, '-arch', 'arm64', f'-mmacosx-version-min={minos}', '-O2', '-Wall', '-Wextra', '-Werror', '-fobjc-arc']
+        cmd += [f'-D{d}' for d in defines]
+        cmd += [source, '-framework', 'Cocoa', '-o', out]
+        run(cmd)
+        return
     with tempfile.TemporaryDirectory(dir=out.parents[3]) as t:
         objs = [Path(t) / 'launcher.o', Path(t) / 'save_sync.o']
         for obj, src in zip(objs, (HERE / 'launcher.c', HERE.parent / 'host/save_sync.c')):
@@ -211,7 +217,7 @@ def pack(a):
     except (OSError, ValueError): previous = None
     try:
         a = argparse.Namespace(**vars(a))
-        for name in ('out', 'host', 'patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso', 'pso_pairs', 'env_file', 'settings', 'icon'):
+        for name in ('out', 'host', 'patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso', 'pso_pairs', 'env_file', 'settings', 'icon', 'launcher_source'):
             if getattr(a, name): setattr(a, name, str(Path(getattr(a, name)).resolve()))
         mods, msls, pso, tables, pairs, fonts, files = selected_inputs(a)
         clang = Path(run(['xcrun', '--find', 'clang']).strip()).resolve()
@@ -222,7 +228,8 @@ def pack(a):
         if not codesign: raise SystemExit('codesign is not available')
         codesign = Path(codesign).resolve()
         minos = min_os(a.host)
-        sources = [Path(__file__).resolve(), HERE / 'launcher.c', HERE.parent / 'host/romfs_image.h', HERE.parent / 'host/save_sync.c', HERE.parent / 'host/save_sync.h', HERE.parent / 'tools/romfs.py'] + swift_sources()
+        launcher_sources = [Path(a.launcher_source)] if a.launcher_source else [HERE / 'launcher.c', HERE.parent / 'host/romfs_image.h', HERE.parent / 'host/save_sync.c', HERE.parent / 'host/save_sync.h', HERE.parent / 'tools/romfs.py'] + swift_sources()
+        sources = [Path(__file__).resolve()] + launcher_sources
         inputs = {'options': vars(a), 'files': [(str(p), p.stat().st_mode, digest(p), os.readlink(p) if p.is_symlink() else None) for p in files + sources],
                   'trees': [(p, inventory(Path(p))) for p in (a.romfs, a.aoc) if p],
                   'tools': [[str(c), c.stat().st_mode, c.stat().st_size, c.stat().st_mtime_ns, c.stat().st_ctime_ns, run([c, '--version']).strip()] for c in (clang, swiftc)] + [
@@ -248,8 +255,10 @@ def pack(a):
     if need:
         free = shutil.disk_usage(res).free
         if need + (1 << 30) > free: raise SystemExit(f'the app needs {need / 2**30:.1f} GB on the volume of {out.parent} (no APFS clones from the build there) and {free / 2**30:.1f} GB are free')
+    launcher_executable = a.launcher_executable or EXE
     step(f'launcher and host ({"clones" if clone["romfs"] else "copies"} of the game files)')
-    build_launcher(mac / EXE, minos, clang, swiftc, sdk)
+    build_launcher(mac / launcher_executable, minos, clang, swiftc, sdk, Path(a.launcher_source) if a.launcher_source else None,
+                   tuple(a.launcher_define or ()))
     shutil.copy2(a.host, mac / 'dmhost')
     copy(mods, dm, clone['mods'])
     if tables: copy(tables, dm, False)
@@ -264,6 +273,7 @@ def pack(a):
     icon = bool(a.icon)
     if icon: step('icon'); make_icns(a.icon, res / 'AppIcon.icns')
     info = info_plist(a, minos, icon)
+    info['CFBundleExecutable'] = launcher_executable
     info['DMModuleFiles'] = [p.name for p in mods]
     commit = source_commit()
     if commit: info['DMCommit'] = commit
@@ -305,6 +315,9 @@ def parse(argv):
     ap.add_argument('--title-id', required=True); ap.add_argument('--name', required=True)
     ap.add_argument('--version'); ap.add_argument('--bundle-id'); ap.add_argument('--category'); ap.add_argument('--lang'); ap.add_argument('--marker', help='the profile\'s romfs_marker')
     ap.add_argument('--icon', help='the game icon (icon.jpg from the control data)')
+    ap.add_argument('--launcher-source', help='title-specific Objective-C launcher source; when present it replaces the generic nxnative launcher')
+    ap.add_argument('--launcher-define', action='append', help='preprocessor definition for --launcher-source (repeatable)')
+    ap.add_argument('--launcher-executable', help='CFBundleExecutable and file name for --launcher-source (default: nxnative)')
     ap.add_argument('--sign', default='-', help='codesign identity (default: - = ad-hoc)')
     return ap.parse_args(argv)
 

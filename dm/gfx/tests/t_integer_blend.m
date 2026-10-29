@@ -13,6 +13,15 @@ static int checks, failed;
 int main(void) { @autoreleasepool {
     mtl_init();
     NvShader *vs = [NvShader new], *fs = [NvShader new];
+    NSString *source = @"#include <metal_stdlib>\nusing namespace metal;\n"
+        "vertex float4 v(uint i [[vertex_id]]) { return float4(i == 1 ? 3.0 : -1.0, i == 2 ? 3.0 : -1.0, 0, 1); }\n"
+        "struct O { uint4 a [[color(0)]]; uint4 b [[color(1)]]; };\n"
+        "fragment O f() { return {uint4(0x12345678u), uint4(17,34,51,68)}; }\n";
+    NSError *error = nil;
+    id<MTLLibrary> library = [g_dev newLibraryWithSource:source options:nil error:&error];
+    CHECK(library != nil, "synthetic shader compiles");
+    if (!library) return 1;
+    vs->fn = [library newFunctionWithName:@"v"]; fs->fn = [library newFunctionWithName:@"f"];
     fs->rf.color_known = 1; fs->rf.color_mask = 3;
     pso_key k = {0}; k.samples = 1; k.chmask = 0xff; k.blend_en = 3;
     k.blend[0].src_rgb = k.blend[0].src_a = 1;
@@ -34,14 +43,6 @@ int main(void) { @autoreleasepool {
     CHECK(!d.colorAttachments[0].blendingEnabled && !d.colorAttachments[1].blendingEnabled,
           "two integer attachments do not create an invalid pipeline");
     if (!failed) {
-        NSString *source = @"#include <metal_stdlib>\nusing namespace metal;\n"
-            "vertex float4 v(uint i [[vertex_id]]) { return float4(i == 1 ? 3.0 : -1.0, i == 2 ? 3.0 : -1.0, 0, 1); }\n"
-            "struct O { uint4 a [[color(0)]]; uint4 b [[color(1)]]; };\n"
-            "fragment O f() { return {uint4(0x12345678u), uint4(17,34,51,68)}; }\n";
-        NSError *error = nil;
-        id<MTLLibrary> library = [g_dev newLibraryWithSource:source options:nil error:&error];
-        CHECK(library != nil, "synthetic shader compiles");
-        vs->fn = [library newFunctionWithName:@"v"]; fs->fn = [library newFunctionWithName:@"f"];
         d = pso_desc(&k, vs, fs, nil, 0);
         id<MTLRenderPipelineState> pipeline = [g_dev newRenderPipelineStateWithDescriptor:d error:&error];
         CHECK(pipeline != nil, "real Metal accepts the corrected descriptor");

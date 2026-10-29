@@ -120,7 +120,9 @@ def output_words(src):
         line = line.strip()
         if not line:
             continue
-        v = re.fullmatch(r'(float4|uint4|int4) (\w+) \[\[user\(locn(\d+)\)\]\];', line)
+        # Interpolation affects rasterization, not the vertex values captured
+        # here. Paired-stage padding can add flat outputs (FC27's dm_pad5).
+        v = re.fullmatch(r'(float4|uint4|int4) (\w+) \[\[user\(locn(\d+)\)(?:, flat)?\]\];', line)
         if v:
             if int(v[3]) >= 32:
                 raise ValueError('geometry capture: attribute outside Maxwell map')

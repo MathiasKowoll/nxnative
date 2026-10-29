@@ -1,0 +1,20 @@
+# Runtime-only FC27 shader gaps observed during the menu/team-selection route.
+# Keys are content hashes; no game binary or shader source code is stored in this file.
+key	stage	control_bytes	code_bytes	observed_at	decision
+002ecd0977e56806	pixel	2176	13824	team-selection transition	captured; not enabled in 878 profile
+03d453465b839650	vertex	2176	2560	team-selection transition	captured; not enabled in 878 profile
+0645d989abb07ade	vertex	2176	256	team-selection transition	captured; not enabled in 878 profile
+087881d1ba6da068	pixel	2176	1280	team-selection transition	captured; not enabled in 878 profile
+09211021c12cb409	compute	2176	768	team-selection transition	captured; not enabled in 878 profile
+17f1c1a102c26e4f	vertex	2176	1024	team-selection transition	captured; not enabled in 878 profile
+21c99abad661bd9e	pixel	2176	512	team-selection transition	captured; not enabled in 878 profile
+53acd22571de44c5	pixel	2176	768	team-selection transition	captured; not enabled in 878 profile
+68bba72e9da3c0ce	vertex	2176	8704	team-selection transition	captured; not enabled in 878 profile
+7414b648312a6486	pixel	2176	768	team-selection transition	captured; not enabled in 878 profile
+7e29647e994a16b3	pixel	2176	512	team-selection transition	captured; not enabled in 878 profile
+869c7b8f3e43edd8	vertex	2176	1536	team-selection transition	captured; not enabled in 878 profile
+b297f7dbdac50353	compute	2176	512	team-selection transition	captured; not enabled in 878 profile
+d794f0b2df9f6683	vertex	2176	7168	team-selection transition	captured; not enabled in 878 profile
+e374b8a210ac70f3	pixel	2176	1024	team-selection transition	captured; not enabled in 878 profile
+e99a575065baa5c1	pixel	2176	7680	team-selection transition	captured; not enabled in 878 profile
+f5cc48823221c8ee	pixel	2176	512	team-selection transition	captured; not enabled in 878 profile

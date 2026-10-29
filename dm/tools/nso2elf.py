@@ -4,15 +4,15 @@ Usage: nso2elf.py <module.nso> <out.elf>
 Keeps the NSO memory layout (vaddr = offset in the loaded image): text R-X, rodata R, data+bss RW,
 plus PT_DYNAMIC (located through MOD0) so dynsym imports/exports and RELA relocations are recovered,
 and PT_GNU_EH_FRAME (eh_frame_hdr from MOD0) as a function-start hint. No section headers."""
-import os, struct, sys
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import nso
+import struct, sys
+from pathlib import Path
+import nso_segments
 
 PAGE = 0x1000; HDR = 0x1000                     # file offset of image byte 0; keeps p_offset == p_vaddr (mod PAGE)
 
 def load(path):
-    m = nso.cli_read(path)
-    return bytes(m.image), list(m.segments), m.bss, m.build_id
+    img, _, segs, bss, _ = nso_segments.load(path, bss=False)
+    return bytes(img), [(mo, sz) for _, mo, sz in segs], bss, Path(path).read_bytes()[0x40:0x60]
 
 def main():
     src, dst = sys.argv[1:3]

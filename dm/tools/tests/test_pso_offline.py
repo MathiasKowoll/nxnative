@@ -129,6 +129,22 @@ class Plan(unittest.TestCase):
 
 
 class Build(unittest.TestCase):
+    def test_missing_chain_directory_fails_before_metal_tt(self):
+        pairs = self.t / 'pairs.tsv'; pairs.write_text('v\tf\n')
+        missing = self.t / 'b-feedfacecafe'
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            po.main(['--msl', str(missing), '--pairs', str(pairs), '--out', str(self.out), '--work', str(self.work), '--script-only'])
+        self.assertIn('does not exist', str(e.exception))
+        self.assertEqual(self.calls, [])
+
+    def test_all_reflections_from_another_chain_fail_clearly(self):
+        pairs = self.t / 'pairs.tsv'; pairs.write_text('v\tf\n')
+        lib = self.t / 'b-feedfacecafe'; lib.mkdir()
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            po.main(['--msl', str(lib), '--pairs', str(pairs), '--out', str(self.out), '--work', str(self.work), '--script-only'])
+        self.assertIn('none of 1 pairs has reflection metadata', str(e.exception))
+        self.assertEqual(self.calls, [])
+
     """main: one archive per architecture, made again only when its key changes; the stamp, rest_pairs.tsv and archive.tsv beside them"""
     def setUp(self):
         self.t = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.t)

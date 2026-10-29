@@ -1,0 +1,9 @@
+# Hand-written FC27 compute facts from NVN control +0x748 / +0x754.
+# These three menu-scene programs were captured at runtime and were absent from
+# the clean-package answer table; without their local size, dispatch is skipped.
+09211021c12cb409	{"local":[8,8,1],"shared":0}
+b297f7dbdac50353	{"local":[4,1,1],"shared":0}
+c3cab88f31d3cfeb	{"local":[16,16,1],"shared":1024}
+59054f77aee7c315	{"local":[8,8,1],"shared":0}
+ac1e5940dd55035c	{"local":[32,1,1],"shared":0}
+5c495cf3811d7b86	{"local":[1,1,1],"shared":0}
