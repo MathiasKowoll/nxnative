@@ -21,7 +21,7 @@ enum { NVN_CT_FLOAT = 0, NVN_CT_UINT, NVN_CT_INT };                             
 // (UiMM_WorldMap3D) has a pixel shader with 30 textures, 30 samplers, 3 uniform buffers and the c1 / support / driver segments, 66 in all, which the old limit of 64 refused
 // (the traveler selection drew its map black)
 #define NVN_REFL_MAXB 96
-#define NVN_REFL_C2_HANDLES (0x568 / 8)   // absolute c2 indices through separate texture slot 127
+#define NVN_REFL_C2_HANDLES (DMSH_C2_SAMP / DMSH_C2_ROW)   // absolute c2 indices through separate texture slot 127
 #define NVN_REFL_MAXARG 512   // argument buffer entries of one shader (an array binding takes n of them)
 #define NVN_REFL_MAXV 32
 

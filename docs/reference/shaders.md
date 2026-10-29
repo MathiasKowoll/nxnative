@@ -1016,3 +1016,31 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `dmsh_geometry.capture` initializes only words absent from the captured outputs. The capture slot map stores each selected word once, including defaults for absent outputs. Position W, point size, generic W, clip distances, layer and viewport retain their existing bit values. Full capture selects all 144 words; lean capture selects its consumed words. Shaders and host must be rebuilt together.
 - **Check:** the synthetic throughput comparison alternates control/candidate order and verifies all 9,437,184 captured words against both the original buffer and literal expected values. Mac runs vary in timing, so their percentage gain does not establish iPhone gameplay FPS. The optional real-translator capture fixture in `t_geometry` also checks all uncaptured defaults. All 1,225 NieR shaders build for Mac and iPhone; standard geometry replay and dependency checks pass.
 - **Found on:** [NieR:Automata US 1.0.3](../../dm/games/010056B015FE8000/README.md#factory-combat-capture-and-9s-texture-follow-up), iPhone City Ruins: 14 geometry groups in the captured frame spend 7.485 ms in vertex capture, 6.512 ms in compute and 1.019 ms in depth raster. The accompanying pass dump affects total frame time; its large uncovered GPU interval must not be treated as a clean gameplay hitch measurement.
+
+### Geometry capture accepts flat vertex outputs
+
+- **Symptom:** a full shader build stops with `geometry capture: unknown output float4 dm_pad5 [[user(locn5), flat]];`.
+- **Cause:** paired-stage padding can preserve a fragment input's interpolation qualifier, while the geometry-capture parser accepted only unqualified `user(locnN)` declarations.
+- **Fix:** accept `flat` on float, signed-integer and unsigned-integer four-component outputs; capture still stores the same four 32-bit values.
+- **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md).
+
+### Indexed driver textures with a fixed separate sampler
+
+- **Symptom:** a compiled pixel shader fails reflection because an indexed texture array has no resolved slot.
+- **Cause:** `BindlessToArray` combines a dynamically indexed c2 texture handle with a fixed sampler word; treating it as a scalar separate texture loses the dynamic index.
+- **Fix:** `c2_array` reconstructs the texture array from c2 at `off + 8 * index` and repeats the fixed sampler across the array. Reflection validates the complete table and rejects partial prefixes.
+- **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md), pixel shader `cc26086f56a50927`.
+
+### Byte permutation instructions must produce a result
+
+- **Symptom:** translation reports `Shader instruction PrmtI is not implemented` and later calculations use the old destination value.
+- **Cause:** the vendored translator decoded PRMT forms but did not emit the Maxwell byte permutation.
+- **Fix:** `InstEmitPermute` implements register, immediate, constant-selector and constant-data forms, including generic selection and sign replication.
+- **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md), compute shader `050a1c9b91308a2c`.
+
+### Texel reads must not bind an unused sampler
+
+- **Symptom:** `sampler ID 4096 not registered` appears for direct integer-coordinate reads.
+- **Cause:** SPIRV-Cross can declare a sampler beside a texture even when the generated MSL never references it.
+- **Fix:** `prune_unused_samplers` removes declaration-only samplers and densely renumbers the remaining argument-buffer fields without weakening validation of referenced samplers.
+- **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md), first affected compute shader `df5e8103e4219a53`.

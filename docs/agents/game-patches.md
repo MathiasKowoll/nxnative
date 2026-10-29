@@ -11,6 +11,7 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
 | [DARK SOULS: REMASTERED](#dark-souls-remastered) | 2 | 0 | 0 | 0 | 0 | yes |
 | [DRAGON QUEST VII Reimagined](#dragon-quest-vii-reimagined) | 1 | 1 | 0 | 0 | 3 | yes |
 | [DRAGON QUEST XI S: Echoes of an Elusive Age – Definitive Edition](#dragon-quest-xi-s-echoes-of-an-elusive-age--definitive-edition) | 0 | 0 | 0 | 0 | 2 |  |
+| [EA SPORTS FC 27](#ea-sports-fc-27) | 2 | 0 | 0 | 0 | 1 |  |
 | [FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition](#final-fantasy-crystal-chronicles-remastered-edition) | 8 | 0 | 0 | 0 | 0 | yes |
 | [FINAL FANTASY RESONANCE](#final-fantasy-resonance) | 1 | 0 | 0 | 0 | 3 | yes |
 | [FINAL FANTASY RESONANCE (Asian release)](#final-fantasy-resonance-asian-release) | 1 | 0 | 0 | 0 | 2 | yes |
@@ -27,13 +28,14 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
 | [OCTOPATH TRAVELER 0](#octopath-traveler-0) | 1 | 0 | 0 | 0 | 3 | yes |
 | [OCTOPATH TRAVELER II](#octopath-traveler-ii) | 1 | 1 | 0 | 0 | 3 | yes |
 | [Paper Mario: The Thousand-Year Door](#paper-mario-the-thousand-year-door) | 1 | 0 | 1 | 0 | 0 | yes |
+| [Persona 5 Strikers](#persona-5-strikers) | 8 | 0 | 0 | 0 | 4 |  |
 | [Pikmin 4](#pikmin-4) | 3 | 1 | 0 | 0 | 1 | yes |
 | [Pokémon Brilliant Diamond](#pokémon-brilliant-diamond) | 0 | 0 | 0 | 0 | 1 |  |
 | [Pokémon Scarlet](#pokémon-scarlet) | 1 | 0 | 0 | 0 | 0 | yes |
 | [SHIN MEGAMI TENSEI V: Vengeance](#shin-megami-tensei-v-vengeance) | 1 | 1 | 0 | 0 | 3 | yes |
 | [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 1 | 0 | yes |
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | yes |
-| [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 5 | 0 | 0 | yes |
+| [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 14 | 0 | 0 |  |
 | [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | yes |
 | [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 11 | 0 | 0 | yes |
 | [Xenoblade Chronicles 3](#xenoblade-chronicles-3) | 6 | 0 | 0 | 0 | 0 | yes |
@@ -213,6 +215,15 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
   - host [hle_fpslock.c:36](../../dm/host/hle_fpslock.c#L36): engine frame limit set to fps_target: Unreal t.MaxFPS
   - host [hle_fpslock.c:37](../../dm/host/hle_fpslock.c#L37): engine frame limit set to fps_target: Unreal nvn.SyncInterval
 
+### EA SPORTS FC 27
+
+[EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md), `0100C49025D3E000`, [patches.py](../../dm/games/0100C49025D3E000/patches.py).
+
+- **1.8c.cab1 `main`** `fb81983a…` ([patches.py:38](../../dm/games/0100C49025D3E000/patches.py#L38))
+  - cut `+0x804e358`: offline async result may be NULL: guard the menu result copy (SIGSEGV main+0x804e358)
+  - cut `+0x804e370`: release the async callback job only when X0 is non-NULL
+  - host [hle_fpslock.c:75](../../dm/host/hle_fpslock.c#L75): engine frame limit set to fps_target: FC27 internal frame rate
+
 ### FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition
 
 [FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition](../../dm/games/0100CE4010AAC000/README.md), `0100CE4010AAC000`, [patches.py](../../dm/games/0100CE4010AAC000/patches.py).
@@ -361,7 +372,7 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
   - cut `+0x9bf4d4`: dynamic resolution: optimal frame cost 32.01 -> 16.005 ms at 60 fps (second load)
   - cut `+0x9bf4f8`: dynamic resolution: good frame cost 30 -> 15 ms at 60 fps
   - launcher capabilities: DYNAMIC_RESOLUTION
-  - host [hle_fpslock.c:78](../../dm/host/hle_fpslock.c#L78): frame interval and dynamic-resolution floor
+  - host [hle_fpslock.c:91](../../dm/host/hle_fpslock.c#L91): frame interval and dynamic-resolution floor
 
 ### NieR:Automata The End of YoRHa Edition (0100B8E016F76000)
 
@@ -379,7 +390,7 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
   - cut `+0x9c08e8`: dynamic resolution lower bound follows the selected preset
   - cut `+0x9c08f4`: dynamic resolution lower bound follows the selected preset
   - launcher capabilities: DYNAMIC_RESOLUTION
-  - host [hle_fpslock.c:79](../../dm/host/hle_fpslock.c#L79): frame interval and dynamic-resolution floor
+  - host [hle_fpslock.c:92](../../dm/host/hle_fpslock.c#L92): frame interval and dynamic-resolution floor
 
 ### OCTOPATH TRAVELER 0
 
@@ -415,6 +426,24 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
 - **1.0.1 `main`** `0effe4af…` ([patches.py:5](../../dm/games/0100ECD018EBE000/patches.py#L5))
   - cut `+0x2e77a4`: frame step floor in 60 Hz vsyncs: mov w9,#2 → mov w9,#1 (the game steps by the vsyncs that passed, down to one)
   - frame step `+0x2e77f8`: frame step: the base clock steps by the host's vsyncs (state page target fps; 0 = the game's measured step)
+
+### Persona 5 Strikers
+
+[Persona 5 Strikers](../../dm/games/0100801011C3E000/README.md), `0100801011C3E000`, [patches.py](../../dm/games/0100801011C3E000/patches.py).
+
+- **1.0.0 `main`** `c4df04f6…` ([patches.py:8](../../dm/games/0100801011C3E000/patches.py#L8))
+  - cut `+0x4f3d68`: 60 fps: block the game's frame-rate update
+  - cut `+0x4f3d7c`: 60 fps: block the game's frame-rate update
+  - cut `+0x4f3d8c`: 60 fps: block the game's frame-rate update
+  - cut `+0x4f3d94`: 60 fps: block the game's frame-rate update
+  - cut `+0x4d8748`: 60 fps: block the game's frame-rate update
+  - cut `+0x4d8754`: 60 fps: block the game's frame-rate update
+  - cut `+0x4d8760`: 60 fps: block the game's frame-rate update
+  - cut `+0x4d876c`: 60 fps: block the game's frame-rate update
+  - host [hle_fpslock.c:67](../../dm/host/hle_fpslock.c#L67): engine frame limit set to fps_target: P5S frame rate
+  - host [hle_fpslock.c:68](../../dm/host/hle_fpslock.c#L68): engine frame limit set to fps_target: P5S vsync count
+  - host [hle_fpslock.c:69](../../dm/host/hle_fpslock.c#L69): engine frame limit set to fps_target: P5S float frame rate
+  - host [hle_fpslock.c:70](../../dm/host/hle_fpslock.c#L70): engine frame limit set to fps_target: P5S interval flag
 
 ### Pikmin 4
 
@@ -493,8 +522,6 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
 
 [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md), `01007EF00011E000`, [patches.py](../../dm/games/01007EF00011E000/patches.py).
 
-**Generalize?** No for the hook sites: sead::GameFrameworkNx's interval controller and ksys::VFR in this build; Tears of the Kingdom shares sead but not this code. The frame-step state page they use is general
-
 - **1.9.0 `main`** `cd57b23f…` ([patches.py:14](../../dm/games/01007EF00011E000/patches.py#L14))
   - cut `+0x112670c`: lower bound of the candidate interval: fmov s0,s11 (2.0) → fmov s0,s10 (1.0)
   - cut `+0x1126710`: lower bound of the candidate interval: cmp w27,#2 → cmp w27,#1
@@ -509,6 +536,16 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
   - frame step `+0x1266880`: 3D view scale = the host render scale (1.0 = the game's dynamic resolution)
   - frame step `+0x151d3d0`: VFR::updateInterval: its own override published for the host (state page target fps; 0 = original)
   - render scale stub (the launcher offers DM_RENDER_SCALE)
+- **1.6.0 `main`** `8e9978d5…` ([patches.py:275](../../dm/games/01007EF00011E000/patches.py#L275))
+  - frame step `+0x1214474`: pause-menu fast-repeat countdown follows the 1/30 s game-time tick
+  - frame step `+0x126e490`: held-button repeat and hold counts follow the 1/30 s game-time tick
+  - frame step `+0x1618480`: physics keeps six solver substeps a frame at any VFR ratio
+  - frame step `+0x1821568`: fade step follows the VFR ratio
+  - frame step `+0x1821588`: fade step follows the VFR ratio
+  - frame step `+0x18522ec`: UI animation step follows the VFR ratio
+  - frame step `+0x1852300`: UI animation step follows the VFR ratio
+  - frame step `+0x1c01180`: VFR::update: the host step (or the VFR override) chooses the game-time ratio; target 0 keeps the original
+  - frame step `+0x1c5a014`: sound-link timers follow the VFR ratio
 
 ### The Legend of Zelda: Link's Awakening
 
@@ -637,7 +674,7 @@ Cuts of Nintendo SDK `sdk` builds ([sdk_patches.py](../../dm/tools/sdk_patches.p
 - **sdk** `145dde94…` ([sdk_patches.py:193](../../dm/tools/sdk_patches.py#L193)): DRAGON QUEST VII Reimagined 1.2.0
   - cut `+0x1423fc`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
   - cut `+0x142468`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
-- **sdk** `fcf93a41…` ([sdk_patches.py:202](../../dm/tools/sdk_patches.py#L202)): DRAGON QUEST XI S: Echoes of an Elusive Age – Definitive Edition 1.0.4, Luigi's Mansion 3 1.4.0, Pokémon Shield 1.3.2, Pokémon Sword 1.3.2, Raging Loop 1.0.0, Super Mario Odyssey 1.4.1
+- **sdk** `fcf93a41…` ([sdk_patches.py:202](../../dm/tools/sdk_patches.py#L202)): DRAGON QUEST XI S: Echoes of an Elusive Age – Definitive Edition 1.0.4, Luigi's Mansion 3 1.4.0, Pokémon Shield 1.3.2, Pokémon Sword 1.3.2, Raging Loop 1.0.0, Super Mario Odyssey 1.4.1, The Legend of Zelda: Breath of the Wild 1.6.0
   - cut `+0x32c460`: AddressRegionManager constructor: node area limit orr w9,wzr,#0x3fe00000 → mov w9,#0x3e00000
   - cut `+0x32c500`: AddressRegionManager constructor: length of the node area registered as an occupied region orr w9,wzr,#0x3fe00000 → mov w9,#0x3e00000
   - cut `+0x32c66c`: AllocateAddressRegion: alignment of regions of 1 GB and more orr w10,wzr,#0x40000000 → mov w10,#0x2000000 (32 MB, as from 32 MB up)
@@ -678,11 +715,11 @@ Applied to the `sdk` of any build without CUTS whose profile was not brought up 
 
 Dead code unless such a build is run; a candidate for removal, or for a build row in its profile.
 
-- `992787e2…`: [hle_fpslock.c:130](../../dm/host/hle_fpslock.c#L130): build check (a build no profile registers)
+- `992787e2…`: [hle_fpslock.c:143](../../dm/host/hle_fpslock.c#L143): build check (a build no profile registers)
 
 ## Translator rules keyed by a shader's code
 
-- [Program.cs:217](../../dm/gfx/tools/dmsh_xlate/Program.cs#L217): Tears of the Kingdom 1.4.3 visibility counter (one vertex shader, exact code SHA-256 below)
+- [Program.cs:220](../../dm/gfx/tools/dmsh_xlate/Program.cs#L220): Tears of the Kingdom 1.4.3 visibility counter (one vertex shader, exact code SHA-256 below)
 
 ## Profile switches
 
@@ -706,8 +743,8 @@ Profile keys (`game.tsv`) whose value changes what the host does, set away from 
 | `tex_dyn_slots on` | [FINAL FANTASY RESONANCE](../../dm/games/0100606026F12000/README.md), [FINAL FANTASY RESONANCE (Asian release)](../../dm/games/0100B8A026F14000/README.md), [OCTOPATH TRAVELER 0](../../dm/games/01005270232F2000/README.md), [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) |
 | `alloc_big_align on` | [13 Sentinels: Aegis Rim](../../dm/games/01003FC01670C000/README.md), [13 Sentinels: Aegis Rim (Asia)](../../dm/games/01008D7016438000/README.md), [13 Sentinels: Aegis Rim (Japan)](../../dm/games/010045C014650000/README.md), [Unicorn Overlord](../../dm/games/010069401ADB8000/README.md), [Unicorn Overlord (Asia)](../../dm/games/010054B01AD92000/README.md) |
 | `feedback_snap (shader keys)` | [Captain Toad: Treasure Tracker](../../dm/games/01009BF0072D4000/README.md), [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md), [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md), [Paper Mario: The Origami King](../../dm/games/0100A3900C3E2000/README.md), [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md), [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) |
-| `present_interval display` | [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md), [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md), [Monster Train 2](../../dm/games/010051701FB46000/README.md), [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md), [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md), [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md) |
 | `op_mode handheld` | [Balatro](../../dm/games/0100CD801CE5E000/README.md), [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md), [Captain Toad: Treasure Tracker](../../dm/games/01009BF0072D4000/README.md), [Rhythm Heaven Groove](../../dm/games/0100D9F01D474000/README.md), [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md), [Super Mario Galaxy 2](../../dm/games/0100FD8022DAA000/README.md), [Taiko Risshiden V DX](../../dm/games/0100346017304000/README.md) |
+| `present_interval display` | [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md), [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md), [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md), [Monster Train 2](../../dm/games/010051701FB46000/README.md), [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md), [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md), [Persona 5 Strikers](../../dm/games/0100801011C3E000/README.md), [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md) |
 | `tex_dirty_upload on` | [FINAL FANTASY TACTICS - The Ivalice Chronicles](../../dm/games/010038B015560000/README.md), [Ghost Trick: Phantom Detective](../../dm/games/010029B018432000/README.md), [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md), [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md), [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md), [OCTOPATH TRAVELER](../../dm/games/010057D006492000/README.md), [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md), [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md), [Yoshi's Crafted World](../../dm/games/01006000040C2000/README.md) |
 | `tex_flush_upload on` | [FINAL FANTASY TACTICS - The Ivalice Chronicles](../../dm/games/010038B015560000/README.md), [Ghost Trick: Phantom Detective](../../dm/games/010029B018432000/README.md), [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md), [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md), [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md), [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md), [OCTOPATH TRAVELER](../../dm/games/010057D006492000/README.md), [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md), [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md), [Yoshi's Crafted World](../../dm/games/01006000040C2000/README.md) |
-| `fps_target 60` | [ASTRAL CHAIN](../../dm/games/01007300020FA000/README.md), [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md), [DRAGON QUEST XI S: Echoes of an Elusive Age – Definitive Edition](../../dm/games/01006C300E9F0000/README.md), [FINAL FANTASY RESONANCE](../../dm/games/0100606026F12000/README.md), [FINAL FANTASY RESONANCE (Asian release)](../../dm/games/0100B8A026F14000/README.md), [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md), [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md), [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md), [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md), [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md), [OCTOPATH TRAVELER 0](../../dm/games/01005270232F2000/README.md), [OCTOPATH TRAVELER II](../../dm/games/0100A3501946E000/README.md), [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md), [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md), [SHIN MEGAMI TENSEI V: Vengeance](../../dm/games/010069C01AB82000/README.md), [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md), [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) |
+| `fps_target 60` | [ASTRAL CHAIN](../../dm/games/01007300020FA000/README.md), [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md), [DRAGON QUEST XI S: Echoes of an Elusive Age – Definitive Edition](../../dm/games/01006C300E9F0000/README.md), [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md), [FINAL FANTASY RESONANCE](../../dm/games/0100606026F12000/README.md), [FINAL FANTASY RESONANCE (Asian release)](../../dm/games/0100B8A026F14000/README.md), [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md), [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md), [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md), [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md), [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md), [OCTOPATH TRAVELER 0](../../dm/games/01005270232F2000/README.md), [OCTOPATH TRAVELER II](../../dm/games/0100A3501946E000/README.md), [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md), [Persona 5 Strikers](../../dm/games/0100801011C3E000/README.md), [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md), [SHIN MEGAMI TENSEI V: Vengeance](../../dm/games/010069C01AB82000/README.md), [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md), [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) |

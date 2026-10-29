@@ -66,12 +66,12 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
                 if (n) { if (n > 32) FAIL("B binding %s: array of %d", nm.UTF8String, n); r->n = (uint8_t)n; } }
             else if ([k isEqualToString:@DMSH_KIND_SAMP_UBO]) { r->kind = NVN_RB_SAMPU; r->off = (uint16_t)[b[@"off"] intValue]; o->bindless = 1;
                 if (n) { if (n > 32) FAIL("B binding %s: array of %d", nm.UTF8String, n); r->n = (uint8_t)n; } }
-            else if ([k isEqualToString:@"samp_id"]) r->kind = NVN_RB_SAMPI;
-            else if ([k isEqualToString:@"tex_c2a"] || [k isEqualToString:@"samp_c2a"]) {   // an array of the driver table's handles (nvn_refl.h TEXA / SAMPA)
+            else if ([k isEqualToString:@DMSH_KIND_SAMP_ID]) r->kind = NVN_RB_SAMPI;
+            else if ([k isEqualToString:@DMSH_KIND_TEX_C2A] || [k isEqualToString:@DMSH_KIND_SAMP_C2A]) {   // an array of the driver table's handles (nvn_refl.h TEXA / SAMPA)
                 int off = [b[@"off"] intValue];
-                if (n < 1 || n > NVN_REFL_C2_HANDLES || off < 0 || (off & 7) || off + 8 * n > 0x568)
+                if (n < 1 || n > NVN_REFL_C2_HANDLES || off < 0 || (off & (DMSH_C2_ROW - 1)) || off + DMSH_C2_ROW * n > DMSH_C2_SAMP)
                     FAIL("B binding %s: driver array of %d at %#x", nm.UTF8String, n, off);
-                r->kind = [k isEqualToString:@"tex_c2a"] ? NVN_RB_TEXA : NVN_RB_SAMPA; r->n = (uint8_t)n; r->off = (uint16_t)[b[@"off"] intValue];
+                r->kind = [k isEqualToString:@DMSH_KIND_TEX_C2A] ? NVN_RB_TEXA : NVN_RB_SAMPA; r->n = (uint8_t)n; r->off = (uint16_t)[b[@"off"] intValue];
                 if (r->kind == NVN_RB_TEXA) dummy_kind(el, &r->dtt, &r->dpf);
             }
             else if ([k isEqualToString:@DMSH_KIND_IMG]) { r->kind = NVN_RB_IMG; dummy_kind(b[@"msl_type"], &r->dtt, &r->dpf);   // rw: the shader writes it (access::write / read_write; a load-only view of the slot is not)
