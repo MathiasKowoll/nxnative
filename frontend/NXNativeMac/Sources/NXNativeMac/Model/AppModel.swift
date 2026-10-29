@@ -161,6 +161,27 @@ final class AppModel {
         guard let target = detectFCInstallTarget(gameFolder: gameFolder, keys: keys) else {
             return "No pude identificar FC26 o FC27 en la carpeta seleccionada. Verifica que incluya el juego y prod.keys."
         }
+        guard toolchain.python != nil else {
+            return "No se puede iniciar: falta Python 3.12 o posterior. Abre Entorno y pulsa «Preparar Python» o selecciona un Python compatible."
+        }
+        guard toolchain.missingModules.isEmpty else {
+            return "No se puede iniciar: faltan módulos de Python (\(toolchain.missingModules.joined(separator: ", "))). Abre Entorno y pulsa «Preparar Python»."
+        }
+        guard toolchain.missingBuildTools.isEmpty else {
+            return "No se puede iniciar: faltan herramientas de build (\(toolchain.missingBuildTools.joined(separator: ", "))). Corrígelo en Entorno y repite la comprobación."
+        }
+        if target == .fc26, !toolchain.missingFC26Tools.isEmpty {
+            return "No se puede iniciar FC26: faltan dependencias (\(toolchain.missingFC26Tools.joined(separator: ", "))). Instala opus y libvpx con Homebrew y repite la comprobación."
+        }
+        let needsNSZ = (try? FileManager.default
+            .subpathsOfDirectory(atPath: gameFolder.path)
+            .contains { path in
+                let ext = URL(fileURLWithPath: path).pathExtension.lowercased()
+                return ext == "nsz" || ext == "xcz"
+            }) ?? false
+        if needsNSZ, toolchain.nszMissing {
+            return "La carpeta contiene NSZ/XCZ, pero falta el módulo nsz. Abre Entorno y pulsa «Añadir nsz»."
+        }
         if target == .fc26 { return startFC26Build(gameFolder: gameFolder, keys: keys, output: output) }
         var options = BuildOptions(nspFolder: gameFolder, keys: keys)
         options.platform = .macApp

@@ -23,6 +23,12 @@ final class Toolchain {
     /// Un Python del sistema >= 3.12 con el que crear el entorno de la app.
     private(set) var baseCandidate: String?
     private(set) var missingModules: [String] = []
+    /// Herramientas que `build_ipa_from_nsp.py --platform mac-app` exige antes
+    /// de tocar el dump. Se comprueban aquí para no descubrirlas a mitad del
+    /// build, después de haber escrito muchos GB.
+    private(set) var missingBuildTools: [String] = []
+    /// Dependencias con rutas fijas que exige el builder autocontenido de FC26.
+    private(set) var missingFC26Tools: [String] = []
     private(set) var nszMissing = false
     private(set) var metalToolchainMissing = false
     private(set) var gpuArchitecture: String = ""
@@ -118,6 +124,20 @@ final class Toolchain {
                              detail: "Incluida dentro de esta app; no depende de otro checkout."))
             out.append(Check(id: "profiles", title: "Perfiles", status: .info,
                              detail: "\(repo.profiles().count) perfiles de juego incluidos"))
+            let bundledFiles = [
+                "dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate",
+                "dm/gfx/tools/spirv_cross_bin/spirv-cross",
+                "dm/tools/nx_extract/nx_extract.csproj",
+            ]
+            let missingBundledFiles = bundledFiles.filter {
+                !FileManager.default.fileExists(atPath: repo.root.appendingPathComponent($0).path)
+            }
+            out.append(Check(
+                id: "bundled-tools", title: "Toolchain incluida",
+                status: missingBundledFiles.isEmpty ? .ok : .failure,
+                detail: missingBundledFiles.isEmpty ? "traductor, SPIRV-Cross y extractor incluidos"
+                    : "Faltan archivos del bundle: \(missingBundledFiles.joined(separator: ", "))."
+            ))
         } else if repo.isValid {
             let head = await Shell.run("/usr/bin/git", ["-C", repo.root.path, "log", "-1", "--format=%h %cs %s"])
             let branch = await Shell.run("/usr/bin/git", ["-C", repo.root.path, "rev-parse", "--abbrev-ref", "HEAD"])
@@ -129,6 +149,47 @@ final class Toolchain {
         } else {
             out.append(Check(id: "repo", title: "nxnative", status: .failure,
                              detail: "No hay checkout en \(repo.root.path). Clónalo desde Entorno."))
+        }
+
+        // El script de mac-app comprueba estas herramientas de forma
+        // incondicional (aunque el juego concreto sea NVN y no OpenGL). Las
+        // rutas de Homebrew se añaden por Shell.environment(), igual que al
+        // lanzar el build desde Finder.
+        let buildTools = [
+            ("dotnet", "brew install --cask dotnet-sdk"),
+            ("zstd", "brew install zstd"),
+            ("make", "Xcode Command Line Tools"),
+            ("glslangValidator", "brew install glslang"),
+            ("codesign", "Xcode Command Line Tools"),
+        ]
+        missingBuildTools = buildTools.compactMap { name, how in
+            Self.executableInPath(name) == nil ? "\(name) (\(how))" : nil
+        }
+        out.append(Check(
+            id: "build-tools", title: "Herramientas de build",
+            status: missingBuildTools.isEmpty ? .ok : .failure,
+            detail: missingBuildTools.isEmpty ? "dotnet, zstd, make, glslangValidator y codesign"
+                : "Faltan \(missingBuildTools.joined(separator: ", "))."
+        ))
+
+        // FC26's Makefile uses these absolute Homebrew prefixes. No basta con
+        // tener clang o Python: sin estas bibliotecas el host no enlaza.
+        if prefs.bundledFC26URL != nil {
+            let fc26Paths = [
+                ("opus", "/opt/homebrew/opt/opus/lib/libopus.a"),
+                ("opus headers", "/opt/homebrew/opt/opus/include/opus"),
+                ("libvpx", "/opt/homebrew/opt/libvpx/lib/libvpx.a"),
+                ("libvpx headers", "/opt/homebrew/opt/libvpx/include"),
+            ]
+            missingFC26Tools = fc26Paths.compactMap { label, path in
+                FileManager.default.fileExists(atPath: path) ? nil : "\(label) (\(path))"
+            }
+            out.append(Check(
+                id: "fc26-tools", title: "Dependencias FC26",
+                status: missingFC26Tools.isEmpty ? .ok : .failure,
+                detail: missingFC26Tools.isEmpty ? "opus y libvpx disponibles"
+                    : "Faltan \(missingFC26Tools.joined(separator: ", ")). Instala: brew install opus libvpx."
+            ))
         }
 
         // Las claves: solo se comprueba que existen y quién puede leerlas.
@@ -164,6 +225,15 @@ final class Toolchain {
         var v: Int32 = 0
         var size = MemoryLayout<Int32>.size
         return sysctlbyname(name, &v, &size, nil, 0) == 0 ? Int(v) : 0
+    }
+
+    nonisolated static func executableInPath(_ name: String) -> String? {
+        let path = Shell.environment()["PATH"] ?? ""
+        for directory in path.split(separator: ":").map(String.init) {
+            let candidate = URL(fileURLWithPath: directory).appendingPathComponent(name).path
+            if FileManager.default.isExecutableFile(atPath: candidate) { return candidate }
+        }
+        return nil
     }
 
     /// Identidades de firma de código del llavero, para `--mac-sign`.
