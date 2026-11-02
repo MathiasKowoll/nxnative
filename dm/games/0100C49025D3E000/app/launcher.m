@@ -55,7 +55,7 @@ static NSString *screen_name(NSScreen *s) { return s.localizedName ?: @"?"; }
 @property NSWindow *window;
 @property NSPopUpButton *size, *monitor, *output;
 @property NSSegmentedControl *display, *scaler;
-@property NSButton *hud, *fps60, *handheld, *smartai, *ppAlternate, *play, *sonyButtons; @property NSSegmentedControl *textures, *textureBias, *postfx, *interpolation; @property NSTextField *note;
+@property NSButton *hud, *metalHud, *fps60, *handheld, *smartai, *ppAlternate, *play, *sonyButtons; @property NSSegmentedControl *textures, *textureBias, *postfx, *interpolation; @property NSTextField *note;
 @property BOOL launch;
 @end
 
@@ -85,6 +85,7 @@ static NSString *screen_name(NSScreen *s) { return s.localizedName ?: @"?"; }
     self.interpolation = [self segments:@[T("Off", "Off"), T("30+30", "30+30"), T("Mitad Hz", "Half Hz"), T("Máx.", "Max")]];
     self.sonyButtons = [NSButton checkboxWithTitle:T("Botones PlayStation", "PlayStation buttons") target:self action:@selector(changed:)];
     self.hud = [NSButton checkboxWithTitle:T("Mostrar FPS e resolução (a tecla 1 esconde)", "Show FPS and resolution (key 1 hides it)") target:self action:@selector(changed:)];
+    self.metalHud = [NSButton checkboxWithTitle:T("Metal HUD (métricas de Metal)", "Metal HUD (Metal metrics)") target:self action:@selector(changed:)];
     self.fps60 = [NSButton checkboxWithTitle:T("60 fps (aumenta o calor e o consumo)", "60 fps (increases heat and power use)") target:self action:@selector(changed:)];
     self.handheld = [NSButton checkboxWithTitle:T("Modo economia: portátil do Switch, 720p, menos calor (imagem menos nítida)", "Economy mode: Switch handheld, 720p, less heat (less sharp image)") target:self action:@selector(changed:)];
     self.smartai = [NSButton checkboxWithTitle:T("IA mais atenta (experimental; usa um pouco mais de processador)", "More attentive AI (experimental; uses a little more processor)") target:self action:@selector(changed:)];
@@ -105,6 +106,7 @@ static NSString *screen_name(NSScreen *s) { return s.localizedName ?: @"?"; }
         @[[self label:T("Interpolação MetalFX", "MetalFX interpolation")], self.interpolation],
         @[[self label:T("Controles", "Controls")], self.sonyButtons],
         @[[self label:T("Informação", "Info")], self.hud],
+        @[[self label:T("Diagnóstico", "Diagnostics")], self.metalHud],
         @[[self label:T("Fluidez", "Smoothness")], self.fps60],
         @[[self label:T("Economia", "Economy")], self.handheld],
         @[[self label:T("Experimental", "Experimental")], self.smartai],
@@ -156,15 +158,17 @@ static NSString *screen_name(NSScreen *s) { return s.localizedName ?: @"?"; }
     self.smartai.state = [d boolForKey:@"smartai"];
     self.ppAlternate.state = [d boolForKey:@"ppAlternate"];
     self.hud.state = [d objectForKey:@"hud"] ? [d boolForKey:@"hud"] : YES;
+    self.metalHud.state = [d boolForKey:@"metalHud"];
 }
 /* Every change is saved at once (and written to disk), so the next start shows the same choices. */
 - (void)monitorChanged:(id)sender { (void)sender; [self fillOutputs:(int)self.output.selectedItem.tag]; [self refresh]; [self save]; }
 - (void)changed:(id)sender { (void)sender; [self refresh]; [self save]; }
 - (void)refresh {
-    self.size.enabled = NO; self.output.enabled = NO;
-    self.monitor.enabled = NO; self.textures.enabled = NO; self.textureBias.enabled = NO;
+    self.size.enabled = YES; self.output.enabled = YES;
+    self.monitor.enabled = YES; self.textures.enabled = NO; self.textureBias.enabled = NO;
     self.postfx.enabled = NO; self.interpolation.enabled = NO; self.sonyButtons.enabled = NO;
     self.hud.enabled = YES; self.handheld.enabled = NO; self.smartai.enabled = NO; self.ppAlternate.enabled = NO;
+    self.metalHud.enabled = YES;
     self.display.enabled = YES; self.scaler.enabled = YES; self.fps60.enabled = YES;
     NSMutableString *s = [NSMutableString stringWithString:T("FC27: filtros/texturas, PostFX, controles PlayStation, handheld y opciones experimentales aún están pendientes de portar. El menú conserva las mismas ranuras para implementarlas una por una.", "FC27: texture filters, PostFX, PlayStation controls, handheld and experimental gameplay are still pending. The menu keeps the same slots so they can be implemented one by one.")];
     self.play.enabled = YES;
@@ -182,7 +186,7 @@ static NSString *screen_name(NSScreen *s) { return s.localizedName ?: @"?"; }
     [d setInteger:self.postfx.selectedSegment forKey:@"postfx"];
     [d setInteger:self.interpolation.selectedSegment forKey:@"interpolation"];
     [d setBool:self.sonyButtons.state forKey:@"sonyButtons"];
-    [d setObject:screen_name(self.chosenScreen) forKey:@"monitor"]; [d setBool:self.hud.state forKey:@"hud"];
+    [d setObject:screen_name(self.chosenScreen) forKey:@"monitor"]; [d setBool:self.hud.state forKey:@"hud"]; [d setBool:self.metalHud.state forKey:@"metalHud"];
     [d setBool:self.fps60.state forKey:@"FPS60"];
     [d setBool:self.handheld.state forKey:@"handheld"];
     [d setBool:self.smartai.state forKey:@"smartai"];
@@ -222,8 +226,8 @@ static LaunchPlan *launch_plan(NSUserDefaults *d, NSString *work, NSString *home
     p.slot = [work stringByAppendingPathComponent:@"run-valid"];
     p.input = [p.slot stringByAppendingPathComponent:@"ctl.txt"];
     e[@"DM_NVN_SHDUMP"] = [p.slot stringByAppendingPathComponent:@"shader-dump"];
-    p.unset = [@[@"DM_FPS_TARGET", @"DM_FULLSCREEN", @"DM_PRESENT_INTERVAL", @"DM_PRESENT_HZ", @"DM_PRESENT_LINK",
-                 @"DM_PRESENT_UPSCALE", @"DM_METAL_HUD", @"DM_OPMODE", @"DM_CTL", @"DM_AUDIO_OFF", @"DM_PSO_MANIFEST", @"DM_QOS_MAP"] mutableCopy];
+    p.unset = [@[@"DM_FPS_TARGET", @"DM_FULLSCREEN", @"DM_WINDOW_WIDTH", @"DM_WINDOW_HEIGHT", @"DM_OUTPUT_WIDTH", @"DM_OUTPUT_HEIGHT", @"DM_PRESENT_INTERVAL", @"DM_PRESENT_HZ", @"DM_PRESENT_LINK",
+                 @"DM_PRESENT_UPSCALE", @"DM_PRESENT_FILTER", @"DM_PRESENT_SHARPEN", @"DM_PRESENT_POSTFX", @"DM_METAL_HUD", @"DM_OPMODE", @"DM_CTL", @"DM_AUDIO_OFF", @"DM_PSO_MANIFEST", @"DM_QOS_MAP"] mutableCopy];
 
     e[@"DM_ROOT"] = work;
     e[@"DM_SAVE"] = [work stringByAppendingPathComponent:@"run-valid/save"];
@@ -257,8 +261,14 @@ static LaunchPlan *launch_plan(NSUserDefaults *d, NSString *work, NSString *home
         e[@"DM_PSO_ARCHIVE"] = [work stringByAppendingPathComponent:@"pipeline-cache-fc27"];
     }
     e[@"DM_QOS_MAP"] = @"1";   // keep the game's worker priorities below the real-time main thread
+    e[@"DM_MEM_RELEASE"] = @"1";   // return unmapped alias pages promptly on macOS
     e[@"DM_CTL"] = p.input;
     e[@"DM_WINDOW"] = @"1";
+    NSInteger si = [d objectForKey:@"size"] ? [d integerForKey:@"size"] : 2; if (si < 0 || si > 3) si = 2;
+    e[@"DM_WINDOW_WIDTH"] = [NSString stringWithFormat:@"%d", sizes[si][0]];
+    e[@"DM_WINDOW_HEIGHT"] = [NSString stringWithFormat:@"%d", sizes[si][1]];
+    int out = (int)[d integerForKey:@"output"];
+    if (out > 0) { e[@"DM_OUTPUT_WIDTH"] = [NSString stringWithFormat:@"%d", out * 16 / 9]; e[@"DM_OUTPUT_HEIGHT"] = [NSString stringWithFormat:@"%d", out]; }
     e[@"DM_AUDIO"] = @"1";   // FC27's AudioOut must use CoreAudio on Mac, not the silent test sink
     e[@"DM_FULLSCREEN"] = [d boolForKey:@"fullscreen"] ? @"1" : @"0";
     e[@"DM_PRESENT_INTERVAL"] = @"display";
@@ -266,7 +276,12 @@ static LaunchPlan *launch_plan(NSUserDefaults *d, NSString *work, NSString *home
     e[@"DM_PRESENT_LINK"] = @"0";
     e[@"DM_FPS_TARGET"] = [d boolForKey:@"FPS60"] ? @"60" : @"30";
     e[@"DM_PRESENT_UPSCALE"] = [d boolForKey:@"metalfx"] ? @"metalfx" : @"off";
-    e[@"DM_METAL_HUD"] = [d boolForKey:@"hud"] ? @"1" : @"0";
+    e[@"DM_PRESENT_FILTER"] = [d boolForKey:@"textureFilter"] ? @"lanczos" : @"bilinear";
+    NSInteger bias = [d objectForKey:@"textureBias"] ? [d integerForKey:@"textureBias"] : 1; if (bias < 0 || bias > 2) bias = 1;
+    e[@"DM_PRESENT_SHARPEN"] = bias == 2 ? @"0.50" : bias == 1 ? @"0.25" : @"0";
+    NSInteger postfx = [d objectForKey:@"postfx"] ? [d integerForKey:@"postfx"] : 3; if (postfx < 0 || postfx > 4) postfx = 3;
+    static NSString *const postfxNames[5] = {@"off", @"soft", @"ps5", @"balanced", @"ultra"}; e[@"DM_PRESENT_POSTFX"] = postfxNames[postfx];
+    e[@"DM_METAL_HUD"] = [d boolForKey:@"metalHud"] ? @"1" : @"0";
     return p;
 }
 
@@ -391,7 +406,7 @@ static int dry_run(LaunchPlan *p) {
 static void register_defaults(void) {
     /* Persistent saved values win; these are the values a fresh installation starts with. */
     [NSUserDefaults.standardUserDefaults registerDefaults:@{
-        @"FPS60": @YES, @"metalfx": @YES, @"textureFilter": @YES, @"textureBias": @1, @"postfx": @3, @"sonyButtons": @YES, @"hud": @YES,
+        @"FPS60": @YES, @"metalfx": @YES, @"textureFilter": @YES, @"textureBias": @1, @"postfx": @3, @"sonyButtons": @YES, @"hud": @YES, @"metalHud": @NO,
         @"interpolation": @0, @"fullscreen": @NO, @"handheld": @NO, @"smartai": @NO, @"ppAlternate": @NO
     }];
 }

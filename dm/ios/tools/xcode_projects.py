@@ -5,14 +5,14 @@ import subprocess
 import xml.etree.ElementTree as ET
 
 
-def signing_settings(project):
+def signing_settings(project, target_name='DmIOS'):
     """Read only the app's Release signing settings, including changes made in Xcode."""
     pbx = Path(project) / 'project.pbxproj'
     if not pbx.is_file(): return {}
     result = subprocess.run(['/usr/bin/plutil', '-convert', 'json', '-o', '-', str(pbx)], capture_output=True, text=True)
     if result.returncode: raise ValueError(f'cannot read Xcode project: {pbx}')
     objects = json.loads(result.stdout)['objects']
-    target = next((v for v in objects.values() if v.get('isa') == 'PBXNativeTarget' and v.get('name') == 'DmIOS'), None)
+    target = next((v for v in objects.values() if v.get('isa') == 'PBXNativeTarget' and v.get('name') == target_name), None)
     if not target: return {}
     configs = objects[target['buildConfigurationList']]['buildConfigurations']
     settings = next((objects[c]['buildSettings'] for c in configs if objects[c]['name'] == 'Release'), {})

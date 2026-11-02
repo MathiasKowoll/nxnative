@@ -656,6 +656,54 @@ def check_before_copy(insl, ctx, ld, idx):
         if writes(p) & (idx | {src}): return None
     else: return None
     return ctx[k - 2]
+def check_copy_before_check(insl, ld, idx):
+    """The index is copied before its source is bounds-checked: mov wI,wS; cmp wS,#N; b.hi; ...; ldrsw x18,[xB,xI,lsl #2].
+    The copy must be the last write of the index before the load, the source and index must stay unchanged on the fall-through path, and the only branch in the straight-line
+    span must be the bounds branch. This is the opposite copy direction from check_before_copy and is tried only as a fallback."""
+    k = insl.index(ld)
+    def canon(r): return r.replace('w', 'x', 1) if r.startswith(('w', 'x')) else r
+    def writes(p, reg):
+        if p.mnemonic in ('cmp', 'cmn', 'tst'): return False
+        return any(canon(p.reg_name(r)) == canon(reg) for r in p.regs_access()[1])
+    def control(p):
+        return p.mnemonic in ('b', 'br', 'blr', 'bl', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz') or p.mnemonic.startswith('b.')
+    for i, copy in enumerate(insl[:k]):
+        m = re.fullmatch(r'(w\d+), (w\d+)', copy.op_str) if copy.mnemonic == 'mov' else None
+        if not m or m.group(1) not in idx: continue
+        dst, src = m.groups()
+        for c in range(i + 1, k - 1):
+            cmp = insl[c]
+            if cmp.mnemonic != 'cmp' or not re.fullmatch(rf'{src}, #(0x[0-9a-f]+|\d+)', cmp.op_str): continue
+            if insl[c + 1].mnemonic != 'b.hi': continue
+            span = insl[i + 1:k]
+            if any(a.address + 4 != b.address for a, b in zip(span, span[1:])): break
+            if any(control(p) and p is not insl[c + 1] for p in span): continue
+            if any(writes(p, dst) or writes(p, src) for p in span if p is not cmp): continue
+            return cmp
+    return None
+def check_mask_after_check(insl, ld, idx):
+    """The checked source is narrowed into the dispatch index after the bounds branch: cmp wS,#N; b.hi; and xI,xS,#M; ldrsw x18,[xB,xI,lsl #2].
+    A 32-bit compare requires a mask that clears the high half; otherwise the full xS value is not bounded by the wS check. The source and index must remain unchanged
+    on the fall-through path, and no control flow other than b.hi may intervene."""
+    k = insl.index(ld)
+    def canon(r): return r.replace('w', 'x', 1) if r.startswith(('w', 'x')) else r
+    def writes(p, reg):
+        if p.mnemonic in ('cmp', 'cmn', 'tst'): return False
+        return any(canon(p.reg_name(r)) == canon(reg) for r in p.regs_access()[1])
+    def control(p):
+        return p.mnemonic in ('b', 'br', 'blr', 'bl', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz') or p.mnemonic.startswith('b.')
+    for c, cmp in enumerate(insl[:k - 1]):
+        m = re.fullmatch(r'(w\d+|x\d+), #(0x[0-9a-f]+|\d+)', cmp.op_str) if cmp.mnemonic == 'cmp' else None
+        if not m or c + 1 >= k or insl[c + 1].mnemonic != 'b.hi': continue
+        source, bound = m.groups(); span = insl[c + 1:k]
+        if any(a.address + 4 != b.address for a, b in zip(span, span[1:])): continue
+        for p in span[1:]:
+            am = re.fullmatch(r'(x\d+), (x\d+), #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == 'and' else None
+            if not am or 'w' + am.group(1)[1:] not in idx or canon(am.group(2)) != canon(source): continue
+            if source.startswith('w') and int(am.group(3), 0) > 0xffffffff: continue
+            if any((q is not p and q is not insl[c + 1] and (control(q) or writes(q, source) or writes(q, am.group(1)))) for q in span): continue
+            return cmp
+    return None
 def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False):
     """The br x18 is preceded by the offset-table form (Engage main+0x12eec94): cmp w18,#N; b.hi; ldrsw x18,[xB,x18,lsl #2]; add x18,x18,xB.
     The index may be another register, and the bounds check may be on a register copied into it: Link's Awakening's GLSLC (subsdk0+0x1be6e8) has
@@ -699,6 +747,8 @@ def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False):
                 break
             if cmp: break
     if not cmp and copy_first: cmp = check_before_copy(insl, ctx, ld, idx)
+    if not cmp and copy_first: cmp = check_copy_before_check(insl, ld, idx)
+    if not cmp and copy_first: cmp = check_mask_after_check(insl, ld, idx)
     if not cmp: return None
     n = int(cmp.op_str.split('#')[1], 0) + 1
     k = insl.index(ld); lo = page = None

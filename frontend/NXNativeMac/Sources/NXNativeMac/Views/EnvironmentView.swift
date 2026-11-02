@@ -115,6 +115,10 @@ struct EnvironmentView: View {
 
             Section {
                 Toggle("Pantalla completa al arrancar", isOn: $prefs.globalFullscreen)
+                Picker("Escalado para todos", selection: $prefs.globalUpscale) {
+                    Text("El de cada juego").tag("")
+                    ForEach(GlobalDefaults.upscales, id: \.value) { Text($0.label).tag($0.value) }
+                }
                 Picker("Filtro de escalado", selection: $prefs.globalFilter) {
                     Text("El de cada juego").tag("")
                     ForEach(GlobalDefaults.filters, id: \.value) { Text($0.label).tag($0.value) }
@@ -133,7 +137,7 @@ struct EnvironmentView: View {
             } header: {
                 Text("Todos los juegos")
             } footer: {
-                Text("Se aplican al jugar desde esta app. Un juego con su propia elección en Ajustes se queda con la suya. El filtro y la nitidez necesitan el juego construido con esta versión de nxnative; la pantalla completa vale ya. Bicúbico con nitidez 50 % es la combinación que más se acercó a la imagen real en las pruebas.")
+                Text("Se aplican al jugar desde esta app. Un juego con su propia elección en Ajustes se queda con la suya. MetalFX solo se usa cuando el dispositivo y el tamaño lo soportan; en otro caso el host vuelve a escalado estándar. El filtro y la nitidez necesitan el juego construido con esta versión de nxnative; la pantalla completa vale ya.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 

@@ -4,7 +4,10 @@
 set -eu
 [ "${DM_COPY_GAME_RESOURCES:-YES}" != NO ] || exit 0
 die() { echo "[RED] $*" >&2; exit 1; }
-[ "${PLATFORM_NAME:-}" = iphoneos ] || die 'This game needs a physical iPhone or iPad; choose a device, not a simulator.'
+case "${PLATFORM_NAME:-}" in
+    iphoneos|appletvos) ;;
+    *) die 'This game needs a physical Apple device; choose an iPhone, iPad or Apple TV, not a simulator.';;
+esac
 [ -f "${SRCROOT:?}/Gen/resources.env" ] || die 'Missing game resource paths; run build_ipa_from_nsp.py --prepare-xcode first.'
 source "$SRCROOT/Gen/resources.env"
 APP="${TARGET_BUILD_DIR:?}/${UNLOCALIZED_RESOURCES_FOLDER_PATH:?}"

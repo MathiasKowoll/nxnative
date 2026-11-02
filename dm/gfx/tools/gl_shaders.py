@@ -223,7 +223,10 @@ def main():
                + ' '.join((lambda r: r.stdout + r.stderr)(subprocess.run([SPIRV_CROSS, '--revision'], capture_output=True, text=True)).split())]
         tsv += [f'{k[0]}\t{v[0]}\t{" ".join(v[1])}\t{v[3]}' for k, v in sorted(seen.items())]
         dirs = [(os.path.join(out, 'gl'), 'macosx', [])]
-        if ios: dirs.append((os.path.join(ios, 'gl'), 'iphoneos', ['-mios-version-min=18.0', '-fmetal-math-mode=relaxed']))   # relaxed as in vk_shaders.py and ios_metal.py: no NaN / Inf assumption on the iPhone's GPU compiler
+        if ios:
+            sdk = os.environ.get('DM_METAL_SDK', 'iphoneos')
+            minimum = '-mtvos-version-min=26.0' if sdk == 'appletvos' else '-mios-version-min=18.0'
+            dirs.append((os.path.join(ios, 'gl'), sdk, [minimum, '-fmetal-math-mode=relaxed']))   # relaxed as in vk_shaders.py and ios_metal.py: no NaN / Inf assumption on the device GPU compiler
         msls = [v[2] for v in seen.values()]
         for d, sdk, extra in dirs:
             lib = metallib(msls, d, sdk, extra)

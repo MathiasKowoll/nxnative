@@ -12,8 +12,10 @@ install=1
 if [[ "${1:-}" == "--no-install" ]]; then install=0; shift; fi
 identity="${1:--}"
 
-swift build -c release --arch arm64
-bin="$(swift build -c release --arch arm64 --show-bin-path)/NXNativeMac"
+swift_args=(-c release --arch arm64)
+if [[ -n "${SWIFT_BUILD_JOBS:-}" ]]; then swift_args+=(--jobs "$SWIFT_BUILD_JOBS"); fi
+swift build "${swift_args[@]}"
+bin="$(swift build "${swift_args[@]}" --show-bin-path)/NXNativeMac"
 
 app=build/NXNativeMac.app
 rm -rf "$app"

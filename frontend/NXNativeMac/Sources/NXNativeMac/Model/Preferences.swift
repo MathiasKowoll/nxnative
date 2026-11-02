@@ -26,8 +26,9 @@ final class Preferences {
     /// Copia automática antes de jugar y antes de reconstruir un juego.
     var autoBackup: Bool { didSet { defaults.set(autoBackup, forKey: "autoBackup") } }
     /// Valores para todos los juegos (GlobalDefaults): pantalla completa al
-    /// arrancar, filtro de escalado ("" = cada juego) y nitidez (<0 = cada juego).
+    /// arrancar, MetalFX, filtro de escalado ("" = cada juego) y nitidez (<0 = cada juego).
     var globalFullscreen: Bool { didSet { defaults.set(globalFullscreen, forKey: "globalFullscreen") } }
+    var globalUpscale: String { didSet { defaults.set(globalUpscale, forKey: "globalUpscale") } }
     var globalFilter: String { didSet { defaults.set(globalFilter, forKey: "globalFilter") } }
     var globalSharpen: Double { didSet { defaults.set(globalSharpen, forKey: "globalSharpen") } }
     /// Title IDs asignados a mano a archivos sin etiqueta, por ruta.
@@ -44,6 +45,7 @@ final class Preferences {
         backupsPath = defaults.string(forKey: "backupsPath") ?? ""
         autoBackup = defaults.object(forKey: "autoBackup") as? Bool ?? true
         globalFullscreen = defaults.bool(forKey: "globalFullscreen")
+        globalUpscale = defaults.string(forKey: "globalUpscale") ?? ""
         globalFilter = defaults.string(forKey: "globalFilter") ?? ""
         globalSharpen = defaults.object(forKey: "globalSharpen") as? Double ?? -1
         assignedTitleIDs = defaults.dictionary(forKey: "assignedTitleIDs") as? [String: String] ?? [:]
@@ -83,7 +85,8 @@ final class Preferences {
     }
     var globalDefaults: GlobalDefaults {
         GlobalDefaults(fullscreen: globalFullscreen, filter: globalFilter.isEmpty ? nil : globalFilter,
-                       sharpen: globalSharpen < 0 ? nil : globalSharpen)
+                       sharpen: globalSharpen < 0 ? nil : globalSharpen,
+                       upscale: globalUpscale.isEmpty ? nil : globalUpscale)
     }
     var backupsURL: URL {
         backupsPath.isEmpty ? SaveVault.defaultRoot

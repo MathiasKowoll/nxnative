@@ -72,6 +72,10 @@ To enroll a cut for any game's own module:
 - **Found on:** [DRAGON QUEST XI S: Echoes of an Elusive Age – Definitive Edition](../../dm/games/01006C300E9F0000/README.md) `main+0x2dd8cd0`; [Mario + Rabbids Kingdom Battle](../../dm/games/010067300059A000/README.md) `subsdk0+0x7340b8`, whose copy is 71 instructions before the load, across two switches preserving both registers (beyond the former 64-instruction limit).
 - **Note:** before fixing one site, a census of all of them saves a run per site: a copy of `patch_nso.py` whose assert prints and continues found this one alone among the 25,508 `x18` sites. That `main` has no unwind entries for its first 70 MB, so the rewriter disassembles them as one function and takes 6 minutes (see [Long functions analysed in pieces](#long-functions-analysed-in-pieces)).
 
+The inverse copy is covered too: `mov wI,wS; cmp wS,#N; b.hi; ...; ldrsw x18,[xB,xI,lsl #2]`. The source is the value checked by the bounds branch, and the dispatch index is the unchanged copy; the recognizer accepts it only when the fall-through has no other branch, call or write to either register.
+
+A related compiler form is `cmp wS,#N; b.hi; and xI,xS,#M; ldrsw x18,[xB,xI,lsl #2]`. For a 32-bit check the mask must clear the high half of `xS`; the same straight-line and register-write guards apply.
+
 ### 64-bit bounds check of the index
 
 - **Symptom:** `jump table <addr>` assertion in `patch_nso.py` on an offset table whose index is checked with a 64-bit compare (`cmp x22, #0x10; …; b.hi; adrp x18 + add x18; mov x0, x18; ldrsw x18, [x0, x22, lsl #2]; add x18, x18, x0; br x18`).

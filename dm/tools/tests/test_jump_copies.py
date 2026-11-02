@@ -21,7 +21,7 @@ from nso_asm import ADRP, ADDI, ADDR, B, BEQ, BLR, BR, NOP
 tree = ast.parse((TOOLS / 'patch_nso.py').read_text())
 IMG = bytearray(0x5000); tabjumps = {}; jumps = {}   # the globals the recognizers read: the module image and the jump tables resolved so far in the function
 scope = {'re': re, 'struct': struct, 'ARM64_OP_IMM': ARM64_OP_IMM, 'IMG': IMG, 'tabjumps': tabjumps, 'jumps': jumps}
-exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('num', 'copied_base', 'table_base', 'forward_table_base', 'check_before_copy', 'jump_offsets', 'jump_zero_extended', 'jump_masked_pred', 'jump_masked_not')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
+exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('num', 'copied_base', 'table_base', 'forward_table_base', 'check_before_copy', 'check_copy_before_check', 'check_mask_after_check', 'jump_offsets', 'jump_masked_pred', 'jump_masked_not')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
 
 
 def mov(dst, src, wide=True): return (0xaa0003e0 if wide else 0x2a0003e0) | src << 16 | dst
@@ -158,6 +158,52 @@ class IndexCopiedBeforeCheck(unittest.TestCase):
                 self.assertIsNone(self.run_site([NOP] * 65 + [word])[0])
 
 
+class IndexCopyBeforeSourceCheck(unittest.TestCase):
+    """The compiler copies the dispatch index first, then checks the source register."""
+    TABLE = 0x4040
+
+    def run_site(self, middle=()):
+        words = [ADRP(2, 0, self.TABLE), ADDI(2, 2, self.TABLE & 0xfff), mov(18, 14, False),
+                 0x7100001f | 3 << 10 | 14 << 5, bhi(12, 40), *middle,
+                 0xb8a07800 | 18 << 16 | 2 << 5 | 18, ADDR(18, 18, 2), BR(18), RET]
+        for i in range(4): struct.pack_into('<i', IMG, self.TABLE + 4 * i, (len(words) * 4 - self.TABLE))
+        md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
+        ins = [p for i, word in enumerate(words) for p in md.disasm(struct.pack('<I', word), 4 * i)]
+        j = next(i for i, p in enumerate(ins) if p.mnemonic == 'br')
+        return scope['jump_offsets'](ins, j, copy_first=True, far_base=True)
+
+    def test_recognized(self):
+        self.assertEqual(self.run_site(), [36, 36, 36, 36])
+
+    def test_writes_and_calls_break_the_fallthrough(self):
+        for word in (mov(14, 0, False), mov(18, 0, False), 0x94000000, BLR(0)):
+            with self.subTest(word=hex(word)):
+                self.assertIsNone(self.run_site([word]))
+
+
+class IndexMaskAfterSourceCheck(unittest.TestCase):
+    """The compiler checks the source, then zero-extends it into x18 before the table load."""
+    TABLE = 0x4040
+
+    def run_site(self, middle=()):
+        words = [ADRP(17, 0, self.TABLE), ADDI(17, 17, self.TABLE & 0xfff),
+                 0x71000d1f, bhi(8, 36), 0x92407d12, *middle,
+                 0xb8b27a32, ADDR(18, 18, 17), BR(18), RET]
+        for i in range(4): struct.pack_into('<i', IMG, self.TABLE + 4 * i, (len(words) * 4 - self.TABLE))
+        md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
+        ins = [p for i, word in enumerate(words) for p in md.disasm(struct.pack('<I', word), 4 * i)]
+        j = next(i for i, p in enumerate(ins) if p.mnemonic == 'br')
+        return scope['jump_offsets'](ins, j, copy_first=True, far_base=True)
+
+    def test_recognized(self):
+        self.assertEqual(self.run_site(), [36, 36, 36, 36])
+
+    def test_source_index_and_control_flow_must_stay_valid(self):
+        for word in (mov(8, 0, False), mov(18, 0, False), 0x94000000, BLR(0)):
+            with self.subTest(word=hex(word)):
+                self.assertIsNone(self.run_site([word]))
+
+
 class ZeroExtendedIndex(unittest.TestCase):
     TABLE = 0x4040
     TARGETS = [52 + i * 4 for i in range(5)]
@@ -276,8 +322,6 @@ class ZeroExtendedIndex(unittest.TestCase):
                 self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
                 rows = [line.split('\t') for line in (Path(tmp) / 'nro0.sites.tsv').read_text().splitlines()]
                 self.assertEqual([[int(t, 0) for t in row[2].split()] for row in rows if row[1] == 'T'], [targets])
-
-
 class MaskedPredecessor(unittest.TestCase):
     """The block `and w18,w17,#M; cmp w18,#3; b.hi; ldrsw x18,[x27,x6,lsl #2]; add; br x18` whose index x6 was masked from x17 in the block that branches to it.
     Word indices of the synthetic function: 0-1 base (adrp + add), 2-4 the predecessor (and x6, ubfx, cbz), 5 filler, 6 ret, 7-15 the dispatch block (and at 7, slots at 10, 12 and 14),

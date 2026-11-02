@@ -119,8 +119,6 @@ class Tables(Base):
     def test_not_profile_inputs(self):   # the steps' reuse keys leave out what the iOS shader step makes, and the rewriter's patches (the rewrite step's own key)
         for n in ('game.tsv', 'shader_map.tsv', 'c1_full.tsv', 'cb_extent.tsv', 'patches.py'): (self.tmp / n).write_text('')
         self.assertEqual([p.name for p in nsp.profile_files(types.SimpleNamespace(dir=self.tmp))], ['game.tsv', 'shader_map.tsv'])
-
-
 class TableTools(unittest.TestCase):
     def test_appledouble_files_are_not_shaders(self):   # macOS writes a binary ._<name> beside each file on an exFAT / FAT drive; c1_guard.py read ._<key>_b.metal as UTF-8 and stopped
         lib = Path(tempfile.mkdtemp()) / 'b-0123456789ab'; lib.mkdir(); self.addCleanup(shutil.rmtree, lib.parent)
@@ -133,6 +131,43 @@ class TableTools(unittest.TestCase):
                 r = subprocess.run([sys.executable, REPO / 'dm/gfx/tools' / tool, lib, lib.parent / table], capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual((lib.parent / 'c1_full.tsv').read_text().splitlines()[1:], [key])   # the shader itself is still checked
+
+
+class Guards(Base):
+    CHAIN, GAME = '0123456789ab', '010014E00DB56000'
+
+    def setUp(self):
+        super().setUp()
+        self.host = self.tmp / 'dmhost'
+        self.cache = self.tmp / 'shader' / 'cache'
+        self.lib = self.cache / f'b-{self.CHAIN}'
+        self.lib.mkdir(parents=True)
+        self.map = self.tmp / 'shader_map.tsv'
+        self.map.write_text('package\tindex\tstage\tdm_ctl_sha16\tsource\n'
+                            'vs.bin\t0\tvertex\t1111111111111111\tsource\n'
+                            'ps.bin\t0\tpixel\t2222222222222222\tsource\n')
+        self.g = types.SimpleNamespace(id=self.GAME, table=lambda n: self.tmp / n)
+
+    def test_host_chain_is_checked(self):
+        self.host.write_bytes(b'header\n0123456789ab\n')
+        nsp.verify_host_chain(self.host, self.CHAIN)
+        self.host.write_bytes(b'header\nffffffffffff\n')
+        with self.assertRaisesRegex(nsp.BuildError, 'embeds chain.*ffffffffffff'):
+            nsp.verify_host_chain(self.host, self.CHAIN)
+
+    def test_shader_cache_stamp_and_base_coverage_are_checked(self):
+        (self.lib / 'inputs.tsv').write_text(f'game\t{self.GAME}\ninputs\tdeadbeef\n')
+        (self.lib / '1111111111111111_b.metallib').write_bytes(b'v')
+        (self.lib / '2222222222222222_b.metallib').write_bytes(b'p')
+        self.assertEqual(nsp.verify_shader_cache(self.cache, self.g, self.CHAIN), self.lib)
+        (self.lib / '2222222222222222_b.metallib').unlink()
+        with self.assertRaisesRegex(nsp.BuildError, 'incomplete'):
+            nsp.verify_shader_cache(self.cache, self.g, self.CHAIN)
+
+    def test_shader_cache_wrong_game_is_refused(self):
+        (self.lib / 'inputs.tsv').write_text('game\t0100000000000000\ninputs\tdeadbeef\n')
+        with self.assertRaisesRegex(nsp.BuildError, 'belongs to 0100000000000000'):
+            nsp.verify_shader_cache(self.cache, self.g, self.CHAIN)
 
 
 if __name__ == '__main__':

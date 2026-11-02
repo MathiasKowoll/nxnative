@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# All of Mario's shaders → the "package directory" dmsh_build.py understands + the shader map + the translation query answer table (thread group / shared memory of compute shaders).
+# All supported games' shaders → the "package directory" dmsh_build.py understands + the shader map + the translation query answer table (thread group / shared memory of compute shaders).
 # Sources (a full scan, not relying on file names): every file under RomFS (a zstd file is decompressed first, whatever its name: Mario's .zs, Paper Mario: The Thousand-Year Door's .zst; Yaz0 is decompressed, SARC is expanded member by member) and ExeFS main (NSO, lz4-decompressed), looking for
 #   · BNSH ('BNSH\0\0\0\0', carried by bfsha / particle effect esetb / UI layout blarc / embedded in main):
 #       +0x60 grsc block; +0x7c variation count u32; +0x80 variation table pointer (pointers are relative to the BNSH start). A variation is 0x40 bytes; the binary program is at +0x10;
@@ -42,6 +42,7 @@
 #   · Frostbite (EA SPORTS FC 27): the CompiledBytecode resources of the bundles its superbundle tables (.toc) list, in its cas files (Oodle Leviathan, decoded by the game's own decoder in the
 #       Mac host), each a VNVN record with one code area and control section (frostbite.py), see frostbite_jobs and frostbite_shaders
 #   · Unreal Engine 3 (Batman: Arkham Knight): shader records in its global shader cache (BMSG) and in the packages (the combined shader cache), whose compressed chunks are Oodle blocks decoded by the game's own decoder in the Mac host, see ue3_body and ue3_shaders
+#   · IGA/IGZ (Iron Galaxy): versioned IGA archives containing IGZ resources; shader members are selected by their resource/archive hints and validated by the NVN record headers, see iga_jobs and igz_shaders
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
 #   +0x700 = start of the c1 constant segment within the code area; for compute +0x748 thread group xyz (u32 ×3), +0x754 shared memory bytes (checked one by one against PC reflection on D2R's 22 compute shaders).
 # Stage: BNSH uses the stage slot; BAHS uses bits 10..13 of SPH word 0 (1 vertex 2 hull 3 domain 4 geometry 5 pixel), and a compute header means compute.
@@ -66,6 +67,8 @@ KEY_SKIP = tuple(int(x, 0) for x in GAME.get('shader_key_skip', '0+0').split('+'
 # hle_glslc.c), the shader code archives of Unreal paks once decoded on the Mac (uepak.py, DM_OODLE_JOB, hle_oodle.c); the NSP script decides from the files which of the last two to make
 
 CTL_MAGIC, GFX_MAGIC, CS_MAGIC = bytes.fromhex('34127698'), bytes.fromhex('78563412'), bytes.fromhex('79563412')
+IGA, IGZ = b'IGA\x1a', b'\x01ZGI'
+IGA_HINTLESS_LIMIT = 8
 STAGES = ['vs', 'hs', 'ds', 'gs', 'ps', 'cs']
 SPH_STAGE = {1: 'vs', 2: 'hs', 3: 'ds', 4: 'gs', 5: 'ps'}
 def sph_stage(code):
@@ -282,6 +285,129 @@ def glslc_shaders(d, label, need=True, skip=()):
         out.append((f'{label}#GLSLC@{h:#x}', st, ctl, code))
     if not out and need: red(f'{label}: no GLSLC output')
     return out
+
+def igz_shaders(d, label):
+    """Iron Galaxy's IGZ shader resources: each resource has one or more NVN records.
+    The record's control section starts at the CTL magic, +0x20 is the offset to the code area (not usually the code's immediate
+    successor), and +0x704 is the code length.  The compiler text between the control and code is kept in the resource, so the code
+    is addressed through that offset. The host hashes the control's own length when +0x20 is a valid short length, otherwise the
+    first 0x880 bytes, when it receives these resources at run time."""
+    if d[:4] != IGZ: return []
+    out, c = [], d.find(CTL_MAGIC)
+    while c >= 0:
+        if c + 0x708 <= len(d):
+            code_off = struct.unpack_from('<I', d, c + 0x20)[0]
+            ncode = struct.unpack_from('<I', d, c + 0x704)[0]
+            nctl = code_off if 0x760 <= code_off < 0x880 else 0x880
+            end_ctl, end_code = c + nctl, c + code_off + ncode
+            if code_off >= nctl and ncode >= 0x34 and end_ctl <= len(d) and end_code <= len(d):
+                ctl, code = d[c:end_ctl], d[c + code_off:end_code]
+                st = glslc_stage(ctl, code)
+                if st and not check(label, st, ctl, code):
+                    out.append((f'{label}#IGZ@{c:#x}', st, ctl, code))
+                c = d.find(CTL_MAGIC, end_code)
+                continue
+        c = d.find(CTL_MAGIC, c + 4)
+    return out
+
+def nvn_dump_shaders(directory, label):
+    """Shader records saved by the Mac host when a provisional map is missing a program.
+    DM_NVN_SHDUMP keeps the host's 0x880-byte control copy and the code area in
+    separate files; the key still uses a short control section when its own length says so."""
+    out = []
+    try: names = sorted(n for n in os.listdir(directory) if n.endswith('.ctl'))
+    except OSError: return out
+    for name in names:
+        try:
+            with open(os.path.join(directory, name), 'rb') as f: ctl = f.read()
+            with open(os.path.join(directory, name[:-4] + '.code'), 'rb') as f: code = f.read()
+        except OSError: continue
+        st = glslc_stage(ctl, code)
+        if st and not check(f'{label}/{name[:-4]}', st, ctl, code):
+            out.append((f'{label}/{name}#NVNDUMP', st, ctl, code))
+    return out
+
+def iga_entries(path):
+    """Read the small IGA/AGI index used by Iron Galaxy's Switch resources.
+    The Switch spelling is IGA (little-endian fields), version 12, with a 0x800-byte block alignment. An entry is
+    {stored offset, uncompressed size, resource id, compression mode}; names are offsets relative to the names area."""
+    with open(path, 'rb') as f:
+        head = f.read(0x38)
+        if len(head) < 0x38 or head[:4] != IGA: return []
+        version, files, align, names_off = struct.unpack_from('<IIII', head, 4)[0], struct.unpack_from('<I', head, 0xc)[0], struct.unpack_from('<I', head, 0x10)[0], struct.unpack_from('<I', head, 0x28)[0]
+        if version < 9 or not files or not align or names_off < 0x38 + files * 20: red(f'{path}: invalid IGA header')
+        entry_off = 0x38 + files * 4
+        f.seek(entry_off); table = f.read(files * 16)
+        f.seek(0, 2); archive_size = f.tell(); f.seek(names_off); names = f.read()
+    if len(table) != files * 16 or len(names) < files * 4: red(f'{path}: truncated IGA index')
+    chunks_off = entry_off + files * 16
+    out = []
+    for i in range(files):
+        off, size, ident, mode = struct.unpack_from('<IIII', table, i * 16)
+        no = struct.unpack_from('<I', names, i * 4)[0]
+        if no >= len(names): red(f'{path}: IGA name offset {no:#x} is outside the names area')
+        end = names.find(b'\0', no)
+        if end < 0: red(f'{path}: unterminated IGA name at {no:#x}')
+        name = names[no:end].decode('utf-8', 'replace')
+        # One Switch shader entry uses 0xffffff00 as an exporter sentinel instead of its logical size.  Its
+        # compressed blocks still end at the names area, so keep that case bounded and derive the size while reading.
+        logical_size = size if size <= archive_size - off else None
+        out.append((name, (off, logical_size, mode, version, align, chunks_off, names_off)))
+    return out
+
+def iga_read(path, entry):
+    """Read one IGA member without materializing the enclosing archive."""
+    import lzma
+    off, size, mode, version, align, chunks_off, names_off = entry
+    if mode == 0xffffffff:
+        if size is None: red(f'{path}: unbounded uncompressed IGA member at {off:#x}')
+        with open(path, 'rb') as f:
+            f.seek(off); data = f.read(size)
+        if len(data) != size: red(f'{path}: short uncompressed IGA member at {off:#x}')
+        return data
+    # IGA v12 stores each compressed member in 0x8000-byte logical blocks.  The block table stores one u16 per block;
+    # bit 15 marks a compressed block and the lower 15 bits are format metadata, not a byte count.
+    block_size = 0x8000
+    chunk_at = chunks_off + (mode & 0xffffff) * 2
+    out, cur = bytearray(), off
+    with open(path, 'rb') as f:
+        while size is None or len(out) < size:
+            f.seek(chunk_at); raw = f.read(2)
+            if len(raw) != 2: red(f'{path}: short IGA chunk table')
+            info = struct.unpack('<H', raw)[0]; chunk_at += 2
+            if mode & 0x20000000:
+                f.seek(cur); raw = f.read(9)
+                if len(raw) != 9: red(f'{path}: short IGA LZMA header at {cur:#x}')
+                csize = struct.unpack_from('<I', raw)[0]; props = raw[4:9]
+                # The chunk index is only a hint. Some IGA members store a raw block with bit 15 set;
+                # the original engine/QuickBMS reader recognizes LZMA by its 0x5d property header.
+                if props[0] == 0x5d and struct.unpack_from('<I', props, 1)[0] <= 0x800000:
+                    if props[0] > 224: red(f'{path}: invalid IGA LZMA properties at {cur:#x}')
+                    p, dictionary = props[0], struct.unpack_from('<I', props, 1)[0]
+                    lc, q = p % 9, p // 9; lp, pb = q % 5, q // 5
+                    f.seek(cur + 9); stored = f.read(csize)
+                    if len(stored) != csize: red(f'{path}: short IGA LZMA block at {cur:#x}')
+                    try: chunk = lzma.LZMADecompressor(format=lzma.FORMAT_RAW, filters=[{'id': lzma.FILTER_LZMA1, 'lc': lc, 'lp': lp, 'pb': pb, 'dict_size': dictionary}]).decompress(stored, max_length=block_size)
+                    except lzma.LZMAError as e: red(f'{path}: IGA LZMA block at {cur:#x}: {e}')
+                    cur = (cur + 9 + csize + align - 1) // align * align
+                else:
+                    f.seek(cur); chunk = f.read(block_size); cur = (cur + block_size + align - 1) // align * align
+            elif info & 0x8000:
+                f.seek(cur); raw = f.read(4)
+                if len(raw) != 4: red(f'{path}: short IGA deflate header at {cur:#x}')
+                csize = struct.unpack('<I', raw)[0]; f.seek(cur + 4); stored = f.read(csize)
+                if len(stored) != csize: red(f'{path}: short IGA deflate block at {cur:#x}')
+                try: chunk = zlib.decompress(stored, -15)
+                except zlib.error:
+                    try: chunk = zlib.decompress(stored)
+                    except zlib.error as e: red(f'{path}: IGA deflate block at {cur:#x}: {e}')
+                cur = (cur + 4 + csize + align - 1) // align * align
+            else:
+                f.seek(cur); chunk = f.read(block_size); cur = (cur + block_size + align - 1) // align * align
+            if not chunk: red(f'{path}: empty IGA block at {cur:#x}')
+            out.extend(chunk)
+            if size is None and cur >= names_off: break
+    return bytes(out if size is None else out[:size])
 
 SNOWDROP_RECORD = rb'[\xc5\xc6]\x00\xcd\xab'
 def snowdrop_wrapped(d, label):
@@ -2300,6 +2426,7 @@ def pixel_input_cover(shaders):
     return cover
 
 SINGLE_STAGE = ('#GLSLC@', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
+SINGLE_STAGE = ('#GLSLC@', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@', '#IGZ@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
 # Unreal Engine 3's shader caches (ue3_shaders, '#UE3@'); MonoGame's effects, whose passes may name no vertex shader and keep the one bound (Celeste: 10 of its 13 effects draw through SpriteBatch's vertex shader, which is in main); Next Level Games'
 # archives (Luigi's Mansion 3 makes 5,317 programs of one stage each at boot); PlatinumGames' shader objects (Bayonetta 3: one stage each, pg_shader); control sections loose in main
 # (Advance Wars 1+2: Re-Boot Camp's Bink shaders, raw_shaders), which no file pairs; YEBIS's effect file (tfxo_shaders); and Sumo's Ninty_NX descriptors and NVNsh records, one stage
@@ -2435,6 +2562,10 @@ def scan_file_in(args):
     if len(args) > 2 and head[:4] == b'BDF3':   # entries of a FromSoftware dvdbnd archive (bdt_jobs)
         bdt_shaders(path, rel, args[2], found)
         return rel, uniq_keys(found), var_pairs(found), trees
+    if len(args) > 2 and args[2][0] == 'IGA':   # Crash's IGA archive: the job points at one compressed IGZ resource
+        name, entry = args[2][1], args[2][2]
+        found += igz_shaders(iga_read(path, entry), f'/{rel}#{name}')
+        return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2:   # a range of LINKDATA entries (linkdata_jobs)
         linkdata_shaders(path, rel, args[2], found)
         return rel, uniq_keys(found), var_pairs(found), trees
@@ -2521,6 +2652,35 @@ def nso_image(path):   # an NSO's image (dm/tools/nso.py); nso.Error (a ValueErr
 def scan_batch(jobs):   # scan_file over a batch of jobs, in a pool worker
     return [scan_file(j) for j in jobs]
 
+def iga_shader_member(name, archive=''):
+    """Whether an IGA member is a likely shader resource without relying on a title or exact directory layout.
+    Iron Galaxy's packages use several names for the shader directory, so use token hints from both the member and archive
+    names. The IGZ reader remains the authority: false positives are cheap and are discarded when no valid NVN record exists."""
+    if not name.lower().replace('\\', '/').endswith('.igz'): return False
+    tokens = re.split(r'[^a-z0-9]+', (name + '/' + archive).lower())
+    return any('shader' in token or token == 'shd' for token in tokens)
+
+def iga_jobs(files):
+    """Make bounded jobs for likely shader IGZ members in any IGA-named file.
+    The archive is detected by its magic rather than its extension. Small archives made entirely of IGZ resources can be scanned in
+    full when their names carry no shader hint; mixed or large archives stay filtered to avoid materializing every model/texture
+    resource. DM_IGA_SCAN_ALL=1 is the explicit escape hatch for a future package whose shader names carry no hint."""
+    jobs, archives = [], set()
+    scan_all = os.environ.get('DM_IGA_SCAN_ALL', '').lower() in ('1', 'true', 'yes', 'on')
+    for path, rel in files:
+        try:
+            with open(path, 'rb') as f:
+                if f.read(4) != IGA: continue
+        except OSError: continue
+        entries = iga_entries(path)
+        if not entries: continue
+        archives.add(path)
+        igz = [(name, entry) for name, entry in entries if name.lower().replace('\\', '/').endswith('.igz')]
+        hinted = [(name, entry) for name, entry in igz if iga_shader_member(name, rel)]
+        selected = igz if scan_all or (not hinted and len(igz) <= IGA_HINTLESS_LIMIT and len(igz) == len(entries)) else hinted
+        jobs.extend((path, rel, ('IGA', name, entry)) for name, entry in selected)
+    return jobs, archives
+
 
 def pooled(ex, jobs, total, start=0, chunk=1):
     """scan_file over jobs in the pool, the results in job order, with a 'progress: <done>/<total>' line at most twice a second (the NSP script shows it as
@@ -2565,6 +2725,15 @@ def main():
         if not names and glsl_sources(img) and 'glslcCompile' in main_imports(img) and glslc_module(os.path.dirname(os.path.abspath(mainnso))):
             print(f'[RED] main holds GLSL sources and imports glslcCompile, but there are no captured GLSLC outputs in {cap}: the shaders the game compiles at run time will have no translation', flush=True)
         for nm in names: found += glslc_shaders(open(os.path.join(cap, nm), 'rb').read(), f'/glslc_capture/{nm}')
+        dump = os.environ.get('DM_NVN_SHDUMP')
+        if dump:
+            parent = os.path.abspath(os.path.dirname(os.path.abspath(romfs)))
+            dump_parent = os.path.abspath(os.path.dirname(os.path.abspath(dump)))
+            version_parents = {os.path.abspath(os.path.dirname(os.path.abspath(r))) for r in romfs_v}
+            # A multi-version split receives one dump from the packed version. If a caller
+            # supplies a standalone dump, attach it to the only version or the final one.
+            if dump_parent == parent or (len(romfs_v) == 1 and i == 0) or (dump_parent not in version_parents and i == len(romfs_v) - 1):
+                found += nvn_dump_shaders(dump, f'/nvn_dump/{os.path.basename(dump)}')
         # Unreal Engine shader code archives decoded on the Mac (uepak.py): <version dir>/ue_shaders, or DM_UE_SHADERS; needed when the RomFS has Unreal paks
         ued = os.environ.get('DM_UE_SHADERS') or os.path.join(os.path.dirname(os.path.abspath(romfs)), 'ue_shaders')
         names = sorted(f for f in os.listdir(ued) if f.endswith('.ushaderbytecode')) if os.path.isdir(ued) else []
@@ -2579,6 +2748,7 @@ def main():
     keys = {}
     # First pass: every file; Unity bundles carry type trees, and the Shader trees are collected on the way. Second pass: Unity serialized files without type trees are scanned again with the borrowed trees
     J = int(os.environ.get('J', '8'))
+    iga, igas = iga_jobs(files)   # IGA archives: only candidate shader IGZ members are jobs
     big = [j for p, r in files for j in (linkdata_jobs(p, r) or [])]   # Three Houses' 6.9 GB DATA1.bin: one job per range of entries, not one read of the whole file
     pak_jobs, paks = kpka_jobs(files)   # Monster Hunter Rise's PAKs: the newest copy of each path, in ranges of entries
     tr_jobs, trp = trpfs_jobs(files)   # Pokémon Legends: Z-A's Trinity packs (data.trpfs and its index data.trpfd), decoded by the game's own Oodle in the Mac host
@@ -2590,8 +2760,8 @@ def main():
     zp_jobs, zips = zip_jobs(files)   # Portal's game.zip (Deflate members)
     ah_jobs, arhs = arh_jobs(files)   # Monolith's ARH1/ARD archives and embedded XBC1/HCPS programs
     fb_jobs, fbs = frostbite_jobs(files)   # EA SPORTS FC 27's Frostbite bundles, Oodle Leviathan decoded by the game's own decoder in the Mac host
-    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + zp_jobs + ah_jobs + fb_jobs
-    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in zips and p not in arhs and p not in fbs]
+    big += iga + pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + zp_jobs + ah_jobs + fb_jobs
+    files = [(p, r) for p, r in files if p not in igas and not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in zips and p not in arhs and p not in fbs]
     with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts)) as ex:
         n = len(big) + len(files)
         results += pooled(ex, big, n) + pooled(ex, files, n, len(big), chunk=16)
@@ -2645,6 +2815,7 @@ def main():
                                             ('MT Framework SPK', any('#MTSPK@' in r[4] for r in rows)), ('MonoGame MGFX', any('#MGFX@' in r[4] for r in rows)),
                                             ('PlatinumGames shader objects', any('#PGSO' in r[4] for r in rows)),
                                             ('Snowdrop shader objects', any('#SNOWDROP@' in r[4] for r in rows)),
+                                            ('NVN runtime dump', any('#NVNDUMP' in r[4] for r in rows)),
                                             ('Unreal Engine shader code archives', any('#UE' in r[4] for r in rows))) if hit)
         f.write(f'# kind: evidence  {NOTE} ({kinds} in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)\n')
         f.write('# column 5 records where each key first appears; no PC shader pairing supplied\n')

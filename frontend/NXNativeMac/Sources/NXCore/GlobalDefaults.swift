@@ -1,7 +1,7 @@
 import Foundation
 
 /// Valores que el jugador quiere en TODOS los juegos: pantalla completa al
-/// arrancar, filtro de escalado y nitidez. Se pasan en el entorno del
+/// arrancar, MetalFX, filtro de escalado y nitidez. Se pasan en el entorno del
 /// arranque, así que valen al abrir un juego desde esta app (no desde
 /// Finder).
 ///
@@ -15,13 +15,18 @@ public struct GlobalDefaults: Sendable, Equatable {
     public var filter: String?
     /// nil = cada juego con lo suyo. Si no: de 0 a 1.
     public var sharpen: Double?
+    /// nil = cada juego con lo suyo. Si no: `off` o `metalfx`.
+    public var upscale: String?
 
-    public init(fullscreen: Bool = false, filter: String? = nil, sharpen: Double? = nil) {
-        self.fullscreen = fullscreen; self.filter = filter; self.sharpen = sharpen
+    public init(fullscreen: Bool = false, filter: String? = nil, sharpen: Double? = nil, upscale: String? = nil) {
+        self.fullscreen = fullscreen; self.filter = filter; self.sharpen = sharpen; self.upscale = upscale
     }
 
     public static let filters: [(value: String, label: String)] = [
         ("bilinear", "Bilineal"), ("bicubic", "Bicúbico"), ("lanczos", "Lanczos"), ("sharp", "Píxel nítido"),
+    ]
+    public static let upscales: [(value: String, label: String)] = [
+        ("off", "Estándar"), ("metalfx", "MetalFX"),
     ]
 
     /// Las variables que hay que añadir al arranque de un juego cuyo
@@ -33,6 +38,7 @@ public struct GlobalDefaults: Sendable, Equatable {
             out[key] = value
         }
         put("DM_FULLSCREEN", fullscreen ? "1" : nil)
+        put("DM_PRESENT_UPSCALE", upscale.flatMap { u in Self.upscales.contains { $0.value == u } ? u : nil })
         put("DM_PRESENT_FILTER", filter.flatMap { f in Self.filters.contains { $0.value == f } ? f : nil })
         put("DM_PRESENT_SHARPEN", sharpen.map { String(format: "%.2f", min(max($0, 0), 1)) })
         return out
