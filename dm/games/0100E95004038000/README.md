@@ -21,6 +21,18 @@ System → Save and a restart into Argentum were exercised during bring-up;
 the save was created with the isolated winding diagnostic and reloaded with
 the production path. The final fixed host also loads it and walks in Argentum.
 
+**Machine-stability blocker and controlled diagnosis (2026-10-29):** a
+Xenoblade 2 build/run was reported to freeze the entire Mac, rather than only
+crashing the guest. The whole-Mac freeze has not been reproduced under control,
+but the controlled process crash is explained: the host embedded shader chain
+`105bc0751b1f` while the available cache was from another chain, so the host
+looked for missing `b-105bc0751b1f` libraries and stopped at frame 7. The
+affected shader warnings were recompiled and matched existing libraries; this
+was not evidence of corrupt shaders. The builder now rejects a host/cache chain
+mismatch before launch and compiles the host before the expensive shader build.
+Keep this case at `J=1` or `J=2`, low process priority, with CPU/RAM monitoring
+and preserved logs before any retry.
+
 ## Profile and memory
 
 The NPDM declares no system resource. Startup sets a `0xC9400000`-byte heap

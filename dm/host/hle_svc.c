@@ -34,6 +34,14 @@ static uint8_t *g_alias; static size_t g_alias_cap;
 static _Atomic uint64_t *g_alias_bits;   // alias region page bitmap (alias_pages)
 static uint64_t *g_alias_exposed;   // one bit per host page ever opened; protected by g_map_lock
 static uint8_t *g_stack; static size_t g_stack_cap;
+// DM_MEM_RELEASE=1 asks macOS to discard unmapped alias pages immediately. The
+// normal MADV_FREE path is cheaper, but can keep pages resident until pressure.
+static int mem_release_now(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_MEM_RELEASE"); v = e && (!strcmp(e, "1") || !strcmp(e, "dontneed"));
+        if (v) LOG("[mem] immediate release enabled for unmapped alias pages (MADV_DONTNEED)"); }
+    return v;
+}
 // The address lies in the guest address block (every guest thread stack is here: the game's own heap or the stack region); the big-stack entry (hle_bigstack.c) uses it to decide whether to switch stacks
 int dm_guest_as_contains(uintptr_t a) { uintptr_t b = (uintptr_t)g_as; return g_as && a >= b && a - b < g_reserve; }
 

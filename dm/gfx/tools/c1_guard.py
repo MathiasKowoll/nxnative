@@ -28,6 +28,11 @@ OUTPUT = re.compile(r"[0-9a-f]{16}_b\w*\.(metal|json)")   # what dmsh_build.py w
 BINARY = {"||": 1, "&&": 2, "|": 3, "^": 4, "&": 5, "==": 6, "!=": 6, "<": 7, ">": 7, "<=": 7, ">=": 7, "<<": 8, ">>": 8, "+": 9, "-": 9, "*": 10, "/": 10, "%": 10}
 
 
+def worker_count():
+    try: return max(1, int(os.environ.get('J', '8')))
+    except (TypeError, ValueError): return 8
+
+
 def tokens(text):
     # A reinterpreting cast: an unsigned result is only known to be non-negative, a signed one is unbounded
     text = re.sub(r"\bas_type<u(?:int|short|long)>\s*\(", "as_type_u(", text)
@@ -209,7 +214,7 @@ def outputs(version_dir, ext):
 
 def unproven(job):
     """(version dir, a .metal file name) → the shader's key when one of its c1 reads is not proven bounded, else None. Each shader is checked on its own, so main()
-    spreads them over every core, as cb_extent.py does (Breath of the Wild's 19,592 libraries, FINAL FANTASY RESONANCE's 73,496: minutes on one core)"""
+    maps them over the explicit J worker budget, as cb_extent.py does (Breath of the Wild's 19,592 libraries, FINAL FANTASY RESONANCE's 73,496: minutes on one core)"""
     version_dir, name = job
     with open(os.path.join(version_dir, name), encoding="utf-8") as stream:
         source = stream.read()
@@ -227,7 +232,7 @@ def main():
         raise SystemExit(f"usage: {sys.argv[0]} <dmsh_b version dir> <output tsv>")
     version_dir, output = map(os.path.abspath, sys.argv[1:])
     jobs = [(version_dir, name) for name in outputs(version_dir, "metal")]
-    with multiprocessing.Pool() as pool:   # map keeps the sorted order, so the list is the same as one core's
+    with multiprocessing.Pool(processes=worker_count()) as pool:   # map keeps the sorted order, so the list is the same as one core's
         keys = [key for key in pool.map(unproven, jobs, chunksize=64) if key]
     os.makedirs(os.path.dirname(output), exist_ok=True)
     with open(output, "w", encoding="utf-8", newline="") as stream:

@@ -107,6 +107,7 @@ static void probe_dump_once(void) {
     fwrite(m->base + strtoull(o, 0, 16), 1, strtoull(n, 0, 16), fp); fclose(fp);
     LOG("probe dump %s+%s length %s → %s", mod, o, n, f ? f : def);
 }
+static void watch_dynamic_page(ucontext_t *uc);
 static int probe_hit(ucontext_t *uc) {   // Registered by probe_install with the SIGTRAP branch of crash.c
     uint64_t pc = uc->uc_mcontext->__ss.__pc;
     for (int i = 0; i < g_nprobe; i++) if (g_probe[i].at == pc) {
@@ -124,6 +125,7 @@ static int probe_hit(ucontext_t *uc) {   // Registered by probe_install with the
             char nm[128]; probe_heapname(uc->uc_mcontext->__ss.__x[g_probe[i].hreg], nm, sizeof nm);
             if (!strstr(nm, g_hw.want)) { uc->uc_mcontext->__ss.__pc = (uint64_t)g_probe[i].slot; return 1; }
         }
+        watch_dynamic_page(uc);
         probe_dump_once();
         flockfile(stderr);   // One block per hit when threads hit at once
         { extern uint64_t g_t0_ns; uint64_t now_ns(void); uint32_t thr_cur_handle(void); fprintf(stderr, "[dm] PROBE %s #%u [%.4fs] F=%llu T=%x", g_probe[i].name, ++g_probe[i].hits, (now_ns() - g_t0_ns) / 1e9, (unsigned long long)frame, thr_cur_handle()); }
@@ -183,6 +185,24 @@ static void probe_add(module_t *m, uint64_t off, long dump, probe_fn fn) {
 // (a store in that millisecond goes unseen). STEINS;GATE RE:BOOT: the engine object's page takes bursts of stores every frame, and a watch that unprotected the page for each fault missed
 // the one that matters; this one found it at once (main+0x389e90, a setter its start-up code calls with 0: the game renders 1280x720 docked by its own choice)
 static uint64_t g_wat, g_wlen, g_wpg, g_wpsz; static uint8_t *g_walias; static _Atomic int g_warmed;
+// DM_PROBE_WATCH_REG=xN arms the whole page containing xN after the first matching DM_PROBE.
+// xN+offset+length instead watches only that range (for example x19+1088+8): the page is still
+// protected, but ordinary stores on it are emulated silently and only an overlapping store is logged.
+static int g_watch_reg = -1; static uint64_t g_watch_reg_off, g_watch_reg_len;
+static void watch_dynamic_page(ucontext_t *uc) {
+    if (g_watch_reg < 0 || g_wpg) return;
+    uint64_t reg = uc->uc_mcontext->__ss.__x[g_watch_reg];
+    if (!reg) return;
+    uint64_t at = reg + g_watch_reg_off;
+    g_wpsz = (uint64_t)getpagesize();
+    uint64_t pg = at & ~(g_wpsz - 1), len = g_watch_reg_len ? g_watch_reg_len : g_wpsz;
+    if (at + len > pg + g_wpsz) die("DM_PROBE_WATCH_REG range crosses a host page");
+    g_wat = g_watch_reg_len ? at : pg;
+    g_wlen = len;
+    g_wpg = pg;  // Publish last: watch_arm must see the fully initialized target.
+    LOG("dynamic write watch from x%d=%#llx: %#llx + %#llx (host page %#llx)", g_watch_reg,
+        (unsigned long long)reg, (unsigned long long)g_wat, (unsigned long long)g_wlen, (unsigned long long)g_wpg);
+}
 static void watch_where(const char *tag, uint64_t a) {
     module_t *m = module_of((void *)a); Dl_info di;
     if (m) fprintf(stderr, " %s=%s+%#llx", tag, m->name, (unsigned long long)(a - (uint64_t)m->base));
@@ -356,13 +376,44 @@ static void watch_install(void) {
                if (*end == '=') { g_pwant = 1; g_pval = strtoull(end + 1, 0, 16); }
                if ((!g_poll && !g_pheap) || !g_plen || g_plen > 8) die("DM_PROBE_POLL format: <address>[+<length up to 8>][=<value>] (hex)");
                pthread_t t; pthread_create(&t, NULL, poll_run, NULL); pthread_detach(t); } }
+    const char *dynamic = getenv("DM_PROBE_WATCH_REG");
+    if (dynamic && *dynamic) {
+        if (dynamic[0] != 'x') die("DM_PROBE_WATCH_REG format: xN or xN+offset+length");
+        char *end; long reg = strtol(dynamic + 1, &end, 10);
+        if (reg < 0 || reg > 30) die("DM_PROBE_WATCH_REG format: xN or xN+offset+length");
+        if (*end == '+') {
+            g_watch_reg_off = strtoull(end + 1, &end, 16);
+            if (*end != '+') die("DM_PROBE_WATCH_REG format: xN or xN+offset+length");
+            g_watch_reg_len = strtoull(end + 1, &end, 16);
+            if (!g_watch_reg_len) die("DM_PROBE_WATCH_REG length must be nonzero");
+        }
+        if (*end) die("DM_PROBE_WATCH_REG format: xN or xN+offset+length");
+        g_watch_reg = (int)reg;
+        dm_fault_hook_register(watch_fault);
+        pthread_t t; pthread_create(&t, NULL, watch_arm, NULL); pthread_detach(t);
+    }
     const char *e = getenv("DM_PROBE_WATCH"); if (!e) return;
-    char *end; g_wheap = !strncmp(e, "heap+", 5);
-    uint64_t at = strtoull(e + (g_wheap ? 5 : 0), &end, 16); g_wlen = *end == '+' ? strtoull(end + 1, 0, 16) : 8;
-    if ((!at && !g_wheap) || !g_wlen) die("DM_PROBE_WATCH format: [heap+]<address>[+<length>] (hex)");
+    uint64_t base = 0; g_wheap = !strncmp(e, "heap+", 5);
+    if (g_wheap) e += 5;
+    else {
+        const char *colon = strchr(e, ':');
+        if (colon) {
+            module_t *module = NULL;
+            for (int i = 0; i < g_nmod; i++)
+                if (strlen(g_mod[i].name) == (size_t)(colon - e) && !strncmp(g_mod[i].name, e, (size_t)(colon - e))) module = &g_mod[i];
+            if (!module) die("DM_PROBE_WATCH: unknown module");
+            base = (uint64_t)module->base;
+            e = colon + 1;
+        }
+    }
+    char *end; uint64_t at = strtoull(e, &end, 16);
+    if (end == e) die("DM_PROBE_WATCH format: [heap+|<module>:]<address>[+<length>] (hex)");
+    if (*end == '+') g_wlen = strtoull(end + 1, &end, 16); else g_wlen = 8;
+    if (*end || (!at && !g_wheap && !base) || !g_wlen) die("DM_PROBE_WATCH format: [heap+|<module>:]<address>[+<length>] (hex)");
     g_wpsz = (uint64_t)getpagesize();
     if ((at & (g_wpsz - 1)) + g_wlen > g_wpsz) die("DM_PROBE_WATCH: the watched bytes must lie in one host page");
-    if (g_wheap) { g_wrel = at; g_wpg = 0; } else { g_wat = at; g_wpg = g_wat & ~(g_wpsz - 1); }
+    if (g_wheap) { g_wrel = at; g_wpg = 0; }
+    else { g_wat = base + at; g_wpg = g_wat & ~(g_wpsz - 1); }
     dm_fault_hook_register(watch_fault);
     pthread_t t; pthread_create(&t, NULL, watch_arm, NULL); pthread_detach(t);
     if (g_wheap) LOG("write watch on heap + %#llx + %#llx (resolved once the game opens its heap)", (unsigned long long)g_wrel, (unsigned long long)g_wlen);

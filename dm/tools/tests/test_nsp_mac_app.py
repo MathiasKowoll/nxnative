@@ -86,6 +86,37 @@ class Copy(unittest.TestCase):
             for p in files: self.assertEqual((dst / p.name).read_bytes(), p.name.encode())
 
 
+class BuildEnv(unittest.TestCase):
+    def test_nvn_defaults_are_shared_by_mac_and_ios(self):
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as t:
+            path = nsp.build_env_file(Path(t), None, True, 'nvn')
+            self.assertEqual(nsp.env_file_pairs(path), {
+                'DM_PSO_PREBUILD_THREADS': '2',
+                'DM_PSO_PREPARE_THREADS': '2',
+            })
+
+    def test_explicit_nvn_values_are_preserved(self):
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as t:
+            source = Path(t) / 'input.env'
+            source.write_text('DM_PSO_PREPARE_THREADS=4\nDM_GAME_OPTION=on\n')
+            path = nsp.build_env_file(Path(t), source, True, 'nvn')
+            self.assertNotEqual(path, source)
+            self.assertEqual(nsp.env_file_pairs(path), {
+                'DM_PSO_PREPARE_THREADS': '4',
+                'DM_GAME_OPTION': 'on',
+                'DM_PSO_PREBUILD_THREADS': '2',
+            })
+
+    def test_non_nvn_motion_build_without_env_stays_empty(self):
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as t:
+            self.assertIsNone(nsp.build_env_file(Path(t), None, True, 'vulkan'))
+
+    def test_no_motion_remains_shared_for_non_nvn(self):
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as t:
+            path = nsp.build_env_file(Path(t), None, False, 'vulkan')
+            self.assertEqual(nsp.env_file_pairs(path), {'DM_MOTION': '0'})
+
+
 @unittest.skipUnless(sys.platform == 'darwin', 'uses macOS atomic bundle replacement')
 class CloneProbe(unittest.TestCase):
     """can_clone with the real clonefile: a RomFS image is one file (os.walk of a file yields nothing), a folder is probed by its first file."""

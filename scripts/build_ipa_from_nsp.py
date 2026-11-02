@@ -32,7 +32,7 @@
 # unless ALLOW_OTHER_METAL / --allow-other-metal. Issue #242 reported corruption with another compiler; the cause is still unconfirmed.
 # Python 3.12+ is required for bounded archive mappings inside images. The Python running this file needs lz4, capstone 5.x and fonttools (and backports.zstd before Python 3.14); also needed: Xcode, xcodegen, .NET SDK 10, zstd. SPIRV-Cross is the in-repo build. A first run takes 2 (Metroid Dread) to 10 minutes (Breath of the Wild: 5 of them the shader split), longer when shader libraries must be compiled; a repeat run with unchanged inputs takes about 20 s (Metroid Dread), mostly packing the IPA. Key values are never printed.
 # The console shows one line per stage ([k/n] stage, with a bar, done/total, percent, elapsed time and ETA where the work can be counted); the tools' own output goes only to logs/ (PROGRESS / --progress). --progress json writes newline-delimited JSON events to stdout.
-import ast, collections, contextlib, ctypes, errno, getpass, hashlib, importlib.util, json, os, re, shlex, shutil, struct, subprocess, sys, tempfile, threading, time, types
+import ast, collections, contextlib, ctypes, errno, getpass, hashlib, importlib.util, json, os, re, shlex, shutil, signal, struct, subprocess, sys, tempfile, threading, time, types
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dm/tools"))
 import romfs as rfs
@@ -346,13 +346,29 @@ def ask(prompt, what):   # what: what is missing, for the error message
     return os.path.expanduser(s)
 
 
+def stop_process_group(p):
+    """Stop a build child and every compiler it spawned (not only the wrapper)."""
+    if p.poll() is not None: return
+    try: os.killpg(p.pid, signal.SIGTERM)
+    except OSError:
+        try: p.terminate()
+        except OSError: pass
+    try: p.wait(5)
+    except subprocess.TimeoutExpired:
+        try: os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            try: p.kill()
+            except OSError: pass
+        p.wait()
+
+
 def run(cmd, log, env=None, cwd=None, on_line=None, ok=()):
     """Run a subprocess with all its output written to log (the console shows the stage line instead: the shader build alone emits tens of thousands of compiler warnings);
     stop on a non-zero exit not in ok, printing the log's last lines. on_line: called with every output line (build_ipa.sh's own step lines move its stages on)"""
     cmd = [str(c) for c in cmd]
     log.parent.mkdir(parents=True, exist_ok=True)
     tail = collections.deque(maxlen=40)
-    p = subprocess.Popen(cmd, env=env, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace', bufsize=1)
+    p = subprocess.Popen(cmd, env=env, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace', bufsize=1, start_new_session=True)
     try:
         with open(log, 'w') as f:
             for line in p.stdout:
@@ -361,8 +377,8 @@ def run(cmd, log, env=None, cwd=None, on_line=None, ok=()):
                     try: on_line(line.rstrip('\n'))
                     except Exception: pass   # progress never stops the build
         p.wait()
-    except KeyboardInterrupt:
-        p.terminate(); p.wait(); raise
+    except BaseException:
+        stop_process_group(p); raise
     finally:
         p.stdout.close()
     if p.returncode and p.returncode not in ok:
@@ -1059,7 +1075,7 @@ def check_capstone():   # patch_nso.py checks the same, but only at the rewrite 
         raise BuildError(f'Capstone {capstone.__version__} is unsupported; the rewriter requires Capstone 5.x. Run: {cmd}')
 
 
-def check_prereqs(env, xlate, mac=False):   # mac: a Mac-only build (PLATFORM 'mac'), which needs no xcodegen and compiles shaders only for macOS
+def check_prereqs(env, xlate, mac=False, device='ios'):   # mac: a Mac-only build; device selects the Apple device SDK for ios/tvos builds
     missing = [m for m in ('lz4.block', 'capstone', 'fontTools') if not _importable(m)] + ([] if _importable('compression.zstd') or _importable('backports.zstd') else ['backports.zstd'])   # zstd: built in from Python 3.14
     if missing: raise BuildError(f'the current Python ({sys.executable}) is missing modules: {", ".join(missing)} (pip install lz4 "capstone>=5,<6" fonttools backports.zstd; backports.zstd only before Python 3.14)')
     check_capstone()
@@ -1067,8 +1083,9 @@ def check_prereqs(env, xlate, mac=False):   # mac: a Mac-only build (PLATFORM 'm
     if mac: del tools['xcodegen']
     gone = [f'{t} ({how})' for t, how in tools.items() if not shutil.which(t, path=env['PATH'])]
     if gone: raise BuildError('tools not found: ' + ', '.join(gone))
-    if not mac: check_ios_sdk(env)   # before the Metal check, whose message would blame the Metal toolchain
-    mtl = subprocess.run(['xcrun', '-sdk', 'macosx' if mac else 'iphoneos', 'metal', '--version'], capture_output=True, text=True, env=env)   # Xcode 26 and later install the Metal toolchain separately
+    device_sdk = 'appletvos' if device == 'tvos' else 'iphoneos'
+    if not mac: check_device_sdk(env, device)
+    mtl = subprocess.run(['xcrun', '-sdk', 'macosx' if mac else device_sdk, 'metal', '--version'], capture_output=True, text=True, env=env)   # Xcode 26 and later install the Metal toolchain separately
     if mtl.returncode: raise BuildError(f'the Metal compiler does not run ({(mtl.stderr.strip().splitlines() or ["no output"])[-1]}): install it with xcodebuild -downloadComponent MetalToolchain')
     if not xlate.exists(): raise BuildError(f'the shader translator is missing from the repository: {xlate}')
     check_translator(xlate, env)
@@ -1076,11 +1093,16 @@ def check_prereqs(env, xlate, mac=False):   # mac: a Mac-only build (PLATFORM 'm
     if not shutil.which(sc, path=env.get('PATH')): raise BuildError(f'spirv-cross is missing or not executable: {sc}')
 
 
-def check_ios_sdk(env):   # the iOS platform is a separate download in Xcode's Components; xcodebuild, the Metal toolchain and the macOS SDK can be there without it
-    if subprocess.run(['xcrun', '--sdk', 'iphoneos', '--show-sdk-version'], capture_output=True, text=True, env=env).returncode == 0: return
+def check_device_sdk(env, device='ios'):
+    sdk, name = ('appletvos', 'tvOS') if device == 'tvos' else ('iphoneos', 'iOS')
+    if subprocess.run(['xcrun', '--sdk', sdk, '--show-sdk-version'], capture_output=True, text=True, env=env).returncode == 0: return
     dev = subprocess.run(['xcode-select', '-p'], capture_output=True, text=True, env=env).stdout.strip()
-    if 'CommandLineTools' in dev: raise BuildError(f'the selected developer folder is the Command Line Tools ({dev}), which have no iOS SDK: select Xcode with sudo xcode-select -s /Applications/Xcode.app')
-    raise BuildError('the iOS SDK is not installed: install the iOS platform in Xcode → Settings → Components, or with xcodebuild -downloadPlatform iOS')
+    if 'CommandLineTools' in dev: raise BuildError(f'the selected developer folder is the Command Line Tools ({dev}), which have no {name} SDK: select Xcode with sudo xcode-select -s /Applications/Xcode.app')
+    raise BuildError(f'the {name} SDK is not installed: install the {name} platform in Xcode → Settings → Components, or with xcodebuild -downloadPlatform {name}')
+
+
+def check_ios_sdk(env):   # Compatibility wrapper for callers and older tests.
+    check_device_sdk(env, 'ios')
 
 
 def check_translator(xlate, env):
@@ -1304,7 +1326,13 @@ def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
     tmp = out.with_name(out.name + '.partial'); rmtree(tmp); tmp.mkdir(parents=True); logs.mkdir(parents=True, exist_ok=True)
     if manifest.is_file(): shutil.copyfile(manifest, tmp / 'nro.tsv')   # refused-only manifests preserve the game's offline registration path too
     PROG.set(step=', '.join(mods) + (f' and {len(nros)} NROs' if nros else ''), done=0, total=len(names), unit='modules')
-    procs, logf, todo, cores = {}, {}, list(names), max(2, os.cpu_count() or 4)
+    # Keep the module rewriter under the same explicit concurrency budget as
+    # shader_split.py and dmsh_build.py.  The default remains the machine's
+    # core count, while J lets callers keep the Mac responsive (for example,
+    # J=2 for a low-impact build).
+    try: cores = max(1, int(env.get('J', str(os.cpu_count() or 4))))
+    except (TypeError, ValueError): cores = max(1, os.cpu_count() or 4)
+    procs, logf, todo = {}, {}, list(names)
     jobs = max(1, min(cores, 2 * cores // max(1, len(names))))   # patch_nso.py workers per module, so parallel rewrites don't oversubscribe
     rewrite_env = dict(env, DM_REWRITE_J=str(workers if workers is not None else jobs))
     try:
@@ -1369,11 +1397,66 @@ def decoder_host_key(host):
     return None
 
 
+def verify_host_chain(host, chain, purpose='Mac host'):
+    """Refuse a host made by another shader-chain checkout before it can run the game.
+
+    The host embeds DMSH_CHAIN as a standalone string and the shader libraries live
+    under b-<chain>.  A stale host otherwise starts normally, reports missing
+    libraries only after the first draw, and can then crash in guest code.
+    """
+    if not chain:
+        raise BuildError(f'{purpose} cannot be validated: the source tree has no DMSH_CHAIN')
+    if not host.is_file():
+        raise BuildError(f'{purpose} is missing: {host}')
+    try:
+        r = subprocess.run(['/usr/bin/strings', str(host)], capture_output=True, text=True, errors='replace')
+    except OSError as e:
+        raise BuildError(f'cannot inspect {purpose} for shader chain {chain}: {e}') from e
+    if r.returncode:
+        raise BuildError(f'cannot inspect {purpose} for shader chain {chain} (strings exit code {r.returncode})')
+    if chain in {line.strip() for line in r.stdout.splitlines()}:
+        return
+    found = sorted({line.strip() for line in r.stdout.splitlines() if re.fullmatch(r'[0-9a-f]{12}', line.strip())})
+    detail = ', '.join(found[:8]) or 'none'
+    raise BuildError(f'{purpose} {host} embeds chain(s) {detail}, but this source tree expects {chain}; rebuild it before running or packaging')
+
+
+def shader_map_keys(g):
+    """The base shader keys the host must be able to load for this profile."""
+    try:
+        text = g.table('shader_map.tsv').read_text(errors='replace')
+    except OSError as e:
+        raise BuildError(f'cannot read {g.table("shader_map.tsv")}: {e}') from e
+    return {c[3] for ln in text.splitlines() if (c := ln.split('\t')) and len(c) > 4 and c[0].endswith('.bin')}
+
+
+def verify_shader_cache(cache_root, g, chain):
+    """Validate the complete, stamped Mac shader set before a host can consume it."""
+    if not chain:
+        raise BuildError('the source tree has no DMSH_CHAIN; cannot validate shader libraries')
+    lib = cache_root / f'b-{chain}'
+    try:
+        stamp = dict(ln.split('\t', 1) for ln in (lib / 'inputs.tsv').read_text(errors='replace').splitlines() if '\t' in ln and not ln.startswith('#'))
+    except OSError as e:
+        raise BuildError(f'Mac shader cache for chain {chain} is missing its inputs.tsv at {lib}: {e}') from e
+    if stamp.get('game') != g.id:
+        raise BuildError(f'Mac shader cache {lib} belongs to {stamp.get("game", "an unknown game")}, not {g.id}')
+    if not stamp.get('inputs'):
+        raise BuildError(f'Mac shader cache {lib} has no profile input stamp; rerun the complete shader build')
+    keys = shader_map_keys(g)
+    missing = [key for key in sorted(keys) if not (lib / f'{key}_b.metallib').is_file()]
+    if missing:
+        sample = ', '.join(missing[:4])
+        raise BuildError(f'Mac shader cache {lib} is incomplete: {len(missing)} of {len(keys)} base libraries are missing ({sample}); rerun the complete shader build')
+    return lib
+
+
 def build_mac_host(repo, out, env, logs, g):
     """The Mac host for the profile, built into out: dm/host's own compile line (make -n) with the output moved, since make takes no target path with spaces and dm/host/dmhost may be another build's.
     Reused when the compile line and its inputs (the source files of HOST_DIRS, the chain header dm/gfx/nvn/dmsh_chain.h among them, the profile header make generates, libvpx, dav1d and the third-party headers, the compiler
     and the macOS SDK) are as at the last build into out. The host runs the game's own arm64 code natively, so an Intel Mac stops here (GitHub issue #54)"""
     if not apple_silicon(): raise BuildError('this step boots the game in the Mac host, which runs the game\'s own arm64 code natively: it needs a Mac with Apple silicon, and this Mac has an Intel processor')
+    chain = chain_of(repo)
     host = repo / 'dm/host'
     run(['make', '-s', f'GAME={g.id}', f'gen/{g.id}/game_profile.h', 'gen/vpx/libvpx.a', 'gen/dav1d/libdav1d.a', 'host_msl'], logs / 'mac_host_make.log', env=env, cwd=host)
     dry = subprocess.run(['make', '-n', '-B', f'GAME={g.id}', 'dmhost'], env=env, cwd=host, capture_output=True, text=True)
@@ -1390,9 +1473,12 @@ def build_mac_host(repo, out, env, logs, g):
     # Retain every other host build input, including any other header content. Bind the identity to the built binary so a replaced/custom host cannot inherit it.
     chain_text = re.sub(r'(?m)^#define DMSH_CHAIN "[^"]*"$', '#define DMSH_CHAIN "<chain>"', chain.read_text()) if chain.is_file() else None
     decoder = fingerprint('oodle-host-v1', common, ('files', [p for p in srcs if p != chain]), chain_text)
-    if out.is_file() and reused(kf, key) is not None and decoder_host_key(out) == decoder: return out
+    if out.is_file() and reused(kf, key) is not None and decoder_host_key(out) == decoder:
+        verify_host_chain(out, chain)
+        return out
     rmtree(kf); out.parent.mkdir(parents=True, exist_ok=True)
     run(cmd, logs / 'mac_host_build.log', env=env, cwd=host)
+    verify_host_chain(out, chain)
     record = out.with_name(out.name + '.decoder.json')
     part = record.with_suffix('.json.partial')
     part.write_text(json.dumps({'format': 1, 'binary': fingerprint(('files', [out])), 'inputs': decoder}) + '\n')
@@ -1439,16 +1525,20 @@ def capture_glslc(repo, dirs, pkg_ver, patched, work, env, logs, g):
     if todo != [pkg_ver]: raise BuildError(f'the run-time shader capture runs the packed version {pkg_ver}\'s code; {", ".join(v for v in todo if v != pkg_ver)} needs a capture of its own')
     PROG.set(step='building the Mac host')
     host = build_mac_host(repo, work / 'tools/dmhost', env, logs, g)
-    d = dirs[pkg_ver]; cap, rd, log = d / 'glslc_capture.partial', work / 'tmp/glslc_run', logs / 'glslc_capture.log'
-    rmtree(cap); rmtree(rd)
+    d = dirs[pkg_ver]; cap, dump, rd, log = d / 'glslc_capture.partial', d / 'nvn_shdump.partial', work / 'tmp/glslc_run', logs / 'glslc_capture.log'
+    rmtree(cap); rmtree(dump); rmtree(rd)
     for s in ('save', 'temp'): (rd / s).mkdir(parents=True)
     # Only builds with no required captures can prove offline coverage. An empty map exposes submitted keys even if a previous split knows them.
     shmap = g.table('shader_map.tsv')
     if not want:
         shmap = rd / 'shader_map.tsv'
         shmap.write_text('# GLSLC capture: observe submitted shaders\n')
-    # everything the run writes stays in <id>_build (DM_ROOT is already there): a fresh save and temporary storage, no shader libraries yet, the observation map (the host looks beside itself by default)
-    henv = dict(env, DM_ROMFS=str(rfs.source(d)), DM_SAVE=str(rd / 'save'), DM_TEMP=str(rd / 'temp'), DM_MSL_DIR=str(rd / 'msl'), DM_NVN_SHMAP=str(shmap), DM_GLSLC_CAPTURE=str(cap), DM_KEYS=GLSLC_KEYS)
+    # everything the run writes stays in <id>_build (DM_ROOT is already there): a fresh save and temporary storage, no shader libraries yet, the profile's shader map (the host looks beside itself by default)
+    # Keep the NVN programs the host sees before the final shader split. Some games advertise
+    # GLSLC in their modules but do not call it during headless boot; these records still make
+    # a useful provisional seed and let the final build compile the real boot route.
+    henv = dict(env, DM_ROMFS=str(rfs.source(d)), DM_SAVE=str(rd / 'save'), DM_TEMP=str(rd / 'temp'), DM_MSL_DIR=str(rd / 'msl'), DM_NVN_SHMAP=str(shmap), DM_GLSLC_CAPTURE=str(cap), DM_NVN_SHDUMP=str(dump), DM_KEYS=GLSLC_KEYS)
+    dump.mkdir(parents=True, exist_ok=True)
     PROG.set(step='booting the game', done=0, total=len(want) if want else None, unit='shaders')
     say(f'booting the game in the Mac host to capture the shaders it compiles at run time → {d / "glslc_capture"}')
     t0 = time.time()
@@ -1458,23 +1548,34 @@ def capture_glslc(repo, dirs, pkg_ver, patched, work, env, logs, g):
     rc = boot_mac(host, patched, henv, rd, log, GLSLC_SECS, done)
     got = glslc_done(cap)
     if rc is not None and not (want and got >= want): host_stopped(log, rc, time.time() - t0)
+    observed = None
     if not want and not got and rc is None and not any(cap.glob('*.glslc')):
         text = log.read_text(errors='replace')
         observed = set(re.findall(r'\[RED\] shader ([0-9a-f]{16}) is not in the shader map', text))
         if observed and '[RED] glslc:' not in text:
-            rmtree(cap); rmtree(rd)
-            PROG.end(f'no run-time outputs captured, {len(observed)} submitted shader keys to check against the offline split')
             say('the GLSL/import heuristic can also select a compiler used only on cache misses. The build continues only if the offline split covers every shader observed in this boot. Later gameplay is unverified')
-            return observed
+    dumped = {n[:-4] for n in os.listdir(dump) if n.endswith('.ctl')} if dump.is_dir() else set()
+    seeded = bool(shader_map_keys(g))
     if not got or (want and not got >= want):
-        PROG.end(ok=False)
-        with open(log, errors='replace') as f: tail = ''.join(collections.deque(f, maxlen=40)).rstrip('\n')
-        PROG.say(f'---- last lines of {log} ----\n' + tail)
-        raise BuildError(f'captured only {len(got)} run-time shaders'
-                         + (f', the profile needs {len(want)}' if want else '') + f' (host output: {log})')
+        if not want and (observed or dumped or seeded):
+            source = (f'{len(observed)} submitted shader keys to check against the offline split' if observed else
+                      f'{len(dumped)} NVN programs from the boot route' if dumped else 'the existing provisional shader seed')
+            PROG.say(f'[RED] captured no GLSLC outputs; keeping {source} for the provisional split')
+        else:
+            PROG.end(ok=False)
+            with open(log, errors='replace') as f: tail = ''.join(collections.deque(f, maxlen=40)).rstrip('\n')
+            PROG.say(f'---- last lines of {log} ----\n' + tail)
+            raise BuildError(f'captured only {len(got)} run-time shaders'
+                             + (f', the profile needs {len(want)}' if want else '') + f' (host output: {log})')
     if want and got - want: say(f'[RED] captured files the profile\'s shader map does not name: {", ".join(sorted(got - want))}')
-    swap_in(cap, d / 'glslc_capture'); rmtree(rd)
-    PROG.end(f'{len(got)} shaders in {hms(time.time() - t0)}')
+    if got: swap_in(cap, d / 'glslc_capture')
+    else: rmtree(cap)
+    if dumped:
+        swap_in(dump, d / 'nvn_shdump'); env['DM_NVN_SHDUMP'] = str(d / 'nvn_shdump')
+    else: rmtree(dump)
+    rmtree(rd)
+    PROG.end(f'{len(got)} GLSLC + {len(dumped)} NVN dump programs in {hms(time.time() - t0)}' if dumped else f'{len(got)} shaders in {hms(time.time() - t0)}')
+    return observed
 
 
 def check_glslc_coverage(observed, g):
@@ -1902,6 +2003,7 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
         for setting, folder, pattern in (('DM_GLSLC_CAPTURE', 'glslc_capture', '*.glslc'), ('DM_UE_SHADERS', 'ue_shaders', '*.ushaderbytecode')):
             capture = Path(env.get(setting) or r.parent / folder)
             inputs += [('stat', capture) if provisional else ('files', sorted(capture.glob(pattern)))]   # its files, not where it is: the same build reached through a moved folder or a link keeps its split
+    if env.get('DM_NVN_SHDUMP'): inputs.append(('stat', Path(env['DM_NVN_SHDUMP'])))
     inputs += [item for r in dlc_roms for item in (('dlc', Path(r).name), ('stat', r))]   # DLC has no registered module build to pin its contents: include its index and re-extraction times, even when file sizes stay the same
     if oodle:   # a host or rewriter fix can change what the game's decoder produces
         PROG.set(step='building the Mac host for the game\'s Oodle decoder'); env = dict(env, **oodle())
@@ -2026,9 +2128,10 @@ def spirv_cross(repo, env=None):   # resolve the same selection the shader tools
     return Path(shutil.which(selected, path=env.get('PATH')) or selected)
 
 
-def toolchain(repo, env=None):   # Metal is a separate Xcode download: its version and SDK must invalidate reuse too
+def toolchain(repo, env=None, device='ios'):   # Metal is a separate Xcode download: its version and SDK must invalidate reuse too
+    device_sdk = 'appletvos' if device == 'tvos' else 'iphoneos'
     return (('cmd', ['xcodebuild', '-version']), ('files', [spirv_cross(repo, env)]),
-            *(('cmd', ['xcrun', '-sdk', sdk, *args]) for sdk in ('macosx', 'iphoneos')
+            *(('cmd', ['xcrun', '-sdk', sdk, *args]) for sdk in ('macosx', device_sdk)
               for args in (['metal', '--version'], ['metallib', '--version'], ['--show-sdk-version'], ['--show-sdk-build-version'])))
 
 
@@ -2040,8 +2143,8 @@ def prune_stale_chains(sh, chain):
     b-<12 hex digits> go (the key files with .key, the Mac's with a mac- prefix), never another entry. A removal that fails is a [RED] line, not an error: the build is done, and the next one tries
     again. Returns the chain versions removed"""
     def listing(d, pat): return [d / n for n in (os.listdir(d) if d.is_dir() else []) if re.fullmatch(pat, n) and n not in (f'b-{chain}', f'b-{chain}.key', f'mac-b-{chain}.key')]
-    old = [p for d in (sh / 'cache', sh / 'ios') for p in listing(d, r'b-[0-9a-f]{12}') if p.is_dir()]
-    old += [p for d, pat in ((sh / 'ios', r'b-[0-9a-f]{12}\.key'), (sh, r'mac-b-[0-9a-f]{12}\.key')) for p in listing(d, pat) if p.is_file()]
+    old = [p for d in (sh / 'cache', sh / 'ios', sh / 'tvos') for p in listing(d, r'b-[0-9a-f]{12}') if p.is_dir()]
+    old += [p for d, pat in ((sh / 'ios', r'b-[0-9a-f]{12}\.key'), (sh / 'tvos', r'b-[0-9a-f]{12}\.key'), (sh, r'mac-b-[0-9a-f]{12}\.key')) for p in listing(d, pat) if p.is_file()]
     gone, size = [], 0
     for p in old:
         try: n = tree_size(p)[1] if p.is_dir() else p.stat().st_size; rmtree(p)
@@ -2102,16 +2205,19 @@ def stale_shaders(py, repo, env, lib_dirs, chain, g):
     return None
 
 
-def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False):
-    """The iOS shader libraries (dmsh_build.py, which also builds the Mac's into sh/cache when the build wants them), or with mac only the Mac's (a Mac-only build: no IOSOUT). Returns the folder the host takes
+def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, device='ios'):
+    """The Apple-device shader libraries (dmsh_build.py, which also builds the Mac's into sh/cache when the build wants them), or with mac only the Mac's (a Mac-only build: no IOSOUT). Returns the folder the host takes
     them from. Reused when the shader package (pkg_key, its content; None never reuses) and the chain's tools, translator binaries, profile and compilers are as at the last successful build:
     dmsh_build.py would only restore every shader from its cache (63,000 for Breath of the Wild: about 100 s). The key of the iOS libraries is sh/ios/b-<chain>.key, that of the Mac's
     sh/mac-b-<chain>.key (not in sh/cache, whose b-* entries dmsh_build.py reads as library folders). Each target writes only its own key (an iOS build that keeps a Mac build's libraries, both); either is taken only
     while the Mac sources and reflection carry a full build's stamp (inputs.tsv) for c1_full.tsv and cb_extent.tsv to name (chain_tables).
-    Switching targets translates again (the per-shader keys include the iOS compile convention); the Metal compile cache (dmsh_mtlcache.py) reuses previously compiled MSL for that target.
+    Switching targets translates again (the per-shader keys include the device compile convention); the Metal compile cache (dmsh_mtlcache.py) reuses previously compiled MSL for that target.
     After success the libraries of other chain versions and the cache entries this chain's build did not use are removed (prune_stale_chains, prune_shader_cache)"""
-    ios, log = sh / 'ios', logs / 'dmsh_build.log'
-    PROG.stage('Mac shaders' if mac else 'iOS shaders')
+    device_dir = sh / ('tvos' if device == 'tvos' else 'ios')
+    device_sdk = 'appletvos' if device == 'tvos' else 'iphoneos'
+    device_label = 'tvOS' if device == 'tvos' else 'iOS'
+    ios, log = device_dir, logs / 'dmsh_build.log'
+    PROG.stage('Mac shaders' if mac else f'{device_label} shaders')
     chain = chain_of(repo)
     out = sh / 'cache' if mac else ios
     libs, kf, kmac = out / f'b-{chain}', ios / f'b-{chain}.key', sh / f'mac-b-{chain}.key'
@@ -2119,11 +2225,12 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False):
     if not pso_pairs.is_file(): pso_pairs = sh / 'pso_pairs.tsv'   # the split's copy is a shader input too (vs_pad)
     if pkg_key:
         PROG.set(step='checking the inputs')
-        key = fingerprint(pkg_key, ('files', chain_files(repo)), ('stat', xlate.parent), ('files', profile_files(g)), ('files', [pso_pairs]), *toolchain(repo, env), str(xlate),
+        key = fingerprint(pkg_key, ('files', chain_files(repo)), ('stat', xlate.parent), ('files', profile_files(g)), ('files', [pso_pairs]), *toolchain(repo, env, device), str(xlate),
                           {k: env.get(k) for k in ('XLATE_DEBUG', 'XLATE_REDUCED')}, env=env)
         note = next((n for k in ((kmac, kf) if mac else (kf,)) if (n := reused(k, key)) is not None), None)
         # the libraries are the last build's, so are tables that name their stamp; a missing or stale one is made from that build's Mac outputs, and without them the step runs again
         if next(libs.glob('*_b.metallib'), None) and note is not None and chain_tables(py, repo, sh, env, logs, g, chain):
+            verify_shader_cache(sh / 'cache', g, chain)
             prune_stale_chains(sh, chain); prune_shader_cache(sh, chain)
             PROG.end(f'{note}, reused (inputs unchanged)'); return out
     else: key = None
@@ -2139,7 +2246,10 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False):
     # a stale key keeps no old library, and restores only the targets it builds. The Metal compile cache gives back every
     # library whose MSL was compiled before.
     keep_mac = not mac and next((sh / 'cache' / f'b-{chain}').glob('*_b.metallib'), None) is not None
-    benv = dict(env, XLATE=str(xlate), IOSOUT=str(ios), DMSH_TARGETS='mac' if mac else 'mac,ios' if keep_mac else 'ios')
+    device_target = 'tvos' if device == 'tvos' else 'ios'
+    benv = dict(env, XLATE=str(xlate), IOSOUT=str(ios),
+                DMSH_TARGETS='mac' if mac else f'mac,{device_target}' if keep_mac else device_target,
+                DM_METAL_SDK=device_sdk)
     if ALLOW_OTHER_METAL: benv['DM_ALLOW_OTHER_METAL'] = '1'
     if mac: del benv['IOSOUT']   # dmsh_build.py builds the iOS libraries only with IOSOUT
     try: stale = stale_shaders(py, repo, env, [sh / 'cache'] if mac else [sh / 'cache', ios] if keep_mac else [ios], chain, g)
@@ -2152,7 +2262,8 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False):
     run([py, repo / 'dm/gfx/tools/own_compilers.py', sh / 'pkg', sh / 'cache'], log, env=benv)
     PROG.watch(None)
     if not chain_tables(py, repo, sh, env, logs, g, chain): raise BuildError(f'no stamped Mac shader outputs in {sh / "cache" / f"b-{chain}"} (inputs.tsv): dmsh_build.py did not finish a full build')
-    what = 'Mac' if mac else 'iOS'
+    verify_shader_cache(sh / 'cache', g, chain)
+    what = 'Mac' if mac else device_label
     n = sum(1 for _ in libs.glob('*_b.metallib')) if libs.is_dir() else 0
     if n == 0: raise BuildError(f'no {what} shader libraries in {libs}')
     say(f'{n} {what} shader libraries ({libs})')
@@ -2202,45 +2313,47 @@ def shader_regressions(py, repo, lib_dir, chain, logs):
                      'ALLOW_SHADER_REGRESSIONS = True (--allow-shader-regressions) packs the app without those shaders')
 
 
-def layer_shaders(py, repo, api, name, roots, sh, key, logs, env, mac):
-    """What build_vk_shaders and build_gl_shaders share: dm/gfx/tools/<api>_shaders.py on the roots → sh/<api>/ for the Mac and, unless mac (a Mac-only build), sh/ios/<api>/ for the iPhone.
+def layer_shaders(py, repo, api, name, roots, sh, key, logs, env, mac, device='ios'):
+    """What build_vk_shaders and build_gl_shaders share: dm/gfx/tools/<api>_shaders.py on the roots → sh/<api>/ for the Mac and, unless mac (a Mac-only build), sh/ios/<api>/ or sh/tvos/<api>/ for the device.
     Returns the folder the host (DM_MSL_DIR) or build_ipa.sh (MSL_IOS) takes the libraries from. key: the inputs' fingerprint (None never reuses). The iOS libraries' key is sh/ios/<api>.key,
     the Mac's sh/<api>.key, which an iOS build writes too (it builds both), so a Mac-only build is reused after either; an iOS build after a Mac-only one translates again.
     Otherwise the old output is deleted first, so a failed run leaves nothing for build_ipa.sh or the host to pick up; the translator's temporary files go to WORK (on the NSP folder's volume)"""
-    ios = sh / 'ios'; out = sh if mac else ios
-    kf, kmac, lib, log = ios / f'{api}.key', sh / f'{api}.key', out / api / f'{api}_shaders.metallib', logs / f'{api}_shaders.log'
+    device_dir = sh / ('tvos' if device == 'tvos' else 'ios')
+    out = sh if mac else device_dir
+    kf, kmac, lib, log = device_dir / f'{api}.key', sh / f'{api}.key', out / api / f'{api}_shaders.metallib', logs / f'{api}_shaders.log'
     note = next((n for k in ((kmac, kf) if mac else (kf,)) if (n := reused(k, key)) is not None), None) if key else None
     if lib.is_file() and note is not None:
         PROG.end(f'{note}, reused (inputs unchanged)'); return out
     PROG.set(step='translating')
     rmtree(kmac); rmtree(sh / api)
-    if not mac: rmtree(kf); rmtree(ios / api)
-    run([py, repo / f'dm/gfx/tools/{api}_shaders.py', *roots, sh] + ([] if mac else ['--ios', ios]), log, env=dict(env, TMPDIR=env['WORK']))
-    if not lib.is_file(): raise BuildError(f'no {"Mac" if mac else "iOS"} {name} shader library in {lib.parent}')
-    m = re.search(r'macosx: (\d+)' if mac else r'iphoneos: (\d+)', log.read_text(errors='replace'))
-    note = f'{int(m.group(1)):,} shaders for the Mac' + ('' if mac else ' and iOS') if m else ''
+    if not mac: rmtree(kf); rmtree(device_dir / api)
+    run([py, repo / f'dm/gfx/tools/{api}_shaders.py', *roots, sh] + ([] if mac else ['--ios', device_dir]), log, env=dict(env, TMPDIR=env['WORK'], DM_METAL_SDK='appletvos' if device == 'tvos' else 'iphoneos'))
+    if not lib.is_file(): raise BuildError(f'no {"Mac" if mac else ("tvOS" if device == "tvos" else "iOS")} {name} shader library in {lib.parent}')
+    sdk_name = 'appletvos' if device == 'tvos' else 'iphoneos'
+    m = re.search(r'macosx: (\d+)' if mac else rf'{sdk_name}: (\d+)', log.read_text(errors='replace'))
+    note = f'{int(m.group(1)):,} shaders for the Mac' + ('' if mac else f' and {"tvOS" if device == "tvos" else "iOS"}') if m else ''
     if key:
         for k in (kmac,) if mac else (kf, kmac): k.write_text(f'{key}\n{note}\n')
     PROG.end(note)
     return out
 
 
-def build_vk_shaders(py, repo, roots, sh, env, logs, g, reuse=True, mac=False, provisional=False):
+def build_vk_shaders(py, repo, roots, sh, env, logs, g, reuse=True, mac=False, provisional=False, device='ios'):
     """A Vulkan game's SPIR-V shaders (roots: the RomFS, and a run-time capture folder) → one Metal library each for the Mac (sh/vk/) and the iPhone (sh/ios/vk/, what build_ipa.sh takes from MSL_IOS;
     not with mac), replacing the NVN split and chain build (layer_shaders). Reused when the roots (paths and sizes), the tools, the profile and the compilers are as at the last successful run (reuse False: never)"""
     PROG.stage('Vulkan shaders', step='checking the inputs')
-    key = fingerprint(*[('stat' if provisional else 'tree', r) for r in roots], ('files', tool_files(repo)), ('files', profile_files(g)), *toolchain(repo, env), env=env) if reuse else None
-    return layer_shaders(py, repo, 'vk', 'Vulkan', roots, sh, key, logs, env, mac)
+    key = fingerprint(*[('stat' if provisional else 'tree', r) for r in roots], ('files', tool_files(repo)), ('files', profile_files(g)), *toolchain(repo, env, device), env=env) if reuse else None
+    return layer_shaders(py, repo, 'vk', 'Vulkan', roots, sh, key, logs, env, mac, device)
 
 
-def build_gl_shaders(py, repo, roots, sh, env, logs, g, reuse=True, mac=False, provisional=False):
+def build_gl_shaders(py, repo, roots, sh, env, logs, g, reuse=True, mac=False, provisional=False, device='ios'):
     """An OpenGL game's GLSL sources (roots: the RomFS, main, a run-time capture folder) → one Metal library each for the Mac (sh/gl/) and the iPhone (sh/ios/gl/, what build_ipa.sh takes from MSL_IOS;
     not with mac), replacing the NVN split and chain build, as build_vk_shaders does for a Vulkan game; glslang (glslangValidator) compiles the GLSL to SPIR-V for spirv-cross"""
     PROG.stage('GL shaders', step='checking the inputs')
     if not shutil.which('glslangValidator', path=env['PATH']): raise BuildError('glslangValidator not found (brew install glslang): it compiles an OpenGL game\'s GLSL shaders')
-    key = fingerprint(*[('stat' if provisional else 'tree', r) if Path(r).is_dir() else ('files', [r]) for r in roots], ('files', tool_files(repo)), ('files', profile_files(g)), *toolchain(repo, env),
+    key = fingerprint(*[('stat' if provisional else 'tree', r) if Path(r).is_dir() else ('files', [r]) for r in roots], ('files', tool_files(repo)), ('files', profile_files(g)), *toolchain(repo, env, device),
                       ('cmd', ['glslangValidator', '--version']), env=env) if reuse else None
-    return layer_shaders(py, repo, 'gl', 'GL', roots, sh, key, logs, env, mac)
+    return layer_shaders(py, repo, 'gl', 'GL', roots, sh, key, logs, env, mac, device)
 
 
 class IpaWatch:
@@ -2307,14 +2420,32 @@ def env_file_pairs(path):   # an environment file's switches (one KEY=VALUE per 
     return out
 
 
-def build_env_file(work, env_file, motion):
-    """The environment file the build bakes in (the iOS app's bundled dm/env.txt, the Mac app's, the Mac run command's switches): the --env-file / DM_ENV_FILE one as it is, or, for a build
-    without motion (MOTION / --no-motion), its switches plus DM_MOTION=0 in <id>_build/build_env.txt"""
-    if motion: return env_file
+def build_env_file(work, env_file, motion, gfx):
+    """Return the environment file shared by Mac apps, iOS apps and Mac runs.
+
+    NVN builds get bounded global defaults for the AOT/prewarm path unless the
+    caller supplied those switches explicitly. The generated file is bundled
+    by both platform packagers, while a player's launch/Documents environment
+    still takes precedence over it. ``DM_MOTION=0`` is handled here too so
+    the existing no-motion behavior remains one shared path.
+    """
     pairs = env_file_pairs(env_file) if env_file else {}
-    pairs['DM_MOTION'] = '0'
+    changed = False
+    if gfx == 'nvn':
+        for key, value in (('DM_PSO_PREBUILD_THREADS', '2'), ('DM_PSO_PREPARE_THREADS', '2')):
+            if key not in pairs:
+                pairs[key] = value
+                changed = True
+    if not motion:
+        if pairs.get('DM_MOTION') != '0': changed = True
+        pairs['DM_MOTION'] = '0'
+    if not changed:
+        return env_file
+    if not pairs:
+        return None
     f = work / 'build_env.txt'
-    f.write_text(''.join(f'{k}={v}\n' for k, v in pairs.items()))
+    f.write_text('# NXNative bounded AOT defaults; player environment overrides this file.\n'
+                 + ''.join(f'{k}={v}\n' for k, v in pairs.items()))
     return str(f)
 
 
@@ -2457,7 +2588,7 @@ def parse_args(argv):
     ap.add_argument('--romfs', choices=('bundle', 'separate'), help='bundle = the game files go into the IPA (default: the ROMFS setting, bundle); separate = they stay out of the IPA and the Xcode app: the build is small and fast, and the RomFS image '
                     'is copied to the phone once per game version with the scripts/push_romfs.sh command printed at the end (the app refuses an image of another version)')
     ap.add_argument('--prepare-xcode', action='store_true', help='prepare a per-game Xcode project and add it to the shared workspace instead of packing an IPA (requires keeping extracted files)')
-    ap.add_argument('--platform', choices=('ios', 'mac', 'mac-app'), help='ios = the IPA (or the Xcode project); mac = for development: build only what running the game on this Mac needs (the Mac shaders and the Mac host, '
+    ap.add_argument('--platform', choices=('ios', 'tvos', 'mac', 'mac-app'), help='ios = the iPhone/iPad IPA (or the Xcode project); tvos = the Apple TV IPA or Xcode project; mac = for development: build only what running the game on this Mac needs (the Mac shaders and the Mac host, '
                     'no iOS shaders, Xcode project or IPA), keep the extracted files and print the command that runs the game; mac-app = what mac builds, then a self-contained, double-clickable '
                     'Mac app of the game (default: <game name>.app in the NSP folder, -o names another) (default: the PLATFORM setting, ios)')
     ap.add_argument('--mac-sign', help='--platform mac-app: the codesign identity for the app, e.g. "Developer ID Application: <name> (<team>)" (default: the MAC_SIGN setting, else ad-hoc)')
@@ -2565,11 +2696,11 @@ def main(args=None):
     repo = find_repo(here)
     prepare_xcode = args.prepare_xcode or PREPARE_XCODE
     platform = args.platform or PLATFORM
-    if platform not in ('ios', 'mac', 'mac-app'): raise BuildError(f'PLATFORM / --platform must be ios, mac or mac-app: {platform}')
+    if platform not in ('ios', 'tvos', 'mac', 'mac-app'): raise BuildError(f'PLATFORM / --platform must be ios, tvos, mac or mac-app: {platform}')
     mac = platform in ('mac', 'mac-app')   # the Mac's shaders and host only: no iOS shaders, Xcode project or IPA (mac_run prints the command; mac-app packs a Mac app, mac_app)
     mac_pack = platform == 'mac-app'
     if args.mac_sign and not mac_pack: raise BuildError('--mac-sign signs the Mac app: it needs --platform mac-app')
-    if mac and prepare_xcode: raise BuildError(f'--prepare-xcode makes an iPhone project: it cannot be combined with --platform {platform}')
+    if mac and prepare_xcode: raise BuildError(f'--prepare-xcode makes an Apple device project: it cannot be combined with --platform {platform}')
     if mac and not apple_silicon(): raise BuildError(f'--platform {platform} runs the game in the Mac host, which runs the game\'s own arm64 code natively: it needs a Mac with Apple silicon, and this Mac has an Intel processor')
     check_native_python()
     keep = KEEP_EXTRACTED if args.keep_extracted is None else args.keep_extracted
@@ -2578,7 +2709,7 @@ def main(args=None):
     if args.xcode_workspace and not prepare_xcode: raise BuildError('--xcode-workspace requires --prepare-xcode')
     romfs_mode = args.romfs or ROMFS
     if romfs_mode not in ('bundle', 'separate'): raise BuildError(f'ROMFS / --romfs must be bundle or separate: {romfs_mode}')
-    if romfs_mode == 'separate' and mac: raise BuildError(f'--romfs separate keeps the game files off the iPhone app: it cannot be combined with --platform {platform}, which runs from the extracted files')
+    if romfs_mode == 'separate' and (mac or platform == 'tvos'): raise BuildError(f'--romfs separate is not supported for --platform {platform}; bundle the game files in the Apple TV app')
     if romfs_mode == 'separate' and not keep: raise BuildError('--romfs separate requires --keep-extracted: the image must remain available for the one-time transfer to the phone')
     nsp_dir = Path(os.path.expanduser(args.nsp_dir or NSP_DIR or ask('NSP folder: ', 'the NSP folder'))).resolve()
     if not nsp_dir.exists(): raise BuildError(f'not a folder: {nsp_dir}')
@@ -2596,7 +2727,10 @@ def main(args=None):
     env = dict(os.environ, PATH=os.pathsep.join(TOOL_PATHS + [os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')]))
     env.setdefault('USER', getpass.getuser())   # xcodegen fails without USER (Couldn't find current username)
     configure_dotnet(env)
-    env.setdefault('J', str(os.cpu_count() or 8))   # shader_split.py's and dmsh_build.py's workers (their default is 8)
+    # Keep a normal build responsive and avoid turning a shader/compiler hiccup
+    # into machine-wide pressure.  Callers can opt into a larger value with J;
+    # the diagnostic path for heavy games deliberately uses J=1 or J=2.
+    env.setdefault('J', str(max(1, min(2, os.cpu_count() or 1))))
     py = sys.executable
     want = args.title_id or TITLE_ID
     if want and not re.fullmatch(r'[0-9A-Fa-f]{16}', want): raise BuildError(f'--title-id / TITLE_ID takes a title ID, 16 hex digits: {want}')
@@ -2664,7 +2798,7 @@ def main(args=None):
     if prepare_xcode:
         sys.path.insert(0, str(repo / 'dm/ios/tools')); import xcode_projects
         try:
-            saved_signing = xcode_projects.signing_settings(project)
+            saved_signing = xcode_projects.signing_settings(project, 'DmTVOS' if platform == 'tvos' else 'DmIOS')
             # Preserve the user's selections when migrating the earlier single generated project.
             legacy_config = repo / 'dm/ios/Gen/dm.xcconfig'
             if not saved_signing and legacy_config.exists() and f'/gen/{g.id}/' in legacy_config.read_text():
@@ -2676,7 +2810,8 @@ def main(args=None):
     # DM_GAME picks the profile; DM_ROOT / WORK point at <id>_build: the tools' default paths and temporary directories all stay inside it
     env.update(DM_GAME=g.id, DM_ROOT=str(work), WORK=str(work / 'tmp'))
     logs = work / 'logs'
-    check_prereqs(env, xlate, mac)
+    env['DM_METAL_SDK'] = 'appletvos' if platform == 'tvos' else 'iphoneos'
+    check_prereqs(env, xlate, mac, platform)
     picks = pick_nsps(fam, have, versions)
 
     ex = work / 'extract'; ex.mkdir(parents=True, exist_ok=True); (work / 'tmp').mkdir(exist_ok=True)
@@ -2729,7 +2864,8 @@ def main(args=None):
     # the app name and bundle ID both come from the base NSP: the game name in its control data, and a bundle ID from its title ID; a setting / the command line overrides them
     app_name = args.app_name or APP_NAME or nacp.name(base / 'control.nacp') or (g.get('name') if dump else '')   # a dump has no control data, a NUP may have no NACP
     if not app_name and not (mac and not mac_pack): raise BuildError(f'no game name in the base extraction ({base / "control.nacp"}; an older extraction did not save it: delete extract/ and run again, or give --app-name)')
-    bundle_id = args.bundle_id or BUNDLE_ID or saved_signing.get('PRODUCT_BUNDLE_IDENTIFIER') or f'org.nxnative.{app:016x}'
+    default_bundle = f'org.nxnative.{app:016x}' + ('.tvos' if platform == 'tvos' else '')
+    bundle_id = args.bundle_id or BUNDLE_ID or saved_signing.get('PRODUCT_BUNDLE_IDENTIFIER') or default_bundle
     team_id = args.team_id or TEAM_ID or env.get('DM_TEAM_ID') or saved_signing.get('DEVELOPMENT_TEAM') or '0000000000'
     if prepare_xcode:
         try: xcode_projects.check_bundle_id(workspace, project, bundle_id)
@@ -2755,15 +2891,22 @@ def main(args=None):
             else: say('no heap check: it boots the game in the Mac host, which needs a Mac with Apple silicon; the profile keeps its guessed heap keys')
         if HEAP_CHECK and not args.no_heap_check and pg.has_va(game / 'ExeFS') and not region_checked(g, patched) and apple_silicon():   # where its address regions reach (a derived build too: the registered builds' cuts do not reach it)
             PROG.add(1); g = region_check(repo, game, patched, work, env, logs, g)
+    if mac:
+        # Compile the current host before the expensive shader split/build.  This
+        # catches source integration errors (for example an undeclared host-side
+        # symbol) before thousands of shaders have already been processed.
+        say('preflight: compiling the Mac host before the shader build')
+        build_mac_host(repo, work / 'tools/dmhost', env, logs, g)
+        say('preflight: Mac host compiled and its shader-chain stamp is valid')
     observed_glslc = capture_glslc(repo, {v: dirs[v] for v in sv}, pkg_ver, patched, work, env, logs, g) if glslc else None
     if uedec: decode_ue_shaders(repo, {v: dirs[v] for v in sv}, pkg_ver, patched, work, env, logs, g)
     sh = work / 'shader'
     if gfx == 'vulkan':   # the packed version's merged RomFS holds the SPIR-V files the game loads; a capture holds those it generates
         cap = capture_shaders(repo, game, patched, work, env, logs, g, 'vk') if vkcap else None
-        ios = build_vk_shaders(py, repo, [rfs.source(game)] + dlc_roms + ([cap] if cap else []), sh, env, logs, g, reuse=not ALLOW_DAMAGED, mac=mac, provisional=bool(provisional or derived))
+        ios = build_vk_shaders(py, repo, [rfs.source(game)] + dlc_roms + ([cap] if cap else []), sh, env, logs, g, reuse=not ALLOW_DAMAGED, mac=mac, provisional=bool(provisional or derived), device=platform)
     elif gfx == 'gl':   # the GLSL sources in the packed version's archives and in its main (the game compiles them at run time; the host finds each by the hash of its text), and a capture of those it puts together
         cap = capture_shaders(repo, game, patched, work, env, logs, g, 'gl') if glcap else None
-        ios = build_gl_shaders(py, repo, [rfs.source(game), game / 'ExeFS/main'] + dlc_roms + ([cap] if cap else []), sh, env, logs, g, reuse=not ALLOW_DAMAGED, mac=mac, provisional=bool(provisional or derived))
+        ios = build_gl_shaders(py, repo, [rfs.source(game), game / 'ExeFS/main'] + dlc_roms + ([cap] if cap else []), sh, env, logs, g, reuse=not ALLOW_DAMAGED, mac=mac, provisional=bool(provisional or derived), device=platform)
     else:
         # Trinity packs and legacy Unreal paks: the split decodes them with the packed version's own decoder (Oodle, LZ5), in the Mac host built for the profile
         oodle = (lambda: {'DM_OODLE_HOST': str(build_mac_host(repo, work / 'tools/dmhost', env, logs, g)), 'DM_OODLE_MODULES': str(patched)}) if src['oodle_packs'][0] or src['ue_legacy'][0] else None
@@ -2783,10 +2926,10 @@ def main(args=None):
         derive_compute = (lambda: derive_shader_tables('the reader decoded additional compute kernels from this registered build')) if not own else None
         pkey = split_shaders(py, repo, [rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own, oodle, dlc_roms, derive_dlc, derive_compute)
         if observed_glslc is not None: check_glslc_coverage(observed_glslc, g)
-        ios = build_shaders(py, repo, sh, xlate, env, logs, g, pkey, mac)
+        ios = build_shaders(py, repo, sh, xlate, env, logs, g, pkey, mac, platform)
     icon = next((d / 'icon.jpg' for d in (game, base) if (d / 'icon.jpg').exists()), None)   # the game icon nx_extract saved from the control data (English, icon.jpg); the packed version's first, then the base game's
     motion = MOTION if args.motion is None else args.motion
-    env_file = build_env_file(work, args.env_file or DM_ENV_FILE, motion)
+    env_file = build_env_file(work, args.env_file or DM_ENV_FILE, motion, gfx)
     if not motion: say('motion (gyro): off, DM_MOTION=0 is built in (on the iPhone, DM_MOTION=1 in the app\'s Documents/env.txt turns it back on)')
     if mac_pack:   # a Mac app: the Mac host, then the app packed from it and the build's files
         host, font = mac_host(py, repo, work, env, logs, g)
@@ -2809,7 +2952,7 @@ def main(args=None):
 
     if not prepare_xcode and free_gb(out_ipa.parent) < 5: raise BuildError(f'less than 5 GB free on the volume of {out_ipa.parent}')
     say('preparing the Xcode project' if prepare_xcode else f'building the IPA → {out_ipa}')
-    ipa_env = dict(env, GAME=g.id, W=str(work / 'ipa'), PATCHED=str(patched), ROMFS=str(rfs.source(game)), MSL_IOS=str(ios), GFXAPI=gfx, FONT_PY=py, DM_DISPLAY_NAME=app_name, DM_BUNDLE_ID=bundle_id, AOC=str(aoc or ''), DM_XCODE_DERIVED_DATA=str(work / 'xcode-derived-data'), DM_TEAM_ID=team_id, DM_LANG=lang)
+    ipa_env = dict(env, GAME=g.id, W=str(work / 'ipa'), PATCHED=str(patched), ROMFS=str(rfs.source(game)), MSL_DEVICE=str(ios), MSL_IOS=str(ios), DM_PLATFORM=platform, GFXAPI=gfx, FONT_PY=py, DM_DISPLAY_NAME=app_name, DM_BUNDLE_ID=bundle_id, AOC=str(aoc or ''), DM_XCODE_DERIVED_DATA=str(work / 'xcode-derived-data'), DM_TEAM_ID=team_id, DM_LANG=lang)
     if prepare_xcode: ipa_env['DM_XCODE_PROJECT_DIR'] = str(project.parent)
     separate = romfs_mode == 'separate'
     if separate: ipa_env['DM_COPY_ROMFS'] = 'NO'; say('game files: separate (DM_COPY_ROMFS=NO), left out of the app; the image stays at ' + str(rfs.source(game)))
@@ -2821,7 +2964,8 @@ def main(args=None):
     ipa_env['DM_SHOW_FPS'] = '1' if show_fps else '0'
     gpus = (args.gpu or PSO_GPUS).strip()
     if gpus and not re.fullmatch(r'none|(applegpu_)?g\w+(,(applegpu_)?g\w+)*', gpus): raise BuildError(f'--gpu / PSO_GPUS takes GPU architectures such as g18p,g17p, or none: {gpus}')
-    if not gpus: gpus = (','.join(g.get('pso_gpu', '').split()) or 'g18p') if g.get('pso_mtl4', 'off') == 'on' else 'none'   # by the profile's pso_gpu (for --gpu: the tokens joined with commas), else g18p for pso_mtl4 on, as build_ipa.sh decides without DM_PSO_GPUS: only the Metal 4 path reads the archive on iOS
+    if not gpus:
+        gpus = 'none' if platform == 'tvos' else ((','.join(g.get('pso_gpu', '').split()) or 'g18p') if g.get('pso_mtl4', 'off') == 'on' else 'none')
     ipa_env['DM_PSO_GPUS'] = gpus
     if gfx == 'nvn': say(f'pipeline archive: {"none, the device builds the bases on its first start if it takes the Metal 4 path (--gpu g18p builds one)" if gpus == "none" else gpus + " (made on this Mac with metal-tt; --gpu none leaves it out)"}')
     if show_fps: say('frame-rate counter: on (DM_SHOW_FPS=0 in the app\'s Documents/env.txt turns it off)')
@@ -2836,7 +2980,7 @@ def main(args=None):
         say(f'game project: {project}')
         say(f'Xcode derived data: {work / "xcode-derived-data"}')
         if separate: say_push_romfs(rfs.source(game), bundle_id)
-        say('choose the game scheme in Xcode, select your Team and iPhone or iPad, then Run (Release)')
+        say('choose the game scheme in Xcode, select your Team and Apple TV, then Run (Release)' if platform == 'tvos' else 'choose the game scheme in Xcode, select your Team and iPhone or iPad, then Run (Release)')
         report_profile_status(g, reg, pkg_ver, derived, provisional, 'Xcode project', patched)
         return
     watch = IpaWatch(repo, work / 'ipa', out_ipa)
@@ -2856,6 +3000,9 @@ def cli(argv):   # returns the exit code: 0 done, 1 error, 130 interrupted
     # main points DM_GAMES_DIR (and DM_GAMES_FIRST) at this run's provisional or derived profile for its tools. Spyder runs the next F5 in the same process, where the game lookup
     # (game.py by_title) then found that profile and took it for a registered one: ASTRAL CHAIN's second run skipped every provisional step and stopped with no dmsh_chain.h
     environ = dict(os.environ)
+    old_sigterm = signal.getsignal(signal.SIGTERM)
+    def sigterm(_signum, _frame): raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, sigterm)
     try:
         main(parse_args(argv))
     except (BuildError, nso.Error) as e:   # a damaged module, read in this process (the survey, the heap and region checks), stops the build the same way
@@ -2867,6 +3014,7 @@ def cli(argv):   # returns the exit code: 0 done, 1 error, 130 interrupted
         if PROG.mode == 'json': PROG.say(f'[RED] {type(e).__name__}: {e}')
         raise
     finally:
+        signal.signal(signal.SIGTERM, old_sigterm)
         PROG.close(ok=False)   # stop the ticker
         for k in os.environ.keys() - environ.keys(): del os.environ[k]
         os.environ.update(environ)

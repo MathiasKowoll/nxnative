@@ -33,6 +33,20 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** two budgets, each 16 times the file. The first counts each member by what it takes up in its archive, so it still stops members that overlap. The second counts what Yaz0 members expand to, charged from the Yaz0 header before the member is decoded. Each bound stays what it was, so the work is still within a small multiple of 16 times the file. Charging only the stored size, with no second budget, would have let the work grow by the Yaz0 ratio (about 90 at most) as well. `test_split_nesting.py` covers the layout archive's shape, the fan-out corpus input, a compressed fan-out (stopped after 19 scans; 8^6 without the bounds) and a Yaz0 member that expands 87 times, stopped before it is decoded.
 - **Found on:** [Mario Kart 8 Deluxe](../../dm/games/0100152000022000/README.md) (GitHub issue #640): its race and result layout archives (`UI/<lang>/race.sarc`, `tv.sarc`, `UI/cmn/tv_result.sarc`), 14 files in 4.0.0 and 28 with 4.0.1.
 
+### Iron Galaxy IGA archives and IGZ shader resources
+
+- **Symptom:** an Iron Galaxy game has compiled NVN resources in its RomFS, but the split sees only boot-time GLSLC captures while the running game asks for shader keys that are not in the map.
+- **Cause:** the compiled resources are members of version-12 `IGA\x1a` archives, whose files and resource directories are not guaranteed to use one extension or one exact path. Each `.igz` member is an `01ZGI` resource; its shader records carry the code offset at `+0x20` and code length at `+0x704`. The control length is the valid short value at `+0x20` when present, otherwise the host key uses `0x880` bytes. The archive uses `0x800` alignment and may store raw or LZMA1 blocks; a high compression bit alone does not prove that a block is compressed.
+- **Fix:** `iga_jobs` detects the archive magic, selects candidate `.igz` members from generic shader hints in the member/archive names, and scans all members automatically only for very small (at most eight) archives made entirely of IGZ resources. Large or mixed packages remain bounded; `DM_IGA_SCAN_ALL=1` enables an explicit full scan for a package whose naming has no shader hint. `igz_shaders` emits one stage per valid record and preserves the existing single-stage pairing rules. `dm/gfx/tests/test_iga.py` covers short controls, a raw member, a non-`.pak` archive and a non-literal shader path.
+- **Found on:** Crash Bandicoot N. Sane Trilogy and Crash Team Racing Nitro-Fueled (provisional profiles).
+
+### NVN boot dumps as a provisional shader seed
+
+- **Symptom:** a survey sees `glslcCompile`, but the headless capture reaches the first screen without producing a GLSLC file; the host instead reports shader keys absent from the map.
+- **Cause:** the game may compile those boot programs through its NVN path before it reaches the code that calls GLSLC, or only after controller input. The host can still save the exact control/code pair that was handed to `nvnProgramSetShaders`.
+- **Fix:** the provisional GLSLC capture enables `DM_NVN_SHDUMP`; `nvn_dump_shaders` reads its `.ctl`/`.code` pairs into the final split. A zero-GLSLC capture is accepted only when a provisional static/dump seed already exists; a registered profile or an empty provisional capture still stops.
+- **Found on:** Crash Team Racing Nitro-Fueled (base/update survey; boot seed only, not proof of a complete race route).
+
 ### BNSH in NintendoWare archives and in main
 
 - BNSH (`BNSH\0\0\0\0` + `grsc` block at +0x60) is found inside `bfsha`, particle effects (`esetb`, VFXB), UI layouts (`blarc`), and `main` itself.
