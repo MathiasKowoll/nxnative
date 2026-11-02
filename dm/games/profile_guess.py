@@ -31,6 +31,11 @@ APP_POOL = 0xCD500000               # the application memory pool of a 4 GB Swit
 MiB = 1 << 20
 
 
+def sdk_versions(image):
+    """Version markers in both legacy and Generic-target Nintendo SDK modules."""
+    return {v.decode() for v in re.findall(rb'(?i)NintendoSDK_nnSdk-(?:Generic_)?([0-9]+(?:_[0-9]+)+)', image)}
+
+
 def glsl_sources(img):
     """Complete embedded GLSL strings, rather than a compiler's language preamble. Snowdrop ships a #version header with typedefs but no entry point, even when it uses only archived shaders.
     Three Houses embeds nine complete boot shaders. NRO callers that assemble shaders dynamically are detected separately by their glslcCompile import (build_sources)."""
@@ -96,7 +101,7 @@ def facts_of(exefs, romfs):
         m = F['mods'][p.name] = {'bid': bid, 'sizes': szs, 'bss': bss, 'far': end > 0x7000000,   # far: the patch area goes before the base (patch_nso.py FAR), the bss counts as used memory (hle_svc.c big_bss_bytes)
                                  'imports': {s for s, defined, _ in syms if not defined}, 'exports': {s for s, defined, bind in syms if defined and bind in (1, 2)},
                                  'comps': {c.decode().rsplit('-', 1)[0] for c in re.findall(rb'NintendoSDK_(?!nnSdk)\w+-[0-9_]+', img)}}
-        F['sdkver'] |= {v.decode() for v in re.findall(rb'(?i)NintendoSDK_nnSdk-([0-9_]+)', img)}   # SDK 12 spells it NintendoSdk_, SDK 16 NintendoSDK_
+        F['sdkver'] |= sdk_versions(img)
         F['comps'] |= {c.decode() for c in re.findall(rb'SDK MW\+Nintendo\+([\w]+-[0-9_]+)', img)}
         for pat, name in MARKERS:
             if pat in img: F['markers'].setdefault(name, []).append(p.name)
