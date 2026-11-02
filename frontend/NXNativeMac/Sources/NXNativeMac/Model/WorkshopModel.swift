@@ -1,5 +1,6 @@
 import Foundation
 import NXCore
+import NXRuntime
 
 extension AppModel {
     func workshopIssues(for source: GameEntry?, platform: BuildOptions.Platform) -> [String] {

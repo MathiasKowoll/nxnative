@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 import NXCore
-@testable import NXNativeMac
+import NXRuntime
 
 @Suite("Workshop process queue", .serialized)
 @MainActor struct BuildQueueTests {

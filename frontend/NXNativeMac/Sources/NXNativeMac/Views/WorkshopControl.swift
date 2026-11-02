@@ -1,3 +1,4 @@
+import NXRuntime
 import SwiftUI
 
 struct WorkshopControl: View {

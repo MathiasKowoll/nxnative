@@ -4,37 +4,39 @@ import NXCore
 import Observation
 
 /// Una comprobación del entorno, con lo que hay que hacer si falla.
-struct Check: Identifiable, Sendable {
-    enum Status: Sendable { case ok, warning, failure, info }
-    var id: String
-    var title: String
-    var status: Status
-    var detail: String
+public struct Check: Identifiable, Sendable {
+    public enum Status: Sendable { case ok, warning, failure, info }
+    public var id: String
+    public var title: String
+    public var status: Status
+    public var detail: String
 }
 
 /// Lo que nxnative necesita en este Mac, comprobado de verdad: versiones
 /// leídas de las herramientas, no supuestas.
 @MainActor @Observable
-final class Toolchain {
-    private(set) var checks: [Check] = []
-    private(set) var running = false
+public final class Toolchain {
+    public private(set) var checks: [Check] = []
+    public private(set) var running = false
     /// El python3 que usarán los builds (el elegido o el primero >= 3.12).
-    private(set) var python: String?
+    public private(set) var python: String?
     /// Un Python del sistema >= 3.12 con el que crear el entorno de la app.
-    private(set) var baseCandidate: String?
-    private(set) var missingModules: [String] = []
+    public private(set) var baseCandidate: String?
+    public private(set) var missingModules: [String] = []
     /// Herramientas que `build_ipa_from_nsp.py --platform mac-app` exige antes
     /// de tocar el dump. Se comprueban aquí para no descubrirlas a mitad del
     /// build, después de haber escrito muchos GB.
-    private(set) var missingBuildTools: [String] = []
+    public private(set) var missingBuildTools: [String] = []
     /// Dependencias con rutas fijas que exige el builder autocontenido de FC26.
-    private(set) var missingFC26Tools: [String] = []
-    private(set) var nszMissing = false
-    private(set) var metalToolchainMissing = false
-    private(set) var gpuArchitecture: String = ""
-    private(set) var repoStatus: String = ""
+    public private(set) var missingFC26Tools: [String] = []
+    public private(set) var nszMissing = false
+    public private(set) var metalToolchainMissing = false
+    public private(set) var gpuArchitecture: String = ""
+    public private(set) var repoStatus: String = ""
 
-    func refresh(_ prefs: Preferences) async {
+    public init() {}
+
+    public func refresh(_ prefs: Preferences) async {
         running = true
         defer { running = false }
         var out: [Check] = []
@@ -221,13 +223,13 @@ final class Toolchain {
         checks = out
     }
 
-    nonisolated static func sysctlInt(_ name: String) -> Int {
+    public nonisolated static func sysctlInt(_ name: String) -> Int {
         var v: Int32 = 0
         var size = MemoryLayout<Int32>.size
         return sysctlbyname(name, &v, &size, nil, 0) == 0 ? Int(v) : 0
     }
 
-    nonisolated static func executableInPath(_ name: String) -> String? {
+    public nonisolated static func executableInPath(_ name: String) -> String? {
         let path = Shell.environment()["PATH"] ?? ""
         for directory in path.split(separator: ":").map(String.init) {
             let candidate = URL(fileURLWithPath: directory).appendingPathComponent(name).path
@@ -237,7 +239,7 @@ final class Toolchain {
     }
 
     /// Identidades de firma de código del llavero, para `--mac-sign`.
-    static func signingIdentities() async -> [String] {
+    public static func signingIdentities() async -> [String] {
         let r = await Shell.run("/usr/bin/security", ["find-identity", "-v", "-p", "codesigning"])
         return r.stdout.split(separator: "\n").compactMap { line in
             guard let a = line.firstIndex(of: "\""), let b = line.lastIndex(of: "\""), a < b else { return nil }

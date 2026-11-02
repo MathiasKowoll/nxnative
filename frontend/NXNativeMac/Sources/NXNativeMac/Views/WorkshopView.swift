@@ -1,4 +1,5 @@
 import NXCore
+import NXRuntime
 import SwiftUI
 
 struct WorkshopView: View {

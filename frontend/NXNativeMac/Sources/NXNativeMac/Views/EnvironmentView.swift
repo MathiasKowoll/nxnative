@@ -1,5 +1,6 @@
 import GameController
 import NXCore
+import NXRuntime
 import SwiftUI
 
 struct EnvironmentView: View {

@@ -1,4 +1,5 @@
 import NXCore
+import NXRuntime
 import SwiftUI
 
 /// Los juegos en disco, agrupados por title ID aunque estén todos en una

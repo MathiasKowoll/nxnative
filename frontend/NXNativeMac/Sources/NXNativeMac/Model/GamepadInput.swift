@@ -3,6 +3,7 @@ import AppKit
 import Foundation
 import Observation
 import NXCore
+import NXRuntime
 
 /// Entrada del mando para la biblioteca y su atajo de salida global. Cuando se
 /// abre un juego, las acciones normales siguen perteneciendo al juego; solo

@@ -8,13 +8,13 @@ import Observation
 /// proceso responsable para que TCC le deje leer un disco externo; si lo
 /// lanzáramos como hijo nuestro, el permiso nos lo pediría a nosotros.
 @MainActor @Observable
-final class GameRunner {
-    private(set) var running: [String: NSRunningApplication] = [:]   // por title ID
-    private(set) var lastError: String?
-    private(set) var launching = Set<String>()
+public final class GameRunner {
+    public private(set) var running: [String: NSRunningApplication] = [:]   // por title ID
+    public private(set) var lastError: String?
+    public private(set) var launching = Set<String>()
     private var observer: NSObjectProtocol?
 
-    init() {
+    public init() {
         observer = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main
         ) { [weak self] note in
@@ -37,7 +37,7 @@ final class GameRunner {
         NSApp.windows.first(where: { $0.isVisible && $0.canBecomeKey })?.makeKeyAndOrderFront(nil)
     }
 
-    func isRunning(_ game: MacGameBundle) -> Bool {
+    public func isRunning(_ game: MacGameBundle) -> Bool {
         // La notificación de término de NSWorkspace se puede perder (firma
         // ad-hoc, salidas por crash): se confirma con isTerminated antes de
         // creerle al caché, si no el juego se queda «corriendo» para siempre.
@@ -57,7 +57,7 @@ final class GameRunner {
     /// Los ajustes ya están en `env.txt` de Application Support, que el
     /// lanzador lee; `extra` son variables solo para esta partida (las del
     /// entorno ganan a las del archivo).
-    func launch(_ game: MacGameBundle, extra: [String: String] = [:]) {
+    public func launch(_ game: MacGameBundle, extra: [String: String] = [:]) {
         guard launching.insert(game.titleID).inserted else { return }
         lastError = nil
         let cfg = NSWorkspace.OpenConfiguration()
@@ -75,14 +75,14 @@ final class GameRunner {
         }
     }
 
-    func resume(_ game: MacGameBundle) -> Bool {
+    public func resume(_ game: MacGameBundle) -> Bool {
         guard isRunning(game), let app = running[game.titleID] else { return false }
         app.activate(options: [.activateAllWindows])
         return true
     }
 
     /// SIGTERM al lanzador, que lo reenvía al host y sale con su código.
-    func stop(_ game: MacGameBundle) {
+    public func stop(_ game: MacGameBundle) {
         guard let app = running[game.titleID] else { return }
         kill(app.processIdentifier, SIGTERM)
     }
@@ -91,7 +91,7 @@ final class GameRunner {
     /// atajo global del mando cuando NXNative está detrás de la ventana del
     /// juego; el observador de término reactiva la biblioteca al salir.
     @discardableResult
-    func stopCurrent() -> Bool {
+    public func stopCurrent() -> Bool {
         guard let app = running.values.first(where: { !$0.isTerminated }) else { return false }
         kill(app.processIdentifier, SIGTERM)
         return true

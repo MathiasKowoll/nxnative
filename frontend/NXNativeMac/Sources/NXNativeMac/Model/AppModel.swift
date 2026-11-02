@@ -1,5 +1,6 @@
 import Foundation
 import NXCore
+import NXRuntime
 import Observation
 
 /// El estado de la app: preferencias, lo encontrado en disco y los gestores.

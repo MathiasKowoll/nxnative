@@ -5,40 +5,40 @@ import Observation
 
 /// Un build de `build_ipa_from_nsp.py`, lanzado con `--progress json`.
 @MainActor @Observable
-final class BuildJob: Identifiable {
-    enum Status: Equatable { case queued, running, succeeded, failed(Int32), cancelled, interrupted }
+public final class BuildJob: Identifiable {
+    public enum Status: Equatable { case queued, running, succeeded, failed(Int32), cancelled, interrupted }
 
-    let id: UUID
-    var workers = 1
-    var titleID: String?
+    public let id: UUID
+    public var workers = 1
+    public var titleID: String?
     var onChange: (() -> Void)?
-    let title: String
+    public let title: String
     /// La carpeta NSP del juego: de ahí salen los logs y las salidas.
-    let folder: URL
+    public let folder: URL
     /// Los argumentos de python: el script y sus opciones.
-    let arguments: [String]
+    public let arguments: [String]
     /// Ejecutable alternativo para builders externos (por ejemplo, el build.sh
     /// de FC26). nil = usar el Python del checkout de nxnative.
-    let executable: URL?
+    public let executable: URL?
     /// Carpeta de trabajo del ejecutable alternativo. nil = el checkout de nxnative.
-    let workingDirectory: URL?
+    public let workingDirectory: URL?
     /// La carpeta que enseñar al terminar (la salida, o los resultados).
-    let resultDirectory: URL?
+    public let resultDirectory: URL?
     /// `<carpeta>/<title ID>_build/logs`, donde el script deja un log por paso.
-    let logsDirectory: URL?
-    private(set) var status: Status = .queued { didSet { onChange?() } }
+    public let logsDirectory: URL?
+    public private(set) var status: Status = .queued { didSet { onChange?() } }
     private(set) var state = BuildState()
-    private(set) var stderrTail = ""
-    private(set) var started: Date?
-    private(set) var finished: Date?
+    public private(set) var stderrTail = ""
+    public private(set) var started: Date?
+    public private(set) var finished: Date?
 
     private var process: Process?
     private var previousProcessID: Int32?
     private var splitter = LineSplitter()
-    private(set) var cancellationRequested = false
+    public private(set) var cancellationRequested = false
 
-    init(title: String, folder: URL, arguments: [String], resultDirectory: URL? = nil, logsDirectory: URL? = nil,
-         executable: URL? = nil, workingDirectory: URL? = nil, id: UUID = UUID()) {
+    public init(title: String, folder: URL, arguments: [String], resultDirectory: URL? = nil, logsDirectory: URL? = nil,
+                executable: URL? = nil, workingDirectory: URL? = nil, id: UUID = UUID()) {
         self.id = id
         self.title = title
         self.folder = folder
@@ -49,7 +49,7 @@ final class BuildJob: Identifiable {
         self.workingDirectory = workingDirectory
     }
 
-    convenience init(record: WorkshopBuild) {
+    public convenience init(record: WorkshopBuild) {
         let record = record.recovered
         self.init(title: record.title, folder: record.folder, arguments: record.arguments,
                   resultDirectory: record.resultDirectory, logsDirectory: record.logsDirectory,
@@ -66,7 +66,7 @@ final class BuildJob: Identifiable {
         if let error = record.error { state.note(BuildEventParser.redPrefix + error) }
     }
 
-    var record: WorkshopBuild {
+    public var record: WorkshopBuild {
         let savedStatus: WorkshopBuild.Status
         switch status {
         case .queued: savedStatus = .queued
@@ -84,14 +84,14 @@ final class BuildJob: Identifiable {
                              processID: process?.processIdentifier ?? previousProcessID)
     }
 
-    func retryCopy() -> BuildJob {
+    public func retryCopy() -> BuildJob {
         let copy = BuildJob(title: title, folder: folder, arguments: arguments, resultDirectory: resultDirectory,
                             logsDirectory: logsDirectory, executable: executable, workingDirectory: workingDirectory)
         copy.workers = workers; copy.titleID = titleID
         return copy
     }
 
-    var earlierProcessMayBeRunning: Bool {
+    public var earlierProcessMayBeRunning: Bool {
         guard let pid = previousProcessID, pid > 0 else { return false }
         // A PID alone is not enough identity to terminate anything. Conservatively
         // refuse a retry until the old PID disappears; never signal it here.
@@ -109,12 +109,12 @@ final class BuildJob: Identifiable {
         status = .failed(-1)
     }
 
-    var isActive: Bool { status == .queued || status == .running }
-    var stages: [StageState] { state.stages }
-    var stageCount: Int { state.stageCount }
-    var messages: [BuildMessage] { state.messages }
-    var overallFraction: Double? { state.overallFraction }
-    var lastError: String? { state.lastError }
+    public var isActive: Bool { status == .queued || status == .running }
+    public var stages: [StageState] { state.stages }
+    public var stageCount: Int { state.stageCount }
+    public var messages: [BuildMessage] { state.messages }
+    public var overallFraction: Double? { state.overallFraction }
+    public var lastError: String? { state.lastError }
 
     func start(python: String, repository: URL) {
         guard status == .running, !cancellationRequested else { return }
@@ -163,7 +163,7 @@ final class BuildJob: Identifiable {
     }
 
     /// SIGINT, como un Ctrl-C: el script sale con 130 y deja lo reutilizable.
-    func cancel(reason: String? = nil) {
+    public func cancel(reason: String? = nil) {
         if let reason { append(BuildEventParser.redPrefix + reason) }
         cancellationRequested = true
         guard let process, process.isRunning else {
@@ -202,19 +202,19 @@ final class BuildJob: Identifiable {
 
 /// One bounded build at a time, with durable history and explicit recovery.
 @MainActor @Observable
-final class BuildQueue {
-    private(set) var jobs: [BuildJob] = []
-    private(set) var persistenceError: String?
-    private(set) var memoryPressure = false
-    var beforeStart: ((BuildJob) async -> String?)?
-    var onSuccess: (() -> Void)?
+public final class BuildQueue {
+    public private(set) var jobs: [BuildJob] = []
+    public private(set) var persistenceError: String?
+    public private(set) var memoryPressure = false
+    public var beforeStart: ((BuildJob) async -> String?)?
+    public var onSuccess: (() -> Void)?
     private var python: String?
     private var repository: URL?
     private var memoryMonitor: (any DispatchSourceMemoryPressure)?
     private let database: ConfigurationDatabase
     private var cancellingAll = false
 
-    init(database: ConfigurationDatabase = ConfigurationDatabase()) {
+    public init(database: ConfigurationDatabase = ConfigurationDatabase()) {
         self.database = database
         do { jobs = try database.loadBuildHistory().map(BuildJob.init(record:)) }
         catch { persistenceError = error.localizedDescription }
@@ -233,10 +233,10 @@ final class BuildQueue {
         memoryMonitor = source
     }
 
-    var active: BuildJob? { jobs.first { $0.status == .running } }
-    var pendingCount: Int { jobs.filter(\.isActive).count }
+    public var active: BuildJob? { jobs.first { $0.status == .running } }
+    public var pendingCount: Int { jobs.filter(\.isActive).count }
 
-    func enqueue(_ job: BuildJob, python: String, repository: URL) {
+    public func enqueue(_ job: BuildJob, python: String, repository: URL) {
         self.python = python; self.repository = repository
         job.onChange = { [weak self, weak job] in
             guard let self, let job else { return }
@@ -252,9 +252,9 @@ final class BuildQueue {
         pump()
     }
 
-    func clearFinished() { jobs.removeAll { !$0.isActive }; save() }
+    public func clearFinished() { jobs.removeAll { !$0.isActive }; save() }
 
-    func cancelAll() {
+    public func cancelAll() {
         cancellingAll = true
         // Cancel queued entries first so finishing the active one cannot launch another.
         for job in jobs where job.status == .queued { job.cancel() }
