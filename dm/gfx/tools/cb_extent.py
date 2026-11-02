@@ -21,6 +21,11 @@ import dmsh_chain   # noqa: E402
 MAX = 65536
 
 
+def worker_count():
+    try: return max(1, int(os.environ.get('J', '8')))
+    except (TypeError, ValueError): return 8
+
+
 def extents(source, bindings):
     """{reg: bytes} for the cbuf bindings whose every read is a proven index into _m0"""
     out, definitions = {}, None
@@ -86,7 +91,7 @@ def main():
         raise SystemExit(f"usage: {sys.argv[0]} <dmsh_b version dir> <output tsv>")
     version_dir, output = map(os.path.abspath, sys.argv[1:])
     paths = [os.path.join(version_dir, n) for n in outputs(version_dir, "json") if n.endswith("_b.json")]
-    with multiprocessing.Pool() as pool: rows = [r for r in pool.map(row, paths, chunksize=64) if r]
+    with multiprocessing.Pool(processes=worker_count()) as pool: rows = [r for r in pool.map(row, paths, chunksize=64) if r]
     slots, ro = sum(r.count(":") for r in rows), sum(len(re.findall(r"\bs\d+", r.split("\t", 1)[1])) for r in rows)
     os.makedirs(os.path.dirname(output), exist_ok=True)
     with open(output, "w", encoding="utf-8", newline="") as stream:

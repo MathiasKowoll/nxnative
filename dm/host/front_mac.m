@@ -307,7 +307,10 @@ static void pads_start(void) {
 - (void)fitDrawable {
     CAMetalLayer *l = (CAMetalLayer *)self.layer; if (![l isKindOfClass:CAMetalLayer.class] || !self.window) return;
     l.contentsScale = self.window.backingScaleFactor;
-    NSSize px = [self convertSizeToBacking:self.bounds.size]; if (px.width < 1 || px.height < 1 || CGSizeEqualToSize(l.drawableSize, px)) return;
+    NSSize px = [self convertSizeToBacking:self.bounds.size];
+    const char *ow = getenv("DM_OUTPUT_WIDTH"), *oh = getenv("DM_OUTPUT_HEIGHT");
+    if (ow && oh && atoi(ow) > 0 && atoi(oh) > 0) px = NSMakeSize(atoi(ow), atoi(oh));
+    if (px.width < 1 || px.height < 1 || CGSizeEqualToSize(l.drawableSize, px)) return;
     l.drawableSize = px; LOG("front end: drawable %.0fx%.0f", px.width, px.height);
 }
 - (void)setFrameSize:(NSSize)s { [super setFrameSize:s]; [self fitDrawable]; }
@@ -1183,7 +1186,9 @@ void front_run(void (*guest)(void)) {
     @autoreleasepool {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
-        NSRect r = NSMakeRect(0, 0, 1280, 720);
+        int ww = 1280, wh = 720; const char *ew = getenv("DM_WINDOW_WIDTH"), *eh = getenv("DM_WINDOW_HEIGHT");
+        if (ew && eh && atoi(ew) >= 640 && atoi(eh) >= 360) { ww = atoi(ew); wh = atoi(eh); }
+        NSRect r = NSMakeRect(0, 0, ww, wh);
         NSWindow *win = [[NSWindow alloc] initWithContentRect:r
                                                     styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
                                                       backing:NSBackingStoreBuffered defer:NO];

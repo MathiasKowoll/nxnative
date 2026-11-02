@@ -6,7 +6,7 @@
 # A full build (no keys) also stamps both directories with the game and the digest of its profile inputs (inputs.tsv) and writes the profile's c1_full.tsv and cb_extent.tsv (c1_guard.py, cb_extent.py)
 # from its Mac outputs. One output directory per game: the chain version is the same for every game   Environment: DM_GAME=game profile (required, dm/games/<id>), XLATE=path to the translation tool (default the in-repo dmsh_xlate_bin), DMSH_CAS=content-addressed cache dir (default <output cache dir>/cas), DMSH_PREFILL=Mac library root[=iOS library root] (separated by :, their b-*/ go into the MSL-keyed compile cache first; sibling b-*/ always do), J=concurrency
 # Build output: <key>_b.metallib, <key>_b.json (replay reflection, including drv_reads, the runtime read offsets into driver segments c0 / c2), <key>_b.metal (MSL)
-# Environment IOSOUT=dir: the same MSL also goes through dm/ios/tools/ios_metal.compile to produce an iphoneos metallib + reflection (chain_metal records the iOS compile convention)
+# Environment IOSOUT=dir: the same MSL also goes through dm/ios/tools/ios_metal.compile to produce the selected Apple-device metallib + reflection (chain_metal records the device compile convention; DM_METAL_SDK=appletvos selects tvOS)
 # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately)
 import inspect, os, re, sys, json, struct, hashlib, shutil, subprocess, tempfile, collections, threading, concurrent.futures as cf
 import dmsh_geometry, dmsh_atomic, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
@@ -24,7 +24,8 @@ XLATE = os.environ.get('XLATE', os.path.join(dmsh_chain.XLATE_DIR, 'dmsh_xlate')
 SPIRV_CROSS = dmsh_chain.SPIRV_CROSS   # the in-repo build the lock records
 FACTS = dmsh_facts.load()
 if not os.path.exists(dmsh_facts.TABLE): sys.exit(f'[RED] no answer table {dmsh_facts.TABLE} (it comes with the game profile; an empty table = every query answered with defaults)')
-IOSOUT = os.environ.get('IOSOUT')   # destination for requested iOS libraries (iphoneos metallib + reflection)
+IOSOUT = os.environ.get('IOSOUT')   # destination for requested Apple-device libraries (iphoneos or appletvos metallib + reflection)
+DEVICE_SDK = os.environ.get('DM_METAL_SDK', 'iphoneos')
 # Which metallibs this run builds: DMSH_TARGETS=mac,ios (default: both when IOSOUT is set, else mac). The Mac
 # sources and reflection are written even when 'mac' is left out (the profile's c1_full / cb_extent tables are
 # made from them), so an iOS-only build skips only the macOS compile, about half of the Metal work.
@@ -169,10 +170,21 @@ MAC_METAL = ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invari
 MAC_RECORD = ' '.join(MAC_METAL) + '; xcrun -sdk macosx metallib'
 # The outer shader and fetch-variant caches restore compiled libraries directly,
 # before the MSL compile cache can check their compiler. Keep override builds separate there too.
-METAL_FP = dmsh_mtlcache.compiler_id('macosx') + ('\0iphoneos\0' + dmsh_mtlcache.compiler_id('iphoneos') if IOSOUT else '')
+METAL_FP = dmsh_mtlcache.compiler_id('macosx') + (f'\0{DEVICE_SDK}\0' + dmsh_mtlcache.compiler_id(DEVICE_SDK) if IOSOUT else '')
+# The compile runs the tools xcrun names, with the SDK xcrun would set, without going through xcrun each time (two xcrun processes a shader).
+# Same compiler, same SDK, same flags: the libraries are byte-identical to MAC_METAL's (checked on 16 shaders), about 6 % less time a shader.
+# MAC_RECORD keeps naming the xcrun form: it is the command these libraries are equivalent to, and the compile cache keys on it.
+_MAC_TOOLS = None
+def mac_tools():   # (metal, metallib, environment with SDKROOT), resolved once; xcrun honours DEVELOPER_DIR and TOOLCHAINS, so this does too
+    global _MAC_TOOLS
+    if _MAC_TOOLS is None:
+        xf = lambda *a: subprocess.run(['xcrun', '-sdk', 'macosx', *a], capture_output=True, text=True, check=True).stdout.strip()
+        _MAC_TOOLS = (xf('-f', 'metal'), xf('-f', 'metallib'), dict(os.environ, SDKROOT=xf('--show-sdk-path')))
+    return _MAC_TOOLS
 def mac_compile(msl, air, lib):   # same interface as ios_metal.compile
-    subprocess.run([*MAC_METAL, msl, '-o', air], check=True)
-    subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', air, '-o', lib], check=True)
+    metal, metallib, env = mac_tools()
+    subprocess.run([metal, *MAC_METAL[4:], msl, '-o', air], check=True, env=env)
+    subprocess.run([metallib, air, '-o', lib], check=True, env=env)
 # The NVN driver's constant segments have one layout in every game, which dm/gfx/nvn/dmsh_abi.h holds for the host and this build (through dmsh_abi.py); nvn_mtl.m fills them the same way at run time.
 #   c2 C2_TEX + 8 r: handles bound with nvnCommandBufferBindTexture (combined texture and sampler), slot r. The driver has 32 such slots, but a game may bind higher ones, whose words lie in the
 #     image table (Hades II binds slot 34, and no image), so a texture instruction's handle anywhere below the separate texture table names a combined slot. In the image
@@ -1283,7 +1295,7 @@ for _d in [out] + ([IOSOUT] if IOSOUT else []):
         if _m and (not want or _m.group(1) in want): os.unlink(os.path.join(_d, _n))
     if (not want or STAMP_BEFORE != INPUTS) and os.path.exists(os.path.join(_d, dmsh_chain.STAMP)): os.unlink(os.path.join(_d, dmsh_chain.STAMP))
 w = tempfile.mkdtemp(prefix='dmsh_', dir=os.environ.get('WORK'))
-MTL = dmsh_mtlcache.Cache(os.path.join(CAS, 'metallib'), {'mac': ('macosx', MAC_RECORD, mac_compile), **({'ios': ('iphoneos', ios_metal.RECORD, ios_metal.compile)} if IOSOUT else {})}, w)
+MTL = dmsh_mtlcache.Cache(os.path.join(CAS, 'metallib'), {'mac': ('macosx', MAC_RECORD, mac_compile), **({'ios': (DEVICE_SDK, ios_metal.RECORD, ios_metal.compile)} if IOSOUT else {})}, w)
 # first take the libraries earlier chain versions left on disk: the b-*/ beside the output (iOS: the folder of the same name) and the roots DMSH_PREFILL lists
 for _spec in [cache_root + ('=' + os.path.dirname(IOSOUT) if IOSOUT else '')] + [x for x in os.environ.get('DMSH_PREFILL', '').split(os.pathsep) if x]:
     _mac, _, _ios = _spec.partition('=')

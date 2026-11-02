@@ -8,7 +8,7 @@
 #        own_compilers.py --check-metal              only the Metal compiler check: exit 1 with the message when it would stop the build (the NSP script runs it before its shader steps)
 import os, re, sys, runpy, subprocess
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE); import dmsh_chain, tool_lock
-OWN = re.compile(r'(metal_macosx|metal_iphoneos): lock (.*) / actual (?!missing$)(.*)')   # a missing compiler still stops the build
+OWN = re.compile(r'(metal_macosx|metal_iphoneos): lock (.*) / actual (?!missing$)(.*)')   # a missing compiler still stops the build; tvOS is checked for presence below
 ALLOW = 'DM_ALLOW_OTHER_METAL'
 XCODE_VERSION = '27.2'   # the Xcode whose Metal compiler dmsh_chain.lock records; README.md names it too
 XCODE = f'Xcode {XCODE_VERSION} (macOS 26.6 or later)'
@@ -54,17 +54,24 @@ def check_metal():   # --check-metal: the stop message, '' when the build may go
 def ios_target():   # as dmsh_build.py picks its targets: a Mac-only build (the NSP script's --platform mac / mac-app) compiles nothing for iOS
     return 'ios' in (os.environ.get('DMSH_TARGETS') or ('mac,ios' if os.environ.get('IOSOUT') else 'mac')).split(',')
 
+def device_sdk():
+    return os.environ.get('DM_METAL_SDK', 'iphoneos')
+
 def check_tools():
     bad, own = [], []
     for b in strict():
         m = OWN.fullmatch(b)
         if m: own.append((m[1], m[2], m[3]))   # (lock key, tested, actual)
         elif not (b.startswith('metal_iphoneos: ') and b.endswith(' / actual missing') and not ios_target()): bad.append(b)   # a Mac without the iOS platform
+    if ios_target() and device_sdk() == 'appletvos' and metal_version('appletvos') == 'missing':
+        bad.append('metal_appletvos: the tvOS Metal compiler is missing (install the tvOS platform and Metal toolchain in Xcode)')
     if bad: return bad
     metal = own
     if metal and not allowed(): sys.exit(other_metal_message(metal))
     if own: print('note: built with this Mac\'s compilers, not the ones the shaders were tested with (dmsh_chain.lock): ' +
                   '; '.join(f'{k} {now} (tested: {want})' for k, want, now in own) + (f' ({ALLOW}=1)' if metal else ''), flush=True)
+    if ios_target() and device_sdk() == 'appletvos':
+        print('note: tvOS Metal compiler present; tvOS libraries use the appletvos SDK and stay separate from iOS shader caches', flush=True)
     return []
 
 if __name__ == '__main__':

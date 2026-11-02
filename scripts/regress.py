@@ -855,7 +855,8 @@ def smoke_context(g, art, route, a, hardware):
     # Version 2 also records pipeline_status: older cached runs cannot establish whether the profile matched runtime depth.
     return json.loads(json.dumps({'checks': 2, 'route': route, 'save': save_digest(save_source(g, route)), 'host': art['host_key'], 'modules': art['modules_key'], 'chain': art['manifest']['key'],
                                  'profile': digest(sorted(art['profile'].glob('*.tsv'))), 'machine': hardware, 'tools': a.tools_fp, 'env': env, 'overrides': a.env,
-                                 'no_hud': a.no_hud, 'runs': a.runs, 'prebuild_limit': a.prebuild_limit, 'prebuild_hang': a.prebuild_hang}))
+                                 'no_hud': a.no_hud, 'runs': a.runs, 'prebuild_limit': a.prebuild_limit, 'prebuild_hang': a.prebuild_hang,
+                                 'prebuild_threads': a.prebuild_threads, 'prepare_threads': a.prepare_threads}))
 
 
 def run_env(g, art, route, outdir, a):
@@ -872,6 +873,10 @@ def run_env(g, art, route, outdir, a):
                DM_WINDOW='1', DM_WINDOW_TOP='1', DM_AUDIO='0', DM_METAL_HUD='0' if a.no_hud else '1', DM_CTL=str(outdir / 'ctl'), TMPDIR=str(game_root(g) / 'tmp') + '/')
     if g.kind == 'nvn':
         env.update(DM_NVN_SHMAP=str(prof / 'shader_map.tsv'), DM_NVN_TSV=str(outdir / 'frames.tsv'), DM_NVN_TSV_CALLS='0')
+        # Keep the validation run bounded.  The explicit CLI values still let a
+        # measured machine opt into a different setting, while the default of
+        # two workers avoids starving the desktop during a full AOT prebuild.
+        env.update(DM_PSO_PREBUILD_THREADS=str(a.prebuild_threads), DM_PSO_PREPARE_THREADS=str(a.prepare_threads))
         if not (prof / 'pso_pairs.tsv').is_file() and (g.build / 'shader/pso_pairs.tsv').is_file(): env['DM_PSO_PAIRS'] = str(g.build / 'shader/pso_pairs.tsv')
     if (g.build / 'aoc').is_dir(): env['DM_AOC_DIR'] = str(g.build / 'aoc')
     for kv in a.env: k, _, v = kv.partition('='); env[k] = v
@@ -1609,6 +1614,10 @@ def main():
             p.add_argument('--env', action='append', default=[], help='KEY=VALUE for every run (repeatable)')
             p.add_argument('--prebuild-limit', type=float, default=1200, help='the longest pipeline prebuild (default 1200 s)')
             p.add_argument('--prebuild-hang', type=float, default=120, help='seconds without prebuild progress that count as a hang (default 120)')
+            p.add_argument('--prebuild-threads', type=int, default=int(os.environ.get('REGRESS_PSO_PREBUILD_THREADS', '2')),
+                           help='workers for the AOT pipeline prebuild (default 2; REGRESS_PSO_PREBUILD_THREADS)')
+            p.add_argument('--prepare-threads', type=int, default=int(os.environ.get('REGRESS_PSO_PREPARE_THREADS', '2')),
+                           help='workers for first-start pipeline preparation (default 2; REGRESS_PSO_PREPARE_THREADS)')
     p = sub.add_parser('baseline', help='record the runs of a revision'); p.add_argument('--rev', default='main'); common(p)
     p = sub.add_parser('check', help='compare a candidate with the stored baseline'); p.add_argument('--baseline'); p.add_argument('--candidate', default='worktree'); common(p)
     p = sub.add_parser('chain', help='the static checks only'); p.add_argument('--baseline'); p.add_argument('--candidate', default='worktree'); common(p, smoke=False)
@@ -1625,6 +1634,8 @@ def main():
     p.add_argument('--all', action='store_true', help='list the games without a manifest too'); p.add_argument('--out')
     sub.add_parser('list', help='the games, routes and baselines')
     a = ap.parse_args()
+    if hasattr(a, 'prebuild_threads') and (a.prebuild_threads < 1 or a.prepare_threads < 1):
+        ap.error('--prebuild-threads and --prepare-threads must be at least 1')
     missing = [o for o, v in (('--root (REGRESS_ROOT)', a.root), ('--games-dir (REGRESS_GAMES)', a.games_dir)) if not v]
     if missing and a.cmd != 'impact': ap.error(f'set {" and ".join(missing)}: where the harness keeps its trees and reports, and the folder of the games\' NSP folders, for example '
                          f'regress.py --root <drive>/harness --games-dir <drive>/nsp {a.cmd} ... (the options go before the command)')
