@@ -31,6 +31,12 @@ final class Preferences {
     var globalUpscale: String { didSet { defaults.set(globalUpscale, forKey: "globalUpscale") } }
     var globalFilter: String { didSet { defaults.set(globalFilter, forKey: "globalFilter") } }
     var globalSharpen: Double { didSet { defaults.set(globalSharpen, forKey: "globalSharpen") } }
+    /// Atajos globales para salir de cualquier juego desde un mando.
+    var globalExitEnabled: Bool { didSet { defaults.set(globalExitEnabled, forKey: "globalExitEnabled") } }
+    var globalExitSelectStart: Bool { didSet { defaults.set(globalExitSelectStart, forKey: "globalExitSelectStart") } }
+    var globalExitTouchpad: Bool { didSet { defaults.set(globalExitTouchpad, forKey: "globalExitTouchpad") } }
+    var globalExitHoldSeconds: Double { didSet { defaults.set(globalExitHoldSeconds, forKey: "globalExitHoldSeconds") } }
+    var buildWorkers: Int { didSet { defaults.set(min(2, max(1, buildWorkers)), forKey: "buildWorkers") } }
     /// Title IDs asignados a mano a archivos sin etiqueta, por ruta.
     var assignedTitleIDs: [String: String] { didSet { defaults.set(assignedTitleIDs, forKey: "assignedTitleIDs") } }
 
@@ -48,6 +54,12 @@ final class Preferences {
         globalUpscale = defaults.string(forKey: "globalUpscale") ?? ""
         globalFilter = defaults.string(forKey: "globalFilter") ?? ""
         globalSharpen = defaults.object(forKey: "globalSharpen") as? Double ?? -1
+        globalExitEnabled = defaults.object(forKey: "globalExitEnabled") as? Bool ?? true
+        globalExitSelectStart = defaults.object(forKey: "globalExitSelectStart") as? Bool ?? true
+        globalExitTouchpad = defaults.object(forKey: "globalExitTouchpad") as? Bool ?? true
+        let hold = defaults.object(forKey: "globalExitHoldSeconds") as? Double ?? 5
+        globalExitHoldSeconds = min(10, max(1, hold))
+        buildWorkers = min(2, max(1, defaults.object(forKey: "buildWorkers") as? Int ?? 1))
         assignedTitleIDs = defaults.dictionary(forKey: "assignedTitleIDs") as? [String: String] ?? [:]
     }
 
