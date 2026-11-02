@@ -43,7 +43,7 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
         NSArray *bs = j[@"bindings"];
         if (![bs isKindOfClass:[NSArray class]]) FAIL("missing bindings");
         if (bs.count > NVN_REFL_MAXB) FAIL("%lu bindings, over the limit %d", (unsigned long)bs.count, NVN_REFL_MAXB);
-        o->route_b = 1; o->abi = 0;   // spirv-cross set 0 → [[buffer(0)]]
+        o->route_b = 1; o->abi = 0; o->nvn2_compute = [j[@"nvn2_compute"] boolValue];   // spirv-cross set 0 → [[buffer(0)]]
         for (NSDictionary *b in bs) {
             NSString *k = b[@"kind"]; nvn_rbind *r = &o->b[o->nb];
             id rg = b[@"reg"]; int reg = [rg isKindOfClass:[NSNumber class]] ? [rg intValue] : -1, aid = [b[@"arg_id"] intValue];
@@ -84,10 +84,18 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             else if ([k isEqualToString:@DMSH_KIND_IMG]) { r->kind = NVN_RB_IMG; dummy_kind(b[@"msl_type"], &r->dtt, &r->dpf);   // rw: the shader writes it (access::write / read_write; a load-only view of the slot is not)
                 r->rw = [ty isKindOfClass:[NSString class]] && ([ty containsString:@"access::write"] || [ty containsString:@"access::read_write"]); r->atom = [b[@"atomic"] boolValue]; }
             else if ([k isEqualToString:@DMSH_KIND_TBUF]) { r->kind = NVN_RB_TBUF; uint8_t tt; dummy_kind(b[@"msl_type"], &tt, &r->dpf); }
-            else if ([k isEqualToString:@DMSH_KIND_SBUF]) { r->kind = NVN_RB_SBUFP; r->rw = sbuf_rw(b); }
+            else if ([k isEqualToString:@DMSH_KIND_SBUF]) {
+                r->kind = NVN_RB_SBUFP; r->rw = sbuf_rw(b);
+                // Reflections made before the compact-NVN2 slot fix carry the internal c0
+                // descriptor row in reg. cp_sN's index is the API binding order needed by
+                // S.ssbo; keep this compatibility conversion until every profile is rebuilt.
+                id ix = b[@"index"];
+                if (o->nvn2_compute && [ix isKindOfClass:[NSNumber class]]) { reg = [ix intValue]; r->reg = (uint16_t)reg; }
+            }
             else if ([k isEqualToString:@DMSH_KIND_UBO_PTR]) r->kind = NVN_RB_UBOP;
             else if ([k isEqualToString:@DMSH_KIND_SBUF_UBO]) { r->kind = NVN_RB_SBUFU; r->rw = sbuf_rw(b); r->off = (uint16_t)[b[@"off"] intValue]; }
             else if ([k isEqualToString:@DMSH_KIND_GEOMETRY]) { if (reg < 0 || reg > 4) FAIL("invalid geometry helper slot"); r->kind = NVN_RB_GEOMETRY; }
+            else if ([k isEqualToString:@DMSH_KIND_NVN2_SCRATCH]) { r->kind = NVN_RB_NVN2_SCRATCH; r->rw = sbuf_rw(b); }
             else if ([k isEqualToString:@DMSH_KIND_SUPPORT]) r->kind = NVN_RB_SUPPORT;
             else if ([k isEqualToString:@DMSH_KIND_C1]) r->kind = NVN_RB_C1;
             else if ([k isEqualToString:@DMSH_KIND_DRVCB]) r->kind = [b[@"bank"] intValue] == 2 ? NVN_RB_DRV2 : NVN_RB_DRV0;

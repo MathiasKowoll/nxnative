@@ -53,15 +53,17 @@ static void differential(const nvn_texdesc *d, unsigned level, unsigned layer) {
     CHECK(!rc, "D geometry failed"); if (rc) return;
     nvn_texlayout L; nvn_tex_layout(d, &L);
     size_t pitch = rb + 1 + (rnd() & 31), nlin = pitch * rows * slices, nst = L.size + 32;
-    uint8_t *storage = malloc(nst), *expected = malloc(nst), *linear = malloc(nlin + 32), *out = malloc(nlin + 32);
+    uint8_t *storage = malloc(nst), *expected = malloc(nst), *linear = malloc(nlin + 32), *out = malloc(nlin + 32), *local = malloc(nlin + 32);
     for (size_t i = 0; i < nst; i++) storage[i] = rnd();
-    memset(linear, 0xAB, nlin + 32); memset(out, 0xAB, nlin + 32);
+    memset(linear, 0xAB, nlin + 32); memset(out, 0xAB, nlin + 32); memset(local, 0xAB, nlin + 32);
     uint32_t lb = nvn_tex_level_gobs(d, level) * 64;
     if (lb < rb) lb = rb;
     for (uint32_t z = 0; z < slices; z++) for (uint32_t y = 0; y < rows; y++) for (uint32_t x = 0; x < rb; x++)
         linear[((size_t)z * rows + y) * pitch + x] = storage[base + nvn_bl_offset(x, y, z, lb, rows, th, td)];
     CHECK(!nvn_deswizzle(d, level, layer, storage, out, pitch) && !memcmp(linear, out, nlin + 32),
           "D read differs target %d format %#x flags %#x mip %u layer %u", d->target, d->format, d->flags, level, layer);
+    CHECK(!nvn_deswizzle_level(d, level, layer, storage + base, local, pitch) && !memcmp(out, local, nlin + 32),
+          "D level-local read differs target %d format %#x flags %#x mip %u layer %u", d->target, d->format, d->flags, level, layer);
     for (size_t i = 0; i < nlin; i++) linear[i] = rnd();
     memcpy(expected, storage, nst);
     for (uint32_t z = 0; z < slices; z++) for (uint32_t y = 0; y < rows; y++) for (uint32_t x = 0; x < rb; x++)
@@ -72,7 +74,7 @@ static void differential(const nvn_texdesc *d, unsigned level, unsigned layer) {
           "D short source pitch accepted");
     CHECK(nvn_deswizzle(d, level, layer, storage, out, rb - 1) == -1,
           "D short destination pitch accepted");
-    free(storage); free(expected); free(linear); free(out);
+    free(storage); free(expected); free(linear); free(out); free(local);
 }
 
 static void differential_shapes(void) {
@@ -99,9 +101,45 @@ static void differential_shapes(void) {
     printf("  D %u layouts: both directions equal byte-address oracle, including pitch padding and tails\n", cases);
 }
 
+// A sparse level can be decoded one physical 64 KB page at a time. Reassemble
+// those independently decoded pages and require byte identity with the existing
+// full-level path, including Switch 2's native GOB bit order.
+static void sparse_tile_equivalence(int format, const char *tag, int native) {
+    nvn_texdesc d = {1, format, 0x20, 0, 1024, 1024, 1, 1, 0, 0};
+    nvn_texlayout L; nvn_tex_layout(&d, &L);
+    int bw, bh, bpb = nvn_fmt_bpb(format, &bw, &bh);
+    uint32_t tw, th, td; int tiled = nvn_tex_sparse_tiles(&d, &tw, &th, &td);
+    uint32_t rb = (d.width + bw - 1) / bw * bpb, rows = (d.height + bh - 1) / bh;
+    uint32_t gx = (d.width + tw - 1) / tw, gy = (d.height + th - 1) / th;
+    size_t tile_pitch = (size_t)((tw + bw - 1) / bw) * bpb;
+    size_t tile_rows = (th + bh - 1) / bh, tile_bytes = tile_pitch * tile_rows * td;
+    uint8_t *storage = malloc(L.size), *whole = malloc((size_t)rb * rows), *pages = calloc((size_t)rb * rows, 1), *one = malloc(tile_bytes);
+    for (uint64_t i = 0; i < L.size; i++) storage[i] = rnd();
+    nvn_tex_set_native_tiling(native);
+    CHECK(tiled == 1 && tile_bytes == 0x10000 && L.size == (uint64_t)gx * gy * 0x10000,
+          "P %s sparse page geometry", tag);
+    CHECK(!nvn_deswizzle(&d, 0, 0, storage, whole, rb), "P %s full decode", tag);
+    for (uint32_t y = 0; y < gy; y++) for (uint32_t x = 0; x < gx; x++) {
+        memset(one, 0, tile_bytes);
+        CHECK(!nvn_deswizzle_sparse_tile(&d, 0, x, y, 0, storage + ((size_t)y * gx + x) * 0x10000, one, tile_pitch),
+              "P %s tile %u,%u decode", tag, x, y);
+        uint32_t copy_rows = (d.height - y * th + bh - 1) / bh; if (copy_rows > tile_rows) copy_rows = (uint32_t)tile_rows;
+        uint32_t copy_bytes = (d.width - x * tw + bw - 1) / bw * bpb; if (copy_bytes > tile_pitch) copy_bytes = (uint32_t)tile_pitch;
+        for (uint32_t r = 0; r < copy_rows; r++) memcpy(pages + ((size_t)y * tile_rows + r) * rb + x * tile_pitch, one + (size_t)r * tile_pitch, copy_bytes);
+    }
+    CHECK(!memcmp(whole, pages, (size_t)rb * rows), "P %s pages equal full decode (%s GOB order)", tag, native ? "Switch 2" : "Switch 1");
+    free(storage); free(whole); free(pages); free(one);
+}
+
 int main(void) {
     printf("D differential copy checks\n");
     differential_shapes();
+    printf("P sparse 64 KB page decoding\n");
+    sparse_tile_equivalence(0x50, "BC6H_UF16", 0);
+    sparse_tile_equivalence(0x50, "BC6H_UF16", 1);
+    sparse_tile_equivalence(0x8e, "ASTC_8x8_sRGB", 0);
+    sparse_tile_equivalence(0x8e, "ASTC_8x8_sRGB", 1);
+    nvn_tex_set_native_tiling(0);
     printf("L linear render targets without the separate LINEAR flag\n");
     {
         // Persona 5 Royal asks for 16x16 RGBA8, flags 0x44, stride 128: 2 KB,
@@ -154,6 +192,29 @@ int main(void) {
         uint64_t got = nvn_bl_offset(B[i].x, B[i].y, B[i].z, B[i].rb, B[i].rows, B[i].th, B[i].td);
         CHECK(got == B[i].want, "B%u got %llu expected %llu", i, (unsigned long long)got, (unsigned long long)B[i].want);
         printf("  B%u (%u,%u,%u) → %llu %s  %s\n", i, B[i].x, B[i].y, B[i].z, (unsigned long long)got, got == B[i].want ? "✓" : "✗", B[i].how);
+    }
+
+    printf("N Switch 2 native GOB ordering (offset bits 5 and 6 exchanged)\n");
+    {
+        nvn_texdesc d = {1, 0x01, 0, 0, 64, 8, 1, 1, 0, 0};
+        nvn_texlayout L; nvn_tex_layout(&d, &L);
+        uint8_t linear[512], out[512], *storage = calloc(L.size, 1);
+        for (unsigned i = 0; i < sizeof linear; i++) linear[i] = (uint8_t)i;
+        nvn_tex_set_native_tiling(1);
+        CHECK(nvn_bl_offset_native(16, 0, 0, 64, 8, 0, 0, 1) == 64,
+              "N x=16,y=0 moves from classic offset 32 to native offset 64");
+        CHECK(nvn_bl_offset_native(0, 2, 0, 64, 8, 0, 0, 1) == 32,
+              "N x=0,y=2 moves from classic offset 64 to native offset 32");
+        CHECK(!nvn_swizzle(&d, 0, 0, linear, 64, storage), "N native swizzle failed");
+        CHECK(storage[64] == linear[16] && storage[32] == linear[2 * 64],
+              "N native storage contains the two exchanged 16-byte segments");
+        memset(out, 0, sizeof out);
+        CHECK(!nvn_deswizzle(&d, 0, 0, storage, out, 64) && !memcmp(linear, out, sizeof linear),
+              "N native GOB round trip preserves all bytes");
+        nvn_tex_set_native_tiling(0); memset(storage, 0, L.size);
+        CHECK(!nvn_swizzle(&d, 0, 0, linear, 64, storage) && storage[32] == linear[16] && storage[64] == linear[2 * 64],
+              "N Switch 1 GOB ordering remains unchanged");
+        free(storage);
     }
 
     // ---------- E hand-built 3D: place markers into block-linear storage at hand-calculated addresses, decode, and verify where the markers land (round trip A only proves self-consistency, not whether the layout is right) ----------

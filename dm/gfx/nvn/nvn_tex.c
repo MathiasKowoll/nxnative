@@ -7,6 +7,10 @@
 // NVN driver (nxnative PR #11) and taken from MacNativeGames 3c482a7, with the shapes of t_tex_layout.
 #include "nvn_tex.h"
 
+static int g_native_tiling;
+void nvn_tex_set_native_tiling(int enabled) { g_native_tiling = enabled != 0; }
+int nvn_tex_native_tiling(void) { return g_native_tiling; }
+
 typedef struct { uint8_t bpb, bw, bh; } fmt_t;   // Bytes per block, block width, block height (for uncompressed formats block width and height = 1)
 
 static fmt_t fmt_of(int f) {

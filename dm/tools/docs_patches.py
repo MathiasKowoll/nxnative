@@ -76,6 +76,8 @@ HOST_BINDING = [
      'why': "the studio's engine, which its other games ship", 'blocked': 'one game on that engine here'}),
     ('k_locks', 'Criterion', '', {'what': "Criterion's 60 fps mode, frame ticks and game step at fixed addresses", 'now': 'build', 'goal': 'engine', 'purpose': 'frame rate',
      'why': "the studio's engine, which its other games ship", 'blocked': 'one game on that engine here'}),
+    ('k_locks', 'P5S', '', {'what': "Persona 5 Strikers' frame-rate and vsync fields at fixed addresses", 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
+     'why': "the game's own boot writes for this build; the profile's patch matches those addresses and the host updates them each present"}),
     ('k_locks', 'FIFA', '', {'what': "Frostbite's frame regulator at a fixed pointer", 'now': 'build', 'goal': 'engine', 'purpose': 'frame rate',
      'why': "engine code other Frostbite games ship (the simulation's own rate is already set by name)", 'blocked': 'one Frostbite game here'}),
     ('k_ue', '', 'feae83dc9e9fb34c77d0a62f1fa9ae9f', {'what': "UE3's GMalloc setup skipped, the host allocator in (hle_uemalloc.c)", 'now': 'build', 'goal': 'game', 'purpose': 'address space',

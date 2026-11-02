@@ -1,5 +1,13 @@
 # NVN objects
 
+## Experimental NVN2 object interfaces
+
+- **Symptom:** a native Switch 2 process calls a null function pointer after looking up `nvnQueueBuilderSetPrimaryQueue` or `nvnProgramBuilderSetDefaults`.
+- **Cause:** the host's NVN name table and object implementations covered the older interface only. NVN2 also uses compact shader controls whose code-span field is not at legacy offset 0x704.
+- **Fix:** secondary queues retain their primary's identity and their own replay state on the shared ordered Metal queue. The builder still fits the older 64-byte object. ProgramBuilder supplies descriptors to the existing program path; compact 201.7 control spans are parsed before hashing or dumping. Unsupported recording modes and forced sample shading fail explicitly. The compute-overlap hint keeps conservative encoder ordering.
+- **Check:** `t_queue_origin` covers primary association, invalid relationships, independent state and rendered pixels on both queues, plus program construction, exact compact-control hashes, and copies with recorded fences in NVN2 modes 0/1. `test_nvn2_control.py` checks short 201.7/201.11 allocations under AddressSanitizer and verifies unchanged legacy spans.
+- **Found on:** [Mario Kart World's experimental bring-up](../investigations/mario-kart-world.md). Full NVN2 command, shader and rendering compatibility is still open.
+
 NVN object layouts, memory pools, command memory, queues, syncs and entry points (`dm/gfx/nvn/hle_nvn.c`). Each entry: symptom, cause, fix, the games it was found on. The [symptom index](../agents/symptoms.md) lists every symptom.
 
 ## Object sizes

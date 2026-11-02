@@ -488,6 +488,15 @@ int main(int argc, char **argv) {
     for (unsigned i = 0; i < 8; ++i) assert(!pthread_create(&threads[i], NULL, init_worker, &addresses[i]));
     for (unsigned i = 0; i < 8; ++i) { assert(!pthread_join(threads[i], NULL)); assert(addresses[i] == addresses[0]); }
     alias = addresses[0]; stack = info(I_StackAddr); heap = info(I_HeapAddr);
+    // SDK Generic-19 maps the granule returned by GetInfo(33), then uses it
+    // as an alignment mask. Exercise that actual first-map sequence.
+    uint64_t granule = info(33);
+    assert(granule == P);
+    uint64_t first_map[31] = {alias, granule};
+    svc_dispatch(0x2c, first_map, 0); assert(!first_map[0]);
+    *(uint8_t *)alias = 0x5a;
+    uint64_t first_unmap[31] = {alias, granule};
+    svc_dispatch(0x2d, first_unmap, 0); assert(!first_unmap[0]);
     lazy_commit(); alias_lifecycle(); ownership(); module_sources(); module_back_patch(); failures(); concurrency(); fragmented_queries();
     guest_helper();
     if (!DM_GAME_MEM_MAP_LIMIT) metadata_limit();

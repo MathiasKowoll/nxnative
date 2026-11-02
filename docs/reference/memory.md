@@ -94,6 +94,14 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 
 ## Virtual address memory and the alias region
 
+### Generic SDK physical mapping granule
+
+- **Symptom:** SDK startup issues `MapPhysicalMemory` for zero bytes and aborts with Result `0xd401` before `nninitStartup`.
+- **Cause:** Generic SDK 19 queries GetInfo(33), stores its returned mapping granule, then uses it as the length of VAMM's first map. The host's unknown-info default returned success with zero.
+- **Fix:** report the guest mapping granule, 0x1000 bytes. This stays 4 KiB on macOS's 16 KiB pages; the existing mapping code handles host-page rounding.
+- **Check:** `t_svc_memory` queries the granule, maps and writes one granule, then unmaps it, including the 16 KiB sanitizer configuration.
+- **Found on:** [Mario Kart World's experimental bring-up](../investigations/mario-kart-world.md#confirmed-bring-up-findings).
+
 ### Virtual address memory follows the NPDM's system resource
 
 - **Symptom:** `StandardAllocator::Initialize` aborts in `nninitStartup` (Fire Emblem Engage); `nn::diag` abort in `StandardAllocator::Initialize(void *, size_t, bool)` from `nninitStartup` (`sdk+0x2f98e4` ← `main+0x5b69e0`, Big Brain Academy: Brain vs. Brain).

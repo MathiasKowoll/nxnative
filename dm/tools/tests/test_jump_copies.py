@@ -21,7 +21,7 @@ from nso_asm import ADRP, ADDI, ADDR, B, BEQ, BLR, BR, NOP
 tree = ast.parse((TOOLS / 'patch_nso.py').read_text())
 IMG = bytearray(0x5000); tabjumps = {}; jumps = {}   # the globals the recognizers read: the module image and the jump tables resolved so far in the function
 scope = {'re': re, 'struct': struct, 'ARM64_OP_IMM': ARM64_OP_IMM, 'IMG': IMG, 'tabjumps': tabjumps, 'jumps': jumps}
-exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('num', 'copied_base', 'table_base', 'forward_table_base', 'check_before_copy', 'check_copy_before_check', 'check_mask_after_check', 'jump_offsets', 'jump_masked_pred', 'jump_masked_not')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
+exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('num', 'copied_base', 'table_base', 'forward_table_base', 'check_before_copy', 'check_copy_before_check', 'check_mask_after_check', 'jump_offsets', 'jump_zero_extended', 'jump_masked_pred', 'jump_masked_not')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
 
 
 def mov(dst, src, wide=True): return (0xaa0003e0 if wide else 0x2a0003e0) | src << 16 | dst

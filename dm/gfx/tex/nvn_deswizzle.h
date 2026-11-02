@@ -9,11 +9,26 @@
 // 3D textures: all depth slices of this level are decoded at once; slice k is at dst_linear + k × dst_pitch × block row count of this level.
 // Not supported: multisampling, the LINEAR flag (already linear), BUFFER; returns -1 on these, 0 on success.
 int nvn_deswizzle(const nvn_texdesc *d, unsigned level, unsigned layer, const void *src_storage, void *dst_linear, size_t dst_pitch);
+// As above, but src_level points directly at this level/layer's block-linear
+// bytes. This lets sparse upload gather and decode one bounded level instead of
+// materializing the texture's entire virtual storage.
+int nvn_deswizzle_level(const nvn_texdesc *d, unsigned level, unsigned layer,
+                        const void *src_level, void *dst_linear, size_t dst_pitch);
+// Decode one 64 KB tile of a sparse level. src_tile points at that tile's
+// standalone block-linear bytes; dst_linear receives the tile in ordinary
+// block rows. The tile coordinates are in the sparse-tile grid, not texels.
+// Edge tiles write only their valid texels/blocks. Returns -1 when the level is
+// in the mip tail or the texture is not sparse.
+int nvn_deswizzle_sparse_tile(const nvn_texdesc *d, unsigned level,
+                              uint32_t tile_x, uint32_t tile_y, uint32_t tile_z,
+                              const void *src_tile, void *dst_linear, size_t dst_pitch);
 // Reverse (for unit test round trips): linear src_linear → written into the corresponding level / layer of the whole-texture storage dst_storage
 int nvn_swizzle(const nvn_texdesc *d, unsigned level, unsigned layer, const void *src_linear, size_t src_pitch, void *dst_storage);
 // Single-point address: within this level and layer, linear (x byte, y block row, z slice) → block-linear byte offset relative to the start of this level and layer (unit tests verify against hand calculation).
 // row_bytes: the row as laid out, which a sparse texture's tiled levels pad to whole tiles (nvn_tex_level_gobs × 64)
 uint64_t nvn_bl_offset(uint32_t x, uint32_t y, uint32_t z, uint32_t row_bytes, uint32_t rows, unsigned tileH, unsigned tileD);
+// The same address calculation with the Switch 2 native intra-GOB ordering when native_tiling is nonzero.
+uint64_t nvn_bl_offset_native(uint32_t x, uint32_t y, uint32_t z, uint32_t row_bytes, uint32_t rows, unsigned tileH, unsigned tileD, int native_tiling);
 
 int nvn_deswizzle_geom(const nvn_texdesc *d, unsigned level, unsigned layer,
                        uint32_t *row_bytes, uint32_t *rows, uint32_t *slices,

@@ -24,6 +24,8 @@ XLATE = os.environ.get('XLATE', os.path.join(dmsh_chain.XLATE_DIR, 'dmsh_xlate')
 SPIRV_CROSS = dmsh_chain.SPIRV_CROSS   # the in-repo build the lock records
 FACTS = dmsh_facts.load()
 if not os.path.exists(dmsh_facts.TABLE): sys.exit(f'[RED] no answer table {dmsh_facts.TABLE} (it comes with the game profile; an empty table = every query answered with defaults)')
+NVN2_BRIDGE = os.environ.get('NVN2_AMPERE_BRIDGE')
+NVN2_BRIDGE_FP = hashlib.sha256(open(NVN2_BRIDGE, 'rb').read()).hexdigest() if NVN2_BRIDGE and os.path.isfile(NVN2_BRIDGE) else 'missing'
 IOSOUT = os.environ.get('IOSOUT')   # destination for requested Apple-device libraries (iphoneos or appletvos metallib + reflection)
 DEVICE_SDK = os.environ.get('DM_METAL_SDK', 'iphoneos')
 # Which metallibs this run builds: DMSH_TARGETS=mac,ios (default: both when IOSOUT is set, else mac). The Mac
@@ -128,7 +130,8 @@ def mac_compile(msl, air, lib):   # same interface as ios_metal.compile
 #   c2 C2_SAMP + 8 r: separate samplers (nvnCommandBufferBindSeparateSampler), slot r < C2_SEP_SLOTS
 #   c0 base + 0x10 r: storage buffer r (64-bit address, 32-bit size), base C0_SSBO_<stage> (the hull / domain stages' bases were never seen)
 TEX_BASE, IMG_BASE, IMG_SLOTS, SEPTEX_BASE, SEPTEX_SLOT0, SAMP_BASE = abi.C2_TEX, abi.C2_IMG, abi.C2_IMG_SLOTS, abi.C2_SEPTEX, abi.SEPTEX_SLOT0, abi.C2_SAMP
-SSBO = {'vs': abi.C0_SSBO_VS, 'cs': abi.C0_SSBO_CS, 'gs': abi.C0_SSBO_GS, 'ps': abi.C0_SSBO_PS}
+SSBO = {'vs': abi.C0_SSBO_VS, 'cs': abi.C0_SSBO_CS, 'gs': abi.C0_SSBO_GS, 'ps': abi.C0_SSBO_PS,
+        'ts': abi.C0_SSBO_TS, 'ms': abi.C0_SSBO_MS}
 
 def records(d):
     r = [m.start() for m in re.finditer(b'BTCDBTCD', d)]
@@ -158,12 +161,25 @@ def tool_fingerprint():
 
 # The profile keys that change how a shader is built (nvn_*, shader_*), as dmsh_chain.inputs takes them: part of every shader's cache key
 PROFILE_ROWS = dmsh_chain.profile_rows(GAME)
+def compact_nvn2_stage(rec):
+    ci = rec.find(bytes.fromhex('34127698'))
+    if ci < 0: return None
+    ctl = rec[ci:]
+    if len(ctl) < 0xd8 or struct.unpack_from('<2I', ctl, 4) not in ((201, 7), (201, 11)): return None
+    return struct.unpack_from('<I', ctl, 0x54)[0] >> 16
+
+def compact_nvn2_control_size(ctl):
+    nctl = struct.unpack_from('<I', ctl, 0x30)[0]
+    if not nctl and struct.unpack_from('<I', ctl, 0xc4)[0] == 0xd8: nctl = 0xd8
+    return nctl
+
 def shader_key(key, name, rec):
     """The per-shader cache key. It covers the profile's build keys and the shader's pairs; a vertex shader with pairs also takes its pixel shaders' keys (pair_keyed), since vs_pad reads their
     MSL. Before, these were only in the chain version, so a build after changing only them hit the old entries and filed them under the new version (with an empty DMSH_CAS as the workaround)"""
     pc = dmsh_facts.row(key, FACTS[key]).encode() if key in FACTS else 'missing'.encode()
     map_row = MAP_ROWS.get(key, 'missing'.encode()) + MAP_CONFLICT_ROWS.get(key, b'')
-    payload = (b'record\0' + rec + b'\0map\0' + map_row + b'\0pc\0' + pc +
+    bridge = ('\0nvn2_bridge\0' + NVN2_BRIDGE_FP).encode() if compact_nvn2_stage(rec) is not None else b''
+    payload = (b'record\0' + rec + b'\0map\0' + map_row + b'\0pc\0' + pc + bridge +
                b'\0tools\0' + TOOL_FP + b'\0code\0' + CODE_FP.encode() +
                b'\0rule\0' + shader_rule_source(name) + b'\0profile\0' + PROFILE_ROWS + b'\0pairs\0' + ','.join(sorted(PAIRS.get(key, ()))).encode())
     return hashlib.sha256(payload).hexdigest()
@@ -449,8 +465,55 @@ def early_fragment_tests(ctl, code):
     is left as it is: tested early, the depth it computes would not be the one tested"""
     return len(ctl) > 0x718 and ctl[0x718] != 0 and len(code) >= 0x50 and not struct.unpack_from('<I', code, 19 * 4)[0] & 2
 
+def apply_host_shared_limit(j):
+    """Use a measured host-safe compute shared-memory size from shader_facts_manual.tsv.
+
+    Some NVN2 launch descriptors reserve more workgroup memory than a shader's
+    live indices need. Metal rejects the pipeline before dispatch when that
+    conservative reservation exceeds the Apple GPU limit. Keep this opt-in and
+    per shader: the profile must record shared_host after its dispatch bounds
+    have been measured, while shared retains the original guest reservation.
+    """
+    if 'shared_host' not in j:
+        return
+    requested, host = int(j.get('shared', 0)), int(j['shared_host'])
+    if j.get('stage') != 'cs' or requested <= 0 or host <= 0 or host > requested or host % 16:
+        sys.exit(f'[RED] {j.get("key", "?")}: shared_host must be a positive 16-byte-aligned compute limit no larger than shared ({requested})')
+    j['shared_requested'] = requested
+    j['shared'] = host
+
 def job_for(key, name, rec, w):
     ci = rec.find(bytes.fromhex('34127698')); code = rec[0x38:ci]; stage = name[:2]
+    compact_stage = compact_nvn2_stage(rec)
+    compact_stages = {'vs': 0, 'ps': 1, 'cs': 5, 'ts': 6, 'ms': 7}
+    if compact_stage is not None:
+        ctl = rec[ci:]
+        if stage not in compact_stages or compact_stage != compact_stages[stage]:
+            sys.exit(f'[RED] {key}: {stage} package record has compact NVN2 stage {compact_stage}, expected {compact_stages.get(stage)}')
+        if not NVN2_BRIDGE or not os.path.isfile(NVN2_BRIDGE) or not os.access(NVN2_BRIDGE, os.X_OK):
+            sys.exit(f'[RED] {key}: NVN2_AMPERE_BRIDGE must name the executable optional Ampere bridge for compact {stage} shaders')
+        native = os.path.join(w, key + '.ampere.bin'); cp = os.path.join(w, key + '.bin')
+        open(native, 'wb').write(code)
+        role = {'vs': 'vertex', 'ps': 'fragment', 'cs': 'compute', 'ts': 'task', 'ms': 'mesh'}[stage]
+        # Ampere graphics code follows its 128-byte shader header. Compute is
+        # addressed directly by the launch descriptor and begins at byte zero.
+        bridge = subprocess.run([NVN2_BRIDGE, role, native, cp,
+                                 '0' if stage == 'cs' else '128'],
+                                capture_output=True, text=True)
+        if bridge.returncode or not os.path.exists(cp):
+            sys.exit(f'[RED] {key}: NVN2 {role} lowering failed: {(bridge.stderr or bridge.stdout).strip()[:240]}')
+        texture_buffer = re.search(r'\btexture-buffer=(none|\d+)\b', bridge.stdout)
+        if not texture_buffer:
+            sys.exit(f'[RED] {key}: NVN2 {role} bridge did not report its texture descriptor bank')
+        texture_buffer = None if texture_buffer.group(1) == 'none' else int(texture_buffer.group(1))
+        translated_stage = 'cs' if stage in ('ts', 'ms') else stage
+        nctl = compact_nvn2_control_size(ctl)
+        j = dict(key=key, stage=translated_stage, source_stage=stage, nvn2=True, code=cp, tex={}, img={}, attr={}, fout={}, c1=ctl[nctl:].hex(),
+                 nvn2_texture_buffer=texture_buffer,
+                 debug=os.environ.get('XLATE_DEBUG', '1') != '0', reduced=os.environ.get('XLATE_REDUCED', '1') == '1')
+        if key not in FACTS: j['no_facts'] = True
+        else: j.update(FACTS[key]); apply_host_shared_limit(j)
+        return j, b''
     c1o, c1t = struct.unpack_from('<2I', rec, ci + 0x700)   # control segment +0x700: c1 relative to the start of the instruction area, +0x704: total length of the instruction area (c1 = what lies between the two; lengths across the whole library are 0 / 256 / 512 / 768)
     c1 = rec[0x38 + c1o:0x38 + c1t]
     ab = vertex_ab(key, code, rec[ci:]) if stage == 'vs' else None
@@ -467,7 +530,7 @@ def job_for(key, name, rec, w):
     j = {'key': key, 'stage': stage, 'code': cp, 'tex': {}, 'img': {}, 'attr': {}, 'fout': {}, 'c1': c1.hex(), **({'tf': tf} if tf else {}), **({'early_fragment_tests': True} if ez else {}),
          'debug': os.environ.get('XLATE_DEBUG', '1') != '0', 'reduced': os.environ.get('XLATE_REDUCED', '1') == '1'}   # translation options (see dmsh_xlate/Program.cs); relaxed precision is on by default (GPU float last-bit error does not enter game state, whole frame −26% on the second Mac)   # c1: used by the translator to read indirect jump tables
     if key not in FACTS: j['no_facts'] = True; return j, c1   # not in the answer table: queries use defaults (listed separately in the summary)
-    j.update(FACTS[key])
+    j.update(FACTS[key]); apply_host_shared_limit(j)
     return j, c1
 
 TF_SLOT = 8   # Metal vertex buffer index of transform feedback buffer 0 (1-3 follow): slot 0 is the argument buffer, 16-29 the vertex streams, 30 the zero buffer (nvn_mtl.m tf_draw)
@@ -595,6 +658,18 @@ def decode_tex(name):
     s = next((slot(x, SAMP_BASE, sb) for x in words if x * 4 >= SAMP_BASE and slot(x, SAMP_BASE, sb) is not None), None) if ty != 3 else None
     return t, s, ty
 
+def decode_nvn2_direct(name):
+    """Compact NVN2 compute direct descriptor handle, in 32-bit words.
+
+    Native QMD compute programs address their texture descriptor bank as an
+    array of 64-bit rows from byte zero, so word 0x38 names slot 0x1c. This is
+    intentionally separate from GLSLC's legacy c2 table layout.
+    """
+    m = re.match(r'[a-z]+_[ti]\w*?_tcb_([0-9A-F]+)', name)
+    if not m: return None
+    word = int(m.group(1), 16)
+    return word // 2 if word % 2 == 0 and word // 2 < 32 else None
+
 def const_sampler(name):
     """The constant sampler ID of a type-3 handle (fp_t_cb65538_3041005C: the texture handle at c2 word 0x5C ORed with sampler 0x104), or None"""
     m = re.match(r'[a-z]+_t\w*?_(?:cb(\d+)|tcb)_([0-9A-F]+)', name)
@@ -676,6 +751,8 @@ def reflect(key, stage, msl, res):
     """MSL argument buffer struct member → replay reflection: kind (same as nvn_refl.h) + NVN slot number + argument buffer member index"""
     body = re.search(r'struct spvDescriptorSetBuffer0\s*\{(.*?)\};', msl, re.S)
     sb_cb = {b['binding']: b for b in res['sbufs']}
+    nvn2_compute = bool(res.get('nvn2_compute'))
+    nvn2_texture_buffer = res.get('nvn2_texture_buffer')
     binds = []
     # A member may carry attributes after its id: SPIRV-Cross marks the resources a fragment shader writes inside its interlock [[id(n), raster_order_group(0)]]
     # (Mario Party Superstars' light_primitive_point_cluster.bnsh, a storage buffer and two images); a member the pattern skipped left the host's argument buffer longer than the reflection
@@ -696,6 +773,14 @@ def reflect(key, stage, msl, res):
             e.update(kind=abi.KIND_CBUF, reg=n - 3) if 3 <= n <= 16 else e.update(kind=abi.KIND_C1 if n == 1 else abi.KIND_DRVCB, bank=n)
         elif re.fullmatch(r'[a-z]+_s(\d+)', nm):
             e.update(kind=abi.KIND_SBUF, index=int(re.fullmatch(r'[a-z]+_s(\d+)', nm).group(1)))
+        elif nvn2_compute and decode_nvn2_direct(nm[:-5] if nm.endswith('Smplr') else nm) is not None:
+            reg = decode_nvn2_direct(nm[:-5] if nm.endswith('Smplr') else nm)
+            e['descriptor_bank'] = nvn2_texture_buffer
+            if nm.endswith('Smplr'): e.update(kind=abi.KIND_SAMP_TEX, reg=reg)
+            elif re.match(r'[a-z]+_i', nm): e.update(kind=abi.KIND_IMG, reg=reg)
+            elif 'texture_buffer' in ty: e.update(kind=abi.KIND_TBUF, reg=reg)
+            else: e.update(kind=abi.KIND_TEX, reg=reg)
+            if e.get('kind') == abi.KIND_IMG and re.search(r'\b%s\.atomic_' % re.escape(nm), msl): e['atomic'] = True
         elif decode_ubo_tex(nm[:-5] if nm.endswith('Smplr') else nm):   # bindless: the handle is in a uniform buffer (reg = uniform slot, off = byte offset)
             ut, us = decode_ubo_tex(nm[:-5] if nm.endswith('Smplr') else nm)
             if nm.endswith('Smplr'): e.update(kind=abi.KIND_SAMP_ID, reg=us[1]) if us[0] == 'id' else e.update(kind=abi.KIND_SAMP_UBO, reg=us[0], off=us[1])
@@ -724,7 +809,17 @@ def reflect(key, stage, msl, res):
         if e['kind'] == abi.KIND_SBUF:
             b = sb_sorted[e['index']] if e['index'] < len(sb_sorted) else None
             off = b['cb_offset'] * 4 if b and b['cb_slot'] == 0 else None
-            if stage == 'cs' and off is not None and abi.C0_CS_UBO <= off < abi.C0_CS_UBO + abi.C0_ROW * abi.C0_CS_UBO_SLOTS and (off - abi.C0_CS_UBO) % abi.C0_ROW == 0:
+            if b and b['cb_slot'] == 0xff and b['cb_offset'] == 0xfffc:
+                e.update(kind=abi.KIND_NVN2_SCRATCH)
+                e.pop('reg', None)
+            elif nvn2_compute and b and b['cb_slot'] == 0 and off is not None and 0 <= off < abi.C0_ROW * abi.C0_SSBO_SLOTS and off % abi.C0_ROW == 0:
+                # Compact NVN2's c0 offset is the shader's internal descriptor row, not the
+                # NVN API storage-buffer slot. The translated cp_sN resources retain their
+                # native binding order in index; using the descriptor row as a slot sent
+                # Mario Kart World's 57 KiB output through slot 2's unrelated draw buffer.
+                e['native_cb_offset'] = off
+                e['reg'] = e['index']
+            elif stage == 'cs' and off is not None and abi.C0_CS_UBO <= off < abi.C0_CS_UBO + abi.C0_ROW * abi.C0_CS_UBO_SLOTS and (off - abi.C0_CS_UBO) % abi.C0_ROW == 0:
                 e.update(kind=abi.KIND_UBO_PTR, reg=(off - abi.C0_CS_UBO) // abi.C0_ROW)   # compute-stage uniform slot r: address at c0[C0_CS_UBO + 0x10 r], read through global memory (checked against cs_lut_combine_c reading cb10[66])
             elif b and b['cb_slot'] >= 3:   # the address is in the game's own uniform buffer c[n] = uniform slot n - 3 (Monster Hunter Rise's compute shaders: c3 + 0x38); the replay reads it there
                 e.update(kind=abi.KIND_SBUF_UBO, reg=b['cb_slot'] - 3, off=b['cb_offset'] * 4)
@@ -740,7 +835,7 @@ def drv_reads(src):
     out = {}
     for bank in (0, 2):
         offs, dyn = set(), False
-        for m in re.finditer(r'fp_c%d\)\._m0\[([^\]]+)\]' % bank, src):
+        for m in re.finditer(r'[a-z]+_c%d\)\._m0\[([^\]]+)\]' % bank, src):
             idx = m.group(1).rstrip('u')
             if idx.isdigit(): offs.add(int(idx) * 16)
             else: dyn = True
@@ -749,10 +844,10 @@ def drv_reads(src):
 
 SAMPLE_ROWS = [(abi.C0_SAMPLE_TABLE, abi.C0_SAMPLE_TABLE + abi.C0_SAMPLE_BYTES), (abi.C0_SAMPLE_INFO, abi.C0_SAMPLE_INFO + abi.C0_ROW)]   # c0: the pixel stage's sample position rows
 
-def unfillable(dr, stage):
+def unfillable(dr, stage, nvn2_compute=False):
     bad = []
     for bank, d in dr.items():
-        fill = DRV_FILL[int(bank)] + (SAMPLE_ROWS if bank == '0' and stage == 'ps' else [])
+        fill = ([(0, abi.C0_ROW * abi.C0_SSBO_SLOTS)] if bank == '0' and nvn2_compute else DRV_FILL[int(bank)]) + (SAMPLE_ROWS if bank == '0' and stage == 'ps' else [])
         # a computed index into c2 reads one of its handle tables, which the replay layer fills whole (nvn_mtl.m DRV2: EA SPORTS FC 27's lights read the separate texture words
         # at 0x168 + 8i to test each light's handle); c0 is filled only in its tables and words above, so a computed index there may read what the replay does not write.
         # The one computed c0 index known is GLSLC's sample position lookup in a pixel shader: a byte of the table at 0x620, at an index made of the sample index (PIXLD.MYINDEX)
@@ -1156,6 +1251,9 @@ def finish(key, w, j, c1):
         if pad: open(msl, 'w').write(src)
     lay = None; discard = False
     res = json.load(open(os.path.join(w, key + '.res.json')))
+    if j.get('nvn2') and j.get('source_stage') == 'cs':
+        res['nvn2_compute'] = True
+        res['nvn2_texture_buffer'] = j.get('nvn2_texture_buffer')
     if j['stage'] == 'vs':   # the two depth-convention entry points (see vs_depth); the analysis below uses the source with only main0
         capture = dmsh_geometry.capture(src)
         src, full = vs_depth(src)
@@ -1182,14 +1280,18 @@ def finish(key, w, j, c1):
     clone(msl, os.path.join(out, key + '_b.metal'))
     entry = re.search(r'(vertex|fragment|kernel)\s+\S+\s+(\w+)\s*\(', src)
     dr = drv_reads(src)
-    try: binds = reflect(key, j['stage'], src, res)
+    reflection_stage = j.get('source_stage', j['stage'])
+    try: binds = reflect(key, reflection_stage, src, res)
     except ValueError as e: return 'reflection failed', str(e)[:160], None
-    refl = {'key': key + '_b', 'route': 'B', 'chain': CHAIN, 'dm_ctl': key, 'source': f'{name}#{k}', 'pc_paired': pc_of[key], 'stage': j['stage'],
+    refl = {'key': key + '_b', 'route': 'B', 'chain': CHAIN, 'dm_ctl': key, 'source': f'{name}#{k}', 'pc_paired': pc_of[key], 'stage': reflection_stage,
             'entry': entry.group(2) if entry else 'main0', 'msl_entry_kind': entry.group(1) if entry else None, **({'entry_z': 'main0_z', 'entry_geometry_capture': 'main0_gs'} if j['stage'] == 'vs' else {}),
             **({'entry_discard': 'main0_discard'} if discard else {}),
             **({'entry_tf': 'main0_tf', 'tf_strides': [e['stride'] if e else 0 for e in j['tf']]} if j.get('tf') else {}),
             **({'entry_layer': 'main0_l', 'entry_layer_z': 'main0_lz', 'layer_from': lay} if lay else {}), **({'entry_u': 'main0_u'} if fu else {}), **({'entry_m': 'main0_m', 'uint_mask_m': fmask} if fu and fmask else {}), **({'entry_d': 'main0_d'} if fd else {}),
-            'threadgroup_size': j.get('local'), 'c1': c1.hex(), 'notes': res['notes'] + (['not in the answer table, queries use defaults'] if j.get('no_facts') else []), 'drv_reads': dr, 'drv_unfillable': unfillable(dr, j['stage']),
+            'threadgroup_size': j.get('local'),
+            **({'shared_memory': j.get('shared'), 'shared_memory_requested': j.get('shared_requested', j.get('shared'))} if j['stage'] == 'cs' else {}),
+            'c1': c1.hex(), 'notes': res['notes'] + (['not in the answer table, queries use defaults'] if j.get('no_facts') else []), 'drv_reads': dr, 'drv_unfillable': unfillable(dr, reflection_stage, bool(res.get('nvn2_compute'))),
+            'nvn2_compute': bool(res.get('nvn2_compute')), 'nvn2_texture_buffer': res.get('nvn2_texture_buffer'),
             'bindings': binds,
             'vertex_inputs': [{'location': int(m.group(2)), 'msl_type': m.group(1)} for m in re.finditer(r'(\w+)\s+\w+\s*\[\[attribute\((\d+)\)\]\]', src)],
             'raster': raster_facts(j['stage'], src), 'vs_pad': pad}

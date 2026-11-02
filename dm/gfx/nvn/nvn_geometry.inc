@@ -411,6 +411,14 @@ static id<MTLRenderPipelineState> geo_mesh_pso(NvProg *pr) {
         for (int i = 0; i < 8; i++) m.colorAttachments[i] = d.colorAttachments[i];
         m.depthAttachmentPixelFormat = d.depthAttachmentPixelFormat; m.stencilAttachmentPixelFormat = d.stencilAttachmentPixelFormat;
         const char *vk = vs->key, *fk = fs ? fs->key : "-", *gk = g_geo_mesh.lean->key; pso_key kk = k;
+        if (g_geo_mesh.on == 2) {
+            NSError *e = nil; uint64_t t0 = bp_now();
+            id<MTLRenderPipelineState> p = [g_dev newRenderPipelineStateWithMeshDescriptor:m options:MTLPipelineOptionNone reflection:nil error:&e];
+            MLOG("%sNVN2 raster pipeline: task %s fragment %s mesh %s, %.1f ms%s%s", p ? "" : "[RED] ", vk, fk, gk,
+                 (bp_now() - t0) / 1e6, p ? "" : ": ", p ? "" : e.localizedDescription.UTF8String);
+            os_unfair_lock_lock(&g_pso_mesh_lock); hm_put_id(&g_pso_mesh, &kk, p ?: NSNull.null); os_unfair_lock_unlock(&g_pso_mesh_lock);
+            return p;
+        }
         dispatch_async(pp_bg_queue(), ^{
             NSError *e = nil; uint64_t t0 = bp_now();
             id<MTLRenderPipelineState> p = [g_dev newRenderPipelineStateWithMeshDescriptor:m options:MTLPipelineOptionNone reflection:nil error:&e];
@@ -426,6 +434,13 @@ static id<MTLRenderPipelineState> geo_mesh_pso(NvProg *pr) {
 static void geo_mesh_encode(id<MTLRenderCommandEncoder> en_) {
     id<MTL4RenderCommandEncoder> en = (id<MTL4RenderCommandEncoder>)en_;
     [en setArgumentTable:g_vt atStages:MTLRenderStageMesh];
+    if (g_geo_mesh.on == 2) {
+        enc_r_vbuf(en, 0, g_nvn2_scratch_gpu);
+        [en drawMeshThreadgroups:MTLSizeMake(DMSH_NVN2_MAX_MESH_GROUPS, 1, 1)
+           threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1)
+             threadsPerMeshThreadgroup:MTLSizeMake(64, 1, 1)];
+        return;
+    }
     uint32_t tris = g_geo_mesh.a.count / 3;
     id<MTLBuffer> b; size_t o = arena_alloc(64, &b); uint8_t *p = (uint8_t *)b.contents + o;
     uint32_t info[8] = {0, 1, 0, 0, tris, 0, 0, 0}; memcpy(p, info, 32); memcpy(p + 32, &g_geo_mesh.a, sizeof g_geo_mesh.a);
@@ -434,6 +449,15 @@ static void geo_mesh_encode(id<MTLRenderCommandEncoder> en_) {
     g_args_dirty[2] = 1; g_args_mesh = GEO_MESH_GS_SLOT; encode_args(en, g_geo_mesh.lean, 2, 0); g_args_mesh = 0; g_args_dirty[2] = 1;
     memcpy(g_geo_bind, save, sizeof save);
     [en drawMeshThreadgroups:MTLSizeMake((tris + GEO_MESH_PRIMS - 1) / GEO_MESH_PRIMS, 1, 1) threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(3 * GEO_MESH_PRIMS, 1, 1)];
+}
+static int nvn2_raster_draw(NvShader *task, NvShader *mesh, NvShader *fragment, id<MTLFunction> fn) {
+    NvProg *raster = [NvProg new]; raster->sh[0] = task; raster->sh[1] = fragment;
+    g_geo_mesh.on = 2; g_geo_mesh.miss = 0; g_geo_mesh.fn = fn; g_geo_mesh.lean = mesh;
+    g_geo_program = raster;
+    p_draw synthetic = {.prim = 4, .count = 3, .instances = 1};
+    draw(&synthetic, NULL);
+    g_geo_program = nil; g_geo_mesh.on = 0; args_dirty_all();
+    return !g_geo_mesh.miss;
 }
 static uint64_t g_geo_mesh_n, g_geo_mesh_wait;   // mesh draws; draws the compute path drew while their mesh pipeline was built
 static int geo_mesh_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {

@@ -5,7 +5,7 @@ struct V { float4 p [[position]]; float2 uv; };
 vertex V vs(uint id [[vertex_id]]) { float2 uv = float2((id << 1) & 2, id & 2); V o; o.p = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); o.uv = uv; return o; }
 // f: filter (0 bilinear, 1 Catmull-Rom bicubic, 2 Lanczos-3, 3 sharp pixels),
 // sharpening amount (0 off, up to 1), and the source texture size.
-struct Crop { float4 rect; float4 edge; float4 f; };
+struct Crop { float4 rect; float4 edge; float4 f; float4 p; };
 // Every tap is clamped to the valid rectangle's texel centres: no filter reads
 // the black texels outside the game's crop.
 static float4 tap(texture2d<float> t, sampler s, constant Crop& c, float2 uv) {
@@ -60,6 +60,19 @@ static float4 cas(texture2d<float> t, sampler s, constant Crop& c, float2 uv, fl
     float3 wt = -sqrt(saturate(min(mn, 1.0 - mx) / max(mx, 1e-4))) / mix(8.0, 5.0, c.f.y);
     return float4(saturate((m.rgb + (n + so + w + e) * wt) / (1.0 + 4.0 * wt)), m.a);
 }
+// Optional display post-processing: 1 soft, 2 PS5-like, 3 balanced, 4 ultra, 5 neutral.
+// It is deliberately applied after the spatial filter and before CAS so the default
+// path remains byte-for-byte unchanged when DM_PRESENT_POSTFX is off.
+static float4 postfx(float4 m, constant Crop& c) {
+    if (c.p.x <= 0.5) return m;
+    float4 q[6] = {float4(0, 0, 1, 1), float4(0.14, 0.04, 1.015, 1.025),
+                   float4(0.25, 0.08, 1.03, 1.05), float4(0.22, 0.03, 1.015, 1.025),
+                   float4(0.38, 0.12, 1.05, 1.075), float4(0.22, 0.03, 1, 1)};
+    int k = clamp(int(c.p.x), 0, 5); float4 z = q[k];
+    float l = dot(m.rgb, float3(0.2126, 0.7152, 0.0722));
+    m.rgb = saturate((l + (m.rgb - l) * z.w - 0.5) * z.z + 0.5);
+    return m;
+}
 fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant Crop& c [[buffer(0)]]) {
     float2 uv = in.uv * c.rect.zw + c.rect.xy; int mode = int(c.f.x); float4 m;
     if (mode == 1) m = bicubic(t, s, c, uv);
@@ -67,5 +80,6 @@ fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler
     else if (mode == 3) m = sharp_pixels(t, s, c, uv);
     else m = tap(t, s, c, uv);
     if (mode == 1 || mode == 2) m = float4(saturate(m.rgb), m.a);
+    m = postfx(m, c);
     return c.f.y > 0 ? cas(t, s, c, uv, m) : m;
 }

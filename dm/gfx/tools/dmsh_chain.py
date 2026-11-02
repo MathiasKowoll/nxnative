@@ -18,10 +18,13 @@ FILES = ['tools/dmsh_chain.py', 'tools/dmsh_build.py', 'tools/dmsh_atomic.py', '
 # This target-specific lowering lives in the vendored translator. Include its
 # sources as well as the rebuilt DLL fingerprint; no old shader cache can bypass it.
 FILES += ['../third_party/ryujinx/src/Ryujinx.Graphics.Shader/' + f for f in (
+    'Decoders/Decoder.cs', 'Decoders/InstDecoders.cs', 'Decoders/InstName.cs', 'Decoders/InstTable.cs',
+    'Instructions/InstEmitAttribute.cs',
     'Instructions/InstEmitSurface.cs', 'Instructions/InstEmit.cs', 'Instructions/InstEmitPermute.cs', 'IntermediateRepresentation/TextureFlags.cs',
     'Translation/TranslationFlags.cs', 'Translation/HostCapabilities.cs',
     'Translation/Transforms/GeometryToCompute.cs', 'Translation/TranslatorContext.cs', 'Translation/Translator.cs', 'Translation/EmitterContext.cs', 'Translation/ShaderDefinitions.cs', 'CodeGen/Spirv/Instructions.cs',
     'StructuredIr/ShaderProperties.cs', 'Translation/Optimizations/BindlessElimination.cs', 'Translation/Optimizations/Optimizer.cs')]
+FILES += ['tools/nvn2_ampere_bridge.cpp', 'tools/nvn2_mesh_abi.py']
 INPUT_TABLES = ['shader_facts.tsv', 'shader_map.tsv', 'shader_map.tsv.conflicts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv', 'bf_want.tsv', 'geo_mesh.tsv', 'dual_want.tsv']   # in the game profile folder
 LOCK = os.path.join(HERE, 'dmsh_chain.lock'); HEADER = os.path.join(GFX, 'nvn/dmsh_chain.h')
 STAMP = 'inputs.tsv'   # in the library directory b-<V>/

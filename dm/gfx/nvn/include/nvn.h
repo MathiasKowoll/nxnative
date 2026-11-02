@@ -1554,6 +1554,10 @@ typedef void (*PFNNVNCOMMANDBUFFERBINDUNIFORMBUFFERPROC)(NVNcommandBuffer*, NVNs
                                                          NVNbufferAddress, size_t);
 typedef void (*PFNNVNCOMMANDBUFFERBINDUNIFORMBUFFERSPROC)(NVNcommandBuffer*, NVNshaderStage, int,
                                                           int, const NVNbufferRange*);
+// NVN2 root-table constants. The selector and byte range are encoded in the
+// Ampere SET_ROOT_TABLE_SELECTOR / LOAD_ROOT_TABLE command pair.
+typedef void (*PFNNVNCOMMANDBUFFERPUSHGRAPHICSCONSTANTSPROC)(NVNcommandBuffer*, int, int, int,
+                                                             const void*);
 typedef void (*PFNNVNCOMMANDBUFFERBINDTRANSFORMFEEDBACKBUFFERPROC)(NVNcommandBuffer*, int,
                                                                    NVNbufferAddress, size_t);
 typedef void (*PFNNVNCOMMANDBUFFERBINDTRANSFORMFEEDBACKBUFFERSPROC)(NVNcommandBuffer*, int, int,

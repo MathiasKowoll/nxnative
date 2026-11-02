@@ -30,7 +30,13 @@ def extents(source, bindings):
     """{reg: bytes} for the cbuf bindings whose every read is a proven index into _m0"""
     out, definitions = {}, None
     for b in bindings:
-        if b.get("kind") != abi.KIND_CBUF or "reg" not in b: continue
+        reg = b.get("reg")
+        # A translated shader can keep an otherwise useful reflection entry even
+        # when its compact NVN2 binding slot was not decoded.  Such entries use
+        # null for reg and must stay conservative (absent from this table), just
+        # like a binding with no reg field.  Do not let one unknown slot prevent
+        # bounded data for every other shader from being generated.
+        if b.get("kind") != abi.KIND_CBUF or type(reg) is not int or reg < 0: continue
         name = b["msl_name"]
         uses = len(re.findall(r"\b" + re.escape(name) + r"\b", source))
         reads = re.findall(r"\(\*spvDescriptorSet0\." + re.escape(name) + r"\)\._m0\[([^\]]+)\]", source)
@@ -43,7 +49,7 @@ def extents(source, bindings):
             if not known(low, top) or low < 0: high = None; break
             high = max(high, top)
         if high is None or 16 * (high + 1) >= MAX: continue
-        out[b["reg"]] = 16 * (high + 1)
+        out[reg] = 16 * (high + 1)
     return out
 
 
@@ -56,7 +62,8 @@ def unwritten(source, bindings):
     writable (device, not const device), so the host takes a binding as written unless the table lists it"""
     out = []
     for b in bindings:
-        if b.get("kind") != abi.KIND_SBUF or "reg" not in b: continue
+        reg = b.get("reg")
+        if b.get("kind") != abi.KIND_SBUF or type(reg) is not int or reg < 0: continue
         name = "spvDescriptorSet0." + b["msl_name"]; ok = True
         for m in re.finditer(r"\(\*" + re.escape(name) + r"\b", source):
             j = m.end()
@@ -70,7 +77,7 @@ def unwritten(source, bindings):
                 j += 1
             if WRITE.match(source, j): ok = False; break
         if ok and len(re.findall(re.escape(name) + r"\b", source)) == len(re.findall(r"\(\*" + re.escape(name) + r"\b", source)):
-            out.append(b["reg"])
+            out.append(reg)
     return sorted(set(out))
 
 

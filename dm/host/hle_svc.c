@@ -101,7 +101,8 @@ void svc_guest_range(uint8_t **base, size_t *size) { *base = g_as; *size = g_res
 enum { I_CoreMask=0, I_PriorityMask=1, I_AliasAddr=2, I_AliasSize=3, I_HeapAddr=4, I_HeapSize=5,
        I_TotalMem=6, I_UsedMem=7, I_DebuggerAttached=8, I_ResourceLimit=9, I_IdleTick=10, I_RandomEntropy=11,
        I_AslrAddr=12, I_AslrSize=13, I_StackAddr=14, I_StackSize=15, I_SysResTotal=16, I_SysResUsed=17,
-       I_ProgramId=18, I_InitProcIdRange=19, I_UserExcAddr=20, I_TotalNonSys=21, I_UsedNonSys=22, I_IsApplication=23, I_FreeThreadCount=24 };
+       I_ProgramId=18, I_InitProcIdRange=19, I_UserExcAddr=20, I_TotalNonSys=21, I_UsedNonSys=22, I_IsApplication=23, I_FreeThreadCount=24,
+       I_PhysicalMemoryPageSize=33 };
 
 static uint8_t g_seen[256];
 
@@ -689,6 +690,10 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         case I_RandomEntropy: { uint64_t dm_entropy64(void); v = dm_entropy64(); break; }   // a deterministic stream when DM_DETCLOCK is on (hle_os.c)
         case I_ProgramId: { static uint64_t pid; if (!pid) { const char *e = getenv("DM_PROGRAM_ID"); pid = e ? strtoull(e, NULL, 16) : DM_GAME_PROGRAM_ID; } v = pid; break; }   // default from the game profile's program_id; DM_PROGRAM_ID=hex overrides
         case I_IsApplication: v = 1; break;
+        // Generic SDK 19+ queries the mapping granule before VammManager's first
+        // MapPhysicalMemory. It is the guest page size, not macOS's 16 KiB page.
+        // Returning success with zero here made that first map request size zero.
+        case I_PhysicalMemoryPageSize: v = 0x1000; break;
         // nn::os::GetFreeThreadCount (SDK 11+): the thread resource limit less the threads alive, as the kernel answers it (Atmosphère kern_svc_info.cpp). pm gives an application a limit of
         // 96 threads (pm_spec.cpp BaseApplicationThreads; a boost raises it to 256). Monster Train 2's Unity 2022.3 player creates a thread only when this is at least 1: the 0 it got here
         // left its main thread waiting at boot for a thread it never created (main+0x3e1ac4)

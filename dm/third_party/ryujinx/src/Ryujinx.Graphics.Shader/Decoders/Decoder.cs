@@ -314,6 +314,7 @@ namespace Ryujinx.Graphics.Shader.Decoders
                     case InstName.AtomCas:
                     case InstName.Red:
                     case InstName.Stg:
+                    case InstName.Nvn2IsbeWrite:
                     case InstName.Suatom:
                     case InstName.SuatomB:
                     case InstName.SuatomB2:

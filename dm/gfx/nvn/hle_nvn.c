@@ -112,6 +112,7 @@ HLE_FORCE("nvnBootstrapLoader", "the NVN graphics API is replaced wholesale with
 #define B(x) ((x) & 0xff)
 
 #include "nvn_obj.h"
+#include "nvn_shader_control.h"
 #include "nvn_capture.h"   // DM_NVN_CAPTURE hooks
 
 // ---------- Device ----------
@@ -281,6 +282,7 @@ NVN(nvnSamplerPoolGetSize, int, const NVNsamplerPool *sp) { return ((const dpool
 NVN(nvnTextureBuilderSetDefaults, void, NVNtextureBuilder *b) {
     NVNdevice *dev = TB(b)->dev; memset(b, 0, sizeof(tex_builder_t)); TB(b)->dev = dev;
     TB(b)->d.target = NVN_TEXTURE_TARGET_2D; TB(b)->d.width = TB(b)->d.height = TB(b)->d.depth = TB(b)->d.levels = 1;
+    nvn_tex_set_native_tiling(DM_GAME_TEX_GOB_NX2);
 }
 NVN(nvnTextureBuilderSetDevice, void, NVNtextureBuilder *b, NVNdevice *d) { TB(b)->dev = d; }
 NVN(nvnTextureBuilderSetFlags, void, NVNtextureBuilder *b, int f) { TB(b)->d.flags = f; }
@@ -588,8 +590,9 @@ NVN(nvnProgramInitialize, NVNboolean, NVNprogram *p, NVNdevice *d) {
 }
 static void pk_drop(const void *p);
 NVN(nvnProgramFinalize, void, NVNprogram *p) { mtl_prog_release((prog_t *)p); ((prog_t *)p)->magic = 0; pk_drop(p); }
-// a program's per-stage keys (side table: guest NVNprogram address → host object; bit i of ok = stage i computed)
-typedef struct { uint8_t key[6][8]; uint8_t ok; } prog_keys_t;
+// A program's per-descriptor keys and compact-control stages. They stay in a
+// side table because growing prog_t writes beyond older games' NVNprogram.
+typedef struct { uint8_t key[6][8], stage[6], ok, stage_ok; } prog_keys_t;
 static pthread_mutex_t g_pk_mu = PTHREAD_MUTEX_INITIALIZER; static CFMutableDictionaryRef g_pk;   // a dedicated table (keys not shared with other side tables)
 static prog_keys_t *pk_get(const void *p, int make) {
     pthread_mutex_lock(&g_pk_mu);
@@ -605,20 +608,59 @@ static void pk_drop(const void *p) {
     if (k) { CFDictionaryRemoveValue(g_pk, p); free(k); }
     pthread_mutex_unlock(&g_pk_mu);
 }
+// Diagnostic-only copy of an unresolved compact control. The length field is
+// precisely what is missing, so read the smallest observed NVN2 control header
+// through Mach instead of dereferencing a guessed allocation. These files stay
+// outside the repository under DM_NVN_SHDUMP and are never used as runtime input.
+static void dump_unknown_compact_control(const NVNshaderData *sd) {
+    const char *dir = getenv("DM_NVN_SHDUMP");
+    if (!dir || !sd || !sd->control) return;
+    static atomic_uint dumped;
+    if (atomic_fetch_add(&dumped, 1) >= 64) return;
+    uint8_t control[0xd8]; vm_size_t got = 0;
+    if (vm_read_overwrite(mach_task_self(), (vm_address_t)sd->control, sizeof control,
+                          (vm_address_t)control, &got) != KERN_SUCCESS || got != sizeof control) return;
+    uint32_t *h = (uint32_t *)control, ncode = h[16];
+    if (h[0] != 0x98761234 || h[1] != 201 || (h[2] != 7 && h[2] != 11) ||
+        ncode == 0 || ncode >= (1u << 24) || (ncode & 15)) return;
+    uint8_t *code = malloc(ncode); if (!code) return;
+    got = 0;
+    if (!sd->data || vm_read_overwrite(mach_task_self(), (vm_address_t)sd->data, ncode,
+                                       (vm_address_t)code, &got) != KERN_SUCCESS || got != ncode) {
+        free(code); return;
+    }
+    uint8_t md[CC_SHA256_DIGEST_LENGTH]; CC_SHA256_CTX hc; CC_SHA256_Init(&hc);
+    CC_SHA256_Update(&hc, control, sizeof control); CC_SHA256_Update(&hc, code, ncode); CC_SHA256_Final(md, &hc);
+    char key[17], path[1024]; for (int i = 0; i < 8; i++) snprintf(key + i * 2, 3, "%02x", md[i]);
+    FILE *f; snprintf(path, sizeof path, "%s/unknown-%s.ctl", dir, key);
+    if ((f = fopen(path, "wb"))) { fwrite(control, 1, sizeof control, f); fclose(f); }
+    snprintf(path, sizeof path, "%s/unknown-%s.code", dir, key);
+    if ((f = fopen(path, "wb"))) { fwrite(code, 1, ncode, f); fclose(f); }
+    LOG("[nvn] captured unresolved compact control %s: version=%u.%u code-span=%#x", key, h[1], h[2], ncode);
+    free(code);
+}
 // mapped = 1: computed only when the code area is in a registered memory pool (at SetShaders: Mario sets some programs with an unmapped address first and fills it in before the first draw)
 static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
-    uint32_t ncode = 0; void *mb; uint64_t mo;
-    if (!sd->control) return 0;
-    memcpy(&ncode, (const uint8_t *)sd->control + 0x704, 4);
+    uint32_t ncode = 0, nctl = 0; void *mb; uint64_t mo;
+    if (!nvn_shader_control_layout(sd->control, &nctl, &ncode)) {
+        static atomic_uint reported;
+        if (sd->control && getenv("DM_NVN_SHDUMP") && atomic_fetch_add(&reported, 1) < 8) {
+            uint32_t h[18]; memcpy(h, sd->control, sizeof h);
+            LOG("[nvn] unsupported control: magic=%#x version=%u.%u control-span=%#x code-fields=%#x/%#x/%#x", h[0], h[1], h[2], h[12], h[14], h[16], h[17]);
+        }
+        dump_unknown_compact_control(sd);
+        return 0;
+    }
     int code = sd->data && ncode && ncode < (1u << 24);
-    if (mapped && !(code && mtl_addr(sd->data, ncode, &mb, &mo))) return 0;
+    if (mapped && !(code && mtl_addr(sd->data, ncode, &mb, &mo))) {
+        if (getenv("DM_NVN_SHDUMP")) LOG("[nvn] shader key deferred: control=%p code=%#llx control-span=%u code-span=%u", sd->control, (unsigned long long)sd->data, nctl, ncode);
+        return 0;
+    }
     // Control +0x20 holds the section's own length: sections of at least 0x880 bytes (all of Mario's, Engage's, Dread's and 13 Sentinels') use the first 0x880; SDK 10's 3D World has 0x850-byte ones followed by other data, so only their own length is used (shader_split.py ctl_len)
-    uint32_t nctl = 0x880, own; memcpy(&own, (const uint8_t *)sd->control + 0x20, 4);
-    if (own >= 0x760 && own < 0x880) nctl = own;
     uint8_t md[CC_SHA256_DIGEST_LENGTH]; CC_SHA256_CTX hc; CC_SHA256_Init(&hc);
     // Profile key shader_key_skip: bytes of the control section hashed as zeros (shader_split.py key_ctl). Batman: Arkham Knight's engine shares one control section among shaders whose
     // sections differ only in GLSLC's compile information (+0x778..+0x791, +0x7d0..+0x7e7): it hands a program the section of an earlier shader with the same rest, so the bytes there name another shader
-    if (DM_GAME_SHADER_KEY_SKIP_LEN && DM_GAME_SHADER_KEY_SKIP_OFF + DM_GAME_SHADER_KEY_SKIP_LEN <= nctl) {
+    if (nctl <= 0x880 && DM_GAME_SHADER_KEY_SKIP_LEN && DM_GAME_SHADER_KEY_SKIP_OFF + DM_GAME_SHADER_KEY_SKIP_LEN <= nctl) {
         uint8_t ctl[0x880]; memcpy(ctl, sd->control, nctl); memset(ctl + DM_GAME_SHADER_KEY_SKIP_OFF, 0, DM_GAME_SHADER_KEY_SKIP_LEN);
         CC_SHA256_Update(&hc, ctl, nctl);
     } else CC_SHA256_Update(&hc, sd->control, nctl);
@@ -626,12 +668,71 @@ static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
     CC_SHA256_Final(md, &hc); memcpy(out, md, 8);
     return 1;
 }
+static void dump_shader_data(const NVNshaderData *sd, const char *key) {
+    const char *dir = getenv("DM_NVN_SHDUMP"); uint32_t nctl, ncode;
+    if (!dir || !key || !nvn_shader_control_layout(sd->control, &nctl, &ncode)) return;
+    char path[1024]; FILE *f;
+    snprintf(path, sizeof path, "%s/%s.ctl", dir, key);
+    if ((f = fopen(path, "wb"))) { fwrite(sd->control, 1, nctl, f); fclose(f); }
+    uint8_t *code = malloc(ncode); vm_size_t got = 0;
+    if (!code) return;
+    if (sd->data && vm_read_overwrite(mach_task_self(), (vm_address_t)sd->data, ncode,
+                                      (vm_address_t)code, &got) == KERN_SUCCESS && got == ncode) {
+        snprintf(path, sizeof path, "%s/%s.code", dir, key);
+        if ((f = fopen(path, "wb"))) { fwrite(code, 1, ncode, f); fclose(f); }
+        // Compact NVN2 programs can keep their constant branch-address table
+        // just beyond the executable span. It is not part of the shader key,
+        // but the offline translator needs the original values to recover BRX
+        // targets. Keep a small bounded diagnostic tail beside the dump; the
+        // importer decides whether a proven table exists inside it.
+        const uint32_t *h = (const uint32_t *)sd->control;
+        if (nctl >= 0xd8 && h[0] == 0x98761234 && h[1] == 201) {
+            uint8_t extra[0x1100]; vm_size_t nextra = 0;
+            if (vm_read_overwrite(mach_task_self(), (vm_address_t)sd->data + ncode,
+                                  sizeof extra, (vm_address_t)extra, &nextra) == KERN_SUCCESS && nextra) {
+                snprintf(path, sizeof path, "%s/%s.extra", dir, key);
+                if ((f = fopen(path, "wb"))) { fwrite(extra, 1, nextra, f); fclose(f); }
+            }
+        }
+    }
+    free(code);
+}
+static int dump_shader_key_selected(const uint8_t key[8]) {
+    const char *selected = getenv("DM_NVN_SHDUMP_KEYS");
+    if (!selected || !*selected) return 0;
+    char hex[17];
+    for (int i = 0; i < 8; i++) snprintf(hex + i * 2, 3, "%02x", key[i]);
+    for (const char *p = selected; *p;) {
+        while (*p == ',' || *p == ' ' || *p == '\t') p++;
+        const char *end = p; while (*end && *end != ',' && *end != ' ' && *end != '\t') end++;
+        if (end - p == 16 && !memcmp(p, hex, 16)) return 1;
+        p = end;
+    }
+    return 0;
+}
 int prog_key(const prog_t *p, unsigned st, uint8_t key[8]) {
     if (st >= p->nstage) return 0;
     prog_keys_t *k = pk_get(p, 1);
-    if (!(k->ok >> st & 1)) { keys_hash(&p->sd[st], 0, k->key[st]); k->ok |= (uint8_t)(1u << st); }
+    if (!(k->ok >> st & 1)) {
+        if (!keys_hash(&p->sd[st], 0, k->key[st])) {
+            if (getenv("DM_NVN_SHDUMP")) LOG("[nvn] key failure: program=%p serial=%llu stage=%u control=%p", (void *)p, (unsigned long long)p->serial, st, p->sd[st].control);
+            return 0;
+        }
+        k->ok |= (uint8_t)(1u << st);
+    }
     memcpy(key, k->key[st], 8);
     return 1;
+}
+int prog_stage(const prog_t *p, unsigned index) {
+    if (index >= p->nstage) return -1;
+    prog_keys_t *k = pk_get(p, 1);
+    if (!(k->stage_ok >> index & 1)) {
+        int stage = nvn_shader_control_stage(p->sd[index].control);
+        if (stage < 0) return -1;
+        k->stage[index] = (uint8_t)stage;
+        k->stage_ok |= (uint8_t)(1u << index);
+    }
+    return k->stage[index];
 }
 NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData *sd) {
     prog_t *o = (prog_t *)p;
@@ -642,9 +743,18 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
     static const char *trace; static int trace_init;
     if (!trace_init) { trace = getenv("DM_NVN_PROGTRACE"); trace_init = 1; }
     prog_keys_t *k = pk_get(p, 1);
-    k->ok = 0;
+    k->ok = k->stage_ok = 0;
     for (int i = 0; i < n; i++) {
         if (keys_hash(&sd[i], 1, k->key[i])) k->ok |= (uint8_t)(1u << i);
+        int stage = nvn_shader_control_stage(sd[i].control);
+        if (stage >= 0) { k->stage[i] = (uint8_t)stage; k->stage_ok |= (uint8_t)(1u << i); }
+        // Explicit diagnostic capture for already-known shaders. Normal runs
+        // never set SHDUMP_KEYS; probes can request a few exact keys without
+        // repeatedly dumping the whole shader library.
+        if (dump && (k->ok & (1u << i)) && dump_shader_key_selected(k->key[i])) {
+            char key[17]; for (int j = 0; j < 8; j++) snprintf(key + j * 2, 3, "%02x", k->key[i][j]);
+            dump_shader_data(&sd[i], key);
+        }
         // Diagnostic: trace the loader of selected shader keys (comma-separated hex).
         if (trace && (k->ok & (1u << i))) {
             char key[17]; for (int j = 0; j < 8; j++) snprintf(key + j * 2, 3, "%02x", k->key[i][j]);
@@ -654,10 +764,40 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
             }
         }
         // DM_NVN_SHDUMP (debugging): keep a copy of the control section so the replay layer can save shaders missing from the map (never freed)
-        if (dump && sd[i].control) { void *c = malloc(0x880); memcpy(c, sd[i].control, 0x880); o->sd[i].control = c; }
+        uint32_t nctl, ncode;
+        if (dump && nvn_shader_control_layout(sd[i].control, &nctl, &ncode)) {
+            void *c = malloc(nctl); if (!c) die("shader control copy allocation failed");
+            memcpy(c, sd[i].control, nctl); o->sd[i].control = c;
+        }
     }
     OLOG("ProgramSetShaders %p n=%d data0=%#llx", (void *)p, n, n ? (unsigned long long)sd[0].data : 0ull);
     return 1;
+}
+
+// NVN2 ProgramBuilder: the game's callers reserve 128 bytes. The builder
+// retains descriptor references until InitializeFromBuilder copies them.
+typedef struct { NVNdevice *dev; const NVNshaderData *shaders; int count, sample_shading; } program_builder_t;
+_Static_assert(sizeof(program_builder_t) <= 128, "NVN2 program builder size");
+NVN_NOPROTO(nvnProgramBuilderSetDefaults, void, program_builder_t *b) { NVNdevice *d = b->dev; *b = (program_builder_t){.dev=d}; }
+NVN_NOPROTO(nvnProgramBuilderSetDevice, void, program_builder_t *b, NVNdevice *d) { b->dev = d; }
+NVN_NOPROTO(nvnProgramBuilderGetDevice, NVNdevice *, const program_builder_t *b) { return b->dev; }
+NVN_NOPROTO(nvnProgramBuilderSetShaders, void, program_builder_t *b, int count, const NVNshaderData *shaders) { b->count = count; b->shaders = shaders; }
+NVN_NOPROTO(nvnProgramBuilderGetShaders, const NVNshaderData *, const program_builder_t *b) { return b->shaders; }
+NVN_NOPROTO(nvnProgramBuilderGetShaderCount, int, const program_builder_t *b) { return b->count; }
+NVN_NOPROTO(nvnProgramBuilderSetSampleShading, void, program_builder_t *b, int mode) { b->sample_shading = mode; }
+NVN_NOPROTO(nvnProgramBuilderGetSampleShading, int, const program_builder_t *b) { return b->sample_shading; }
+NVN_NOPROTO(nvnProgramInitializeFromBuilder, NVNboolean, NVNprogram *p, const program_builder_t *b) {
+    if (b->count < 0 || b->count > 6 || (b->count && !b->shaders)) return 0;
+    // Match the existing program path: shaders using the sample index are
+    // compiled per sample. Explicit forced sample shading remains unsupported.
+    if (b->sample_shading) { LOG("[RED] NVN2 forced sample shading is not implemented"); return 0; }
+    for (int i = 0; i < b->count; i++) {
+        uint32_t nctl, ncode;
+        if (!nvn_shader_control_layout(b->shaders[i].control, &nctl, &ncode)) {
+            LOG("[RED] NVN2 invalid shader control section"); return 0;
+        }
+    }
+    return h_nvnProgramInitialize(p, b->dev) && h_nvnProgramSetShaders(p, b->count, b->shaders);
 }
 
 // ---------- Sync / events ----------
@@ -700,6 +840,11 @@ NVN(nvnQueueBuilderSetDefaults, void, NVNqueueBuilder *b) {
     QB(b)->cmd_sz = 65536; QB(b)->comp_sz = 262144; QB(b)->ctl_sz = 16384; QB(b)->flush = 4096;   // Device defaults
 }
 NVN(nvnQueueBuilderSetDevice, void, NVNqueueBuilder *b, NVNdevice *d) { QB(b)->dev = d; }
+// NVN2's secondary queues name a primary queue on the same device. All host
+// submissions already use one serialized Metal queue, so they share execution
+// ordering while retaining distinct replay state. Record the relationship and
+// validate it at initialization; do not alias the queues' mutable bindings.
+NVN_NOPROTO(nvnQueueBuilderSetPrimaryQueue, void, NVNqueueBuilder *b, NVNqueue *primary) { QB(b)->primary = primary; }
 NVN(nvnQueueBuilderSetFlags, void, NVNqueueBuilder *b, int f) { QB(b)->flags = f; }
 NVN(nvnQueueBuilderSetCommandMemorySize, void, NVNqueueBuilder *b, size_t n) { QB(b)->cmd_sz = n; }
 NVN(nvnQueueBuilderSetComputeMemorySize, void, NVNqueueBuilder *b, size_t n) { QB(b)->comp_sz = n; }
@@ -710,14 +855,20 @@ NVN(nvnQueueBuilderGetQueueMemorySize, size_t, const NVNqueueBuilder *b) {
     const queue_builder_t *o = (const queue_builder_t *)b;
     return (o->cmd_sz + o->comp_sz + o->ctl_sz + 4095) & ~(size_t)4095;
 }
-NVN(nvnQueueBuilderSetQueueMemory, void, NVNqueueBuilder *b, void *m, size_t n) { QB(b)->mem = m; QB(b)->mem_sz = n; }
+NVN(nvnQueueBuilderSetQueueMemory, void, NVNqueueBuilder *b, void *m, size_t n) { QB(b)->mem = m; (void)n; /* Metal owns the queue's backing storage. */ }
 NVN(nvnQueueInitialize, NVNboolean, NVNqueue *q, const NVNqueueBuilder *b) {
     NVNdevice *d = ((const queue_builder_t *)b)->dev;
+    const queue_t *primary = (const queue_t *)((const queue_builder_t *)b)->primary;
+    if (primary && ((const void *)primary == (const void *)q || primary->magic != MAGIC('Q', 'U', 'E', 'U') || primary->dev != d)) {
+        LOG("[RED] QueueInitialize: primary queue is not a live queue on this device");
+        return 0;
+    }
     // NVN emits SET_WINDOW_ORIGIN / FLIP_Y into the queue's initial GPU state.
     // Changing the device origin later changes viewport construction, but does
     // not rewrite that queue state (Xenoblade 2 creates its queue first).
     *(queue_t *)q = (queue_t){MAGIC('Q', 'U', 'E', 'U'), d, 0,
-                            !d || ((const dev_t_ *)d)->origin == NVN_WINDOW_ORIGIN_MODE_LOWER_LEFT, nvn_new_serial()};
+                            !d || ((const dev_t_ *)d)->origin == NVN_WINDOW_ORIGIN_MODE_LOWER_LEFT, nvn_new_serial(),
+                            primary ? primary->serial : 0};
     OLOG("QueueInitialize %p", (void *)q); return 1;
 }
 NVN(nvnQueueFinalize, void, NVNqueue *q) {
@@ -741,6 +892,91 @@ NVN(nvnQueueFinish, void, NVNqueue *q) { (void)q; mtl_finish(); }
 
 NVN(nvnCommandBufferInitialize, NVNboolean, NVNcommandBuffer *c, NVNdevice *d) {
     memset(c, 0, sizeof(cmd_t)); CB(c)->magic = MAGIC('C', 'M', 'D', 'B'); CB(c)->dev = d; return 1;
+}
+NVN_NOPROTO(nvnCommandBufferSetRecordingMode, void, NVNcommandBuffer *c, int mode) {
+    // NVN2 mode 1 records software commands instead of packed device methods:
+    // SDK 19 CopyBufferToBuffer writes {opcode, src, dst, size} in that mode,
+    // and EndRecording returns an ordinary command handle for modes 0/1.
+    // Both map to our replay records; copies and fences still execute at submit.
+    // Modes 2..4 also involve separate device-command paths not supported here.
+    if (CB(c)->magic != MAGIC('C', 'M', 'D', 'B') || (mode != 0 && mode != 1))
+        die("[RED] NVN2 command recording mode %d is unsupported", mode);
+}
+NVN_NOPROTO(nvnCommandBufferSetComputeOverlapMode, void, NVNcommandBuffer *c, int mode) {
+    // Enabling overlap permits concurrency; it does not require it. The Metal
+    // backend keeps its ordered encoder path in either mode and never drops
+    // barriers in response to this scheduling hint.
+    if (CB(c)->magic != MAGIC('C', 'M', 'D', 'B') || (mode != 0 && mode != 1))
+        die("[RED] NVN2 compute overlap mode %d is unsupported", mode);
+}
+NVN_NOPROTO(nvnCommandBufferBindShadingRateImage, void, NVNcommandBuffer *c, const NVNtexture *t, const NVNtextureView *v) {
+    // Metal has no direct equivalent of NVN2's arbitrary two-dimensional R8UI
+    // shading-rate image: MTLRasterizationRateMap is built from separable axis
+    // samples. Run at the conservative full 1x1 rate instead. This preserves
+    // image quality and shader results at the cost of the VRS performance win;
+    // it does not drop a draw or substitute pixels.
+    if (CB(c)->magic != MAGIC('C', 'M', 'D', 'B'))
+        die("[RED] invalid command buffer for NVN2 variable shading-rate image");
+    if (t) {
+        const tex_t *x = (const tex_t *)t;
+        if (x->magic != MAGIC('T', 'E', 'X', 0) || x->d.format != NVN_FORMAT_R8UI ||
+            x->d.width == 0 || x->d.height == 0 || x->d.depth > 1)
+            die("[RED] invalid NVN2 shading-rate image: texture=%p magic=%#x target=%u format=%#x size=%ux%ux%u",
+                (const void *)t, x->magic, x->d.target, x->d.format,
+                x->d.width, x->d.height, x->d.depth);
+        static int once; if (!once++)
+            LOG("[nvn] NVN2 shading-rate image %ux%u R8UI uses full-rate 1x1 shading (quality-preserving Metal fallback%s)",
+                x->d.width, x->d.height, v ? ", view validated at draw setup" : "");
+    } else if (v) {
+        die("[RED] NVN2 shading-rate view was bound without a texture");
+    }
+}
+NVN_NOPROTO(nvnCommandBufferShadingRateImagePalette, void, NVNcommandBuffer *c, int viewport, int count, const int *rates) {
+    // The palette maps four-bit image values to rates. It has no rendering
+    // effect in the current full-rate fallback, whether the bound image is null
+    // or a validated R8UI map. Validate the complete command so custom palettes
+    // cannot turn that quality-preserving fallback into an accidental stop.
+    if (CB(c)->magic != MAGIC('C', 'M', 'D', 'B') || viewport < 0 || viewport >= 16 ||
+        count < 0 || count > 16 || (count && !rates) || (!count && rates))
+        die("[RED] invalid NVN2 variable shading-rate palette");
+    for (int i = 0; i < count; i++) if (rates[i] < 0 || rates[i] > 15)
+        die("[RED] invalid NVN2 shading-rate value %d at palette index %d", rates[i], i);
+}
+NVN_NOPROTO(nvnCommandBufferSetGeometryProcessingMode, void, NVNcommandBuffer *c, int mode) {
+    // Mode 0 selects the ordinary pipeline. Modes 1/2 select the two NVN2
+    // mesh-task paths; retain the state so their draw entry can fail at the
+    // actual unsupported operation with its exact range instead of at setup.
+    if (CB(c)->magic != MAGIC('C', 'M', 'D', 'B') || mode < 0 || mode > 2)
+        die("[RED] invalid NVN2 geometry processing mode %d", mode);
+    CB(c)->geometry_mode = mode;
+}
+static void *rec(NVNcommandBuffer *c, uint32_t op, size_t payload);
+NVN(nvnCommandBufferPushGraphicsConstants, void, NVNcommandBuffer *c, int table, int offset, int size, const void *data) {
+    // SDK 19 emits SET_ROOT_TABLE_SELECTOR followed by up to 64 dwords. Match
+    // its four-byte granularity and 256-byte per-call cap, while refusing a
+    // range that would leave the selected 256-byte root table.
+    if (CB(c)->magic != MAGIC('C', 'M', 'D', 'B') || table < 0 || table >= 8 ||
+        offset < 0 || offset >= 256 || size < 0)
+        die("[RED] invalid NVN2 graphics constants table=%d offset=%d size=%d", table, offset, size);
+    uint32_t n = (uint32_t)(size > 256 ? 256 : size) & ~3u;
+    if (!n) return;
+    if (!data || (uint32_t)offset + n > 256)
+        die("[RED] invalid NVN2 graphics constants range table=%d offset=%d size=%u data=%p", table, offset, n, data);
+    p_push_gfx_const *r = rec(c, OP_PUSH_GFX_CONST, offsetof(p_push_gfx_const, data) + n);
+    r->table = (uint16_t)table; r->offset = (uint16_t)offset; r->size = (uint16_t)n; r->reserved = 0;
+    memcpy(r->data, data, n);
+    if (size > 256) {
+        static int once;
+        if (!once++) LOG("[nvn] NVN2 graphics constants update capped from %d to 256 bytes, as the SDK does", size);
+    }
+}
+NVN_NOPROTO(nvnCommandBufferDrawMeshTasks, void, NVNcommandBuffer *c, int first, int count) {
+    if (CB(c)->magic != MAGIC('C', 'M', 'D', 'B') || first < 0 || count < 0)
+        die("[RED] invalid NVN2 mesh-task draw first=%d count=%d", first, count);
+    *(p_draw_mesh *)rec(c, OP_DRAW_MESH, sizeof(p_draw_mesh)) = (p_draw_mesh){
+        CB(c)->last_program, CB(c)->last_program_stages,
+        CB(c)->geometry_mode, first, count
+    };
 }
 NVN(nvnCommandBufferFinalize, void, NVNcommandBuffer *c) { CB(c)->magic = 0; }
 NVN(nvnCommandBufferSetMemoryCallback, void, NVNcommandBuffer *c, PFNNVNCOMMANDBUFFERMEMORYCALLBACKPROC cb) { CB(c)->cb = cb; }
@@ -966,6 +1202,7 @@ NVN(nvnCommandBufferSetScissor, void, NVNcommandBuffer *c, int x, int y, int w, 
 NVN(nvnCommandBufferSetDepthRange, void, NVNcommandBuffer *c, float n, float f) { *REC(c, OP_DEPTH_RANGE, p_depth_range) = (p_depth_range){n, f}; }
 NVN(nvnCommandBufferBindProgram, void, NVNcommandBuffer *c, const NVNprogram *p, int stages) {
     *REC(c, OP_BIND_PROGRAM, p_bind_program) = (p_bind_program){(const prog_t *)p, stages};
+    CB(c)->last_program = (const prog_t *)p; CB(c)->last_program_stages = stages;
 }
 static void bind_state(NVNcommandBuffer *c, int kind, const void *st, size_t n) { p_bind_state *r = REC(c, OP_BIND_STATE, p_bind_state); r->kind = kind; memcpy(r->bytes, st, n); }
 NVN(nvnCommandBufferBindBlendState, void, NVNcommandBuffer *c, const NVNblendState *st) { bind_state(c, 0, st, sizeof(blend_st)); }
@@ -999,10 +1236,14 @@ NVN(nvnCommandBufferBindUniformBuffers, void, NVNcommandBuffer *c, NVNshaderStag
     for (int i = 0; i < n; i++) h_nvnCommandBufferBindUniformBuffer(c, st, first + i, rg[i].address, rg[i].size);
 }
 NVN(nvnCommandBufferBindStorageBuffer, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNbufferAddress a, size_t n) {
+    if ((unsigned)st >= 6) { static unsigned shown; if (shown++ < 32) LOG("[nvn] NVN2 storage binding stage=%d slot=%d address=%#llx size=%#zx", st, i, (unsigned long long)a, n); }
     *REC(c, OP_BIND_SSBO, p_bind_buf) = (p_bind_buf){st, i, a, n};
 }
 NVN(nvnCommandBufferBindStorageBuffers, void, NVNcommandBuffer *c, NVNshaderStage st, int first, int n, const NVNbufferRange *rg) {
-    for (int i = 0; i < n; i++) *REC(c, OP_BIND_SSBO, p_bind_buf) = (p_bind_buf){st, first + i, rg[i].address, rg[i].size};
+    for (int i = 0; i < n; i++) {
+        if ((unsigned)st >= 6) { static unsigned shown; if (shown++ < 32) LOG("[nvn] NVN2 storage binding stage=%d slot=%d address=%#llx size=%#zx", st, first + i, (unsigned long long)rg[i].address, (size_t)rg[i].size); }
+        *REC(c, OP_BIND_SSBO, p_bind_buf) = (p_bind_buf){st, first + i, rg[i].address, rg[i].size};
+    }
 }
 static p_bind_handles *bind_handles(NVNcommandBuffer *c, int op, int st, int first, int n, const uint64_t *h) {
     if (n < 0 || n > 32) { LOG("[RED] bind handle count %d", n); return NULL; }
@@ -1038,6 +1279,16 @@ NVN(nvnCommandBufferBindSeparateSampler, void, NVNcommandBuffer *c, NVNshaderSta
 NVN(nvnCommandBufferSetStencilValueMask, void, NVNcommandBuffer *c, NVNface f, int m) { *REC(c, OP_STENCIL, p_stencil) = (p_stencil){f, m, 0, 0, 0}; }
 NVN(nvnCommandBufferSetStencilMask, void, NVNcommandBuffer *c, NVNface f, int m) { *REC(c, OP_STENCIL, p_stencil) = (p_stencil){f, 0, m, 0, 1}; }
 NVN(nvnCommandBufferSetStencilRef, void, NVNcommandBuffer *c, NVNface f, int v) { *REC(c, OP_STENCIL, p_stencil) = (p_stencil){f, 0, 0, v, 2}; }
+#if DM_GAME_SHADER_ABI_NVN2
+// NVN2's stencil-cull criteria are an optional early-cull optimization.  The
+// actual stencil test, masks and reference are programmed through the ordinary
+// stencil state above, so ignoring this hint preserves results (at a possible
+// performance cost).  Keep it out of NVN1 builds: a newer ABI name must never
+// silently change the classic backend.
+NVN_NOPROTO(nvnCommandBufferSetStencilCullCriteria, void, NVNcommandBuffer *c, int criteria, int mask) {
+    (void)c; (void)criteria; (void)mask;
+}
+#endif
 NVN(nvnCommandBufferSetPolygonOffsetClamp, void, NVNcommandBuffer *c, float fa, float un, float cl) {
     *REC(c, OP_POLY_OFFSET, p_poly_offset) = (p_poly_offset){fa, un, cl};
 }
@@ -2415,6 +2666,26 @@ uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t a, uint64_t n) {
     }
     pthread_mutex_unlock(&g_vp_mu); return miss;
 }
+// One byte per tile relative to [a,a+n): 1 when any 4 KB guest page behind
+// that tile is mapped. Sparse texture uploads use 64 KB tiles. A partially
+// mapped tile is still backed on Metal and its missing 4 KB pages upload as 0,
+// matching nvn_sparse_copy. Returns the number of marked tiles.
+uint64_t nvn_sparse_tilemap(const void *pool, uint64_t a, uint64_t n, uint32_t tile_bytes, uint8_t *map) {
+    if (!tile_bytes || !map) return 0;
+    uint64_t nt = (n + tile_bytes - 1) / tile_bytes, count = 0;
+    memset(map, 0, (size_t)nt);
+    pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a);
+    if (!v) { pthread_mutex_unlock(&g_vp_mu); return 0; }
+    uint64_t o = a - (uint64_t)(uintptr_t)v->base;
+    for (uint64_t p = 0; p < n;) {
+        uint64_t at = o + p, k = 0x1000 - (at & 0xFFF); if (k > n - p) k = n - p;
+        const vpte *e = at < v->size ? vpt_get(v, at) : NULL;
+        uint64_t t = p / tile_bytes;
+        if (e && e->phys && !map[t]) { map[t] = 1; count++; }
+        p += k;
+    }
+    pthread_mutex_unlock(&g_vp_mu); return count;
+}
 // Runs of consecutive physical pages behind [a, a+n): fn on each (nonzero stops the walk and is returned), or 1 at the first page mapped after gen (gen ~0 = do not look)
 static int vpt_walk(const void *pool, uint64_t a, uint64_t n, uint64_t gen, int (*fn)(const uint8_t *, uint64_t, uint64_t), uint64_t arg) {
     pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a); int r = 0;
@@ -2441,7 +2712,14 @@ int nvn_sparse_mapped(const void *pool, uint64_t a, uint64_t n) {   // every pag
     pthread_mutex_unlock(&g_vp_mu); return ok;
 }
 void nvn_sparse_protect(const void *pool, uint64_t a, uint64_t n) { vpt_walk(pool, a, n, ~0ull, run_protect, 0); }
-NVN(nvnCommandBufferDrawElementsIndirect, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, NVNbufferAddress ib, NVNbufferAddress ind) {
+NVN_NOPROTO(nvnCommandBufferDrawElementsIndirect, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, NVNbufferAddress ib, NVNbufferAddress ind,
+            uint64_t x5, uint64_t x6, uint64_t x7) {
+    static int abi_log = -1, abi_n;
+    if (abi_log < 0) abi_log = getenv("DM_NVN_INDIRECT_ABI") != NULL;
+    if (abi_log && abi_n++ < 128)
+        LOG("indirect ABI call=%d caller=%p c=%p prim=%u itype=%u x3/ib=%#llx x4/ind=%#llx x5=%#llx x6=%#llx x7=%#llx",
+            abi_n, __builtin_return_address(0), c, pr, it, (unsigned long long)ib, (unsigned long long)ind,
+            (unsigned long long)x5, (unsigned long long)x6, (unsigned long long)x7);
     rec_draw_idx(c, (p_draw_idx){pr, it, 0, 0, 0, 1, ib, ind});
 }
 
@@ -2527,7 +2805,7 @@ static int write_region_bl(const tex_t *t, unsigned level, unsigned layer, const
     for (size_t y = 0; y < hb; y++)
         for (size_t x = 0; x < wb;) {   // 16-byte runs are contiguous within a GOB
             uint32_t bx = x0 + (uint32_t)x; size_t n = 16 - bx % 16; if (n > wb - x) n = wb - x;
-            memcpy(t->mem + base + nvn_bl_offset(bx, y0 + (uint32_t)y, 0, lb, rows, th, td), src + y * row + x, n); x += n;
+            memcpy(t->mem + base + nvn_bl_offset_native(bx, y0 + (uint32_t)y, 0, lb, rows, th, td, nvn_tex_native_tiling()), src + y * row + x, n); x += n;
         }
     return 0;
 }

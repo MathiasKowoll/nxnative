@@ -23,6 +23,20 @@ static NSDictionary *load(const char *key) {
 
 int main(void) { @autoreleasepool {
     nvn_refl r; char err[160] = "";
+    {   NSDictionary *j = @{ @"route": @"B", @"nvn2_compute": @YES, @"bindings": @[] };
+        check("NVN2 compute reflection converts", 0, nvn_refl_from_json(j, &r, err, sizeof err));
+        check("NVN2 compute flag", 1, r.nvn2_compute);
+    }
+    {   // Compact NVN2's internal c0 descriptor row is not the API storage-buffer slot.
+        NSDictionary *j = @{ @"route": @"B", @"nvn2_compute": @YES, @"bindings": @[
+            @{@"kind": @"sbuf", @"reg": @7, @"index": @0, @"arg_id": @0, @"rw": @YES, @"msl_name": @"cp_s0", @"msl_type": @"device uint*"},
+            @{@"kind": @"sbuf", @"reg": @3, @"index": @1, @"arg_id": @1, @"rw": @NO, @"msl_name": @"cp_s1", @"msl_type": @"const device uint*"}] };
+        check("NVN2 storage reflection converts", 0, nvn_refl_from_json(j, &r, err, sizeof err));
+        check("NVN2 cp_s0 uses native slot 0", 0, r.b[0].reg);
+        check("NVN2 cp_s1 uses native slot 1", 1, r.b[1].reg);
+        check("NVN2 cp_s0 keeps write access", 1, r.b[0].rw);
+        check("NVN2 cp_s1 keeps read access", 0, r.b[1].rw);
+    }
     {   // A dynamically indexed driver texture array with one fixed separate sampler.
         NSDictionary *j = @{@"route": @"B", @"bindings": @[
             @{@"kind": @"tex_c2a", @"off": @0, @"arg_id": @7, @"msl_name": @"fp_t2d_cb196610_10570000", @"msl_type": @"array<texture2d<float>, 32>"},

@@ -8,6 +8,15 @@ sys.path.insert(0, str(REPO / 'dm/games'))
 import profile_guess as pg
 
 
+class SdkVersion(unittest.TestCase):
+    def test_legacy_and_generic_targets(self):
+        image = b'NintendoSDK_nnSdk-16_2_1-Release\0NintendoSdk_nnSdk-Generic_19_3_3-Release\0'
+        self.assertEqual(pg.sdk_versions(image), {'16_2_1', '19_3_3'})
+
+    def test_unrelated_or_missing_versions(self):
+        self.assertEqual(pg.sdk_versions(b'OtherSDK_nnSdk-19_3_3\0NintendoSDK_nnSdk-Generic_\0'), set())
+
+
 class GlslSources(unittest.TestCase):
     def test_language_preamble_is_not_a_shader(self):
         self.assertEqual(pg.glsl_sources(b'#version 450 core\n#define float4 vec4\n\0void main() {}\0'), 0)

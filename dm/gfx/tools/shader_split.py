@@ -70,6 +70,7 @@ CTL_MAGIC, GFX_MAGIC, CS_MAGIC = bytes.fromhex('34127698'), bytes.fromhex('78563
 IGA, IGZ = b'IGA\x1a', b'\x01ZGI'
 IGA_HINTLESS_LIMIT = 8
 STAGES = ['vs', 'hs', 'ds', 'gs', 'ps', 'cs']
+NVN2_STAGES = {0: 'vs', 1: 'ps', 2: 'gs', 3: 'hs', 4: 'ds', 5: 'cs', 6: 'ts', 7: 'ms'}
 SPH_STAGE = {1: 'vs', 2: 'hs', 3: 'ds', 4: 'gs', 5: 'ps'}
 def sph_stage(code):
     """A graphics code area's stage from its SPH word 0: shader type in bits 10..13. Catherine: Full Body's GLSLC (SDK 8.2.1, GPU code version 1.15) writes 0 there in every vertex shader
@@ -78,7 +79,8 @@ def sph_stage(code):
     if len(code) < 0x34: return None   # shorter than the header and SPH word 0
     w = struct.unpack_from('<I', code, 0x30)[0]
     return 'vs' if (w >> 10) & 0xf == 0 and w & 0x1f == 1 else SPH_STAGE.get((w >> 10) & 0xf)
-STAGE_NAME = {'vs': 'vertex', 'hs': 'hull', 'ds': 'domain', 'gs': 'geometry', 'ps': 'pixel', 'cs': 'compute'}   # shader_map.tsv column 3
+STAGE_NAME = {'vs': 'vertex', 'hs': 'hull', 'ds': 'domain', 'gs': 'geometry', 'ps': 'pixel', 'cs': 'compute',
+              'ts': 'task', 'ms': 'mesh'}   # shader_map.tsv column 3
 
 def red(msg): sys.exit('[RED] ' + msg)
 
@@ -100,9 +102,50 @@ def zstd_mod():
         except ImportError: red(f'Python {sys.version_info[0]}.{sys.version_info[1]} has no compression.zstd (3.14+): pip install backports.zstd')
     return zstd
 
+def compact_control(ctl):
+    """→ (control bytes, code bytes, stage) for a bounded NVN2 201.7/201.11
+    control, or None. Runtime-built 201.11 controls may clear +0x30 and keep the
+    exact 216-byte control size at +0xc4.
+    """
+    if len(ctl) < 0xd8 or ctl[:4] != CTL_MAGIC: return None
+    version, minor = struct.unpack_from('<2I', ctl, 4)
+    if version != 201 or minor not in (7, 11): return None
+    nctl, ncode = struct.unpack_from('<II', ctl, 0x30)[0], struct.unpack_from('<I', ctl, 0x40)[0]
+    if not nctl and struct.unpack_from('<I', ctl, 0xc4)[0] == 0xd8: nctl = 0xd8
+    stage = struct.unpack_from('<I', ctl, 0x54)[0] >> 16
+    if not (0xd8 <= nctl <= min(len(ctl), 0x10000) and 0 < ncode < 1 << 24 and not ncode & 15 and stage <= 7): return None
+    return nctl, ncode, NVN2_STAGES[stage]
+
+def compact_nvn2_facts(ctl, stage):
+    """Facts that are safe to consume from an NVN2 compute/task/mesh control.
+
+    Compute controls store their xyz local size at +0x58 and shared-memory
+    bytes at +0x64.  Runtime captures exercise 1D, 2D and 3D groups and agree
+    with the values used by NVN dispatch.  Task and mesh controls instead put
+    the local invocation count in the low six bits at +0x58; their remaining
+    words have different layouts and are retained raw.
+    """
+    compact = compact_control(ctl)
+    if not compact or compact[2] != stage or stage not in ('cs', 'ts', 'ms'):
+        return None
+    if stage == 'cs':
+        x, y, z, shared = struct.unpack_from('<4I', ctl, 0x58)
+        if not (x and y and z and x <= 1024 and y <= 1024 and z <= 1024 and x * y * z <= 1024):
+            return None
+        return {'local': [x, y, z], 'shared': (shared + 15) // 16 * 16}
+    threads = ctl[0x58] & 0x3f
+    if not 1 <= threads <= 32:
+        return None
+    return {
+        'local': [threads, 1, 1],
+        'nvn2_control_words': list(struct.unpack_from('<3I', ctl, 0x58)),
+    }
+
 def ctl_len(ctl):
     """Number of control bytes in the key: control +0x20 holds the section's own length. Every control section of Mario, Fire Emblem Engage, Metroid Dread and 13 Sentinels is at least 0x880 bytes, so the first 0x880 are used;
     SDK 10's Super Mario 3D World + Bowser's Fury has 2,888 that are only 0x850 bytes (the bfsha in ShaderData, 6 layouts), with other data right after them, so only their own length is used (the same as the host's keys_hash)"""
+    compact = compact_control(ctl)
+    if compact: return compact[0]
     n = struct.unpack_from('<I', ctl, 0x20)[0]
     return n if 0x760 <= n < 0x880 else 0x880
 
@@ -119,8 +162,11 @@ def same_shader(a, b):
     """Two copies of one key hold the same shader: the code areas are equal, and so are the control sections up to their own length (control +0x20). Pokémon Legends: Z-A's UI layout archives
     (__ArchiveShader.bnsh inside the .truiv packs) give 104 KB control sections whose stage descriptor length runs 456 bytes past their own length, and those trailing bytes differ between copies"""
     (ca, ka), (cb, kb) = a, b
-    n = struct.unpack_from('<I', ca, 0x20)[0] if len(ca) >= 0x24 else len(ca)
-    n = n if 0x760 <= n <= min(len(ca), len(cb)) else max(len(ca), len(cb))
+    ac, bc = compact_control(ca), compact_control(cb)
+    if ac or bc: n = ac[0] if ac and bc and ac[0] == bc[0] else max(len(ca), len(cb))
+    else:
+        n = struct.unpack_from('<I', ca, 0x20)[0] if len(ca) >= 0x24 else len(ca)
+        n = n if 0x760 <= n <= min(len(ca), len(cb)) else max(len(ca), len(cb))
     o, ln = KEY_SKIP
     if ln and o + ln <= n: ca, cb = ca[:o] + ca[o + ln:n], cb[:o] + cb[o + ln:n]; n = n - ln   # shader_key_skip: the bytes the key leaves out may differ
     return ka == kb and ca[:n] == cb[:n]
@@ -128,6 +174,11 @@ def same_shader(a, b):
 def check(where, st, ctl, code):
     """control section and code area consistent; returns the reason if not"""
     if ctl[:4] != CTL_MAGIC or len(ctl) < 0x24 or len(ctl) < ctl_len(ctl): return 'bad control section'
+    compact = compact_control(ctl)
+    if compact:
+        if st != compact[2]: return f'compact control stage {compact[2]} does not match {st}'
+        if compact[1] != len(code): return 'compact control +0x40 does not match the code area length'
+        return None
     # a compute code area may have no header (SDK 10's Super Mario 3D World + Bowser's Fury and D2R: instructions start at +0; dmsh_build strips only a 0x12345679 header)
     if st == 'cs' and code[:4] in (CS_MAGIC, GFX_MAGIC) and code[:4] != CS_MAGIC or st != 'cs' and code[:4] != GFX_MAGIC: return 'code area header magic does not match the stage'
     if struct.unpack_from('<I', ctl, 0x704)[0] != len(code): return 'control +0x704 does not match the code area length'
@@ -145,7 +196,26 @@ def bnsh_shaders(d, base, label):
             sc = field(d, '<Q', base + prog + 8 + 8 * si, f'{where} variation {v} program')[0]
             if not sc: continue
             pctl, pcode, ncode, nctl = field(d, '<QQII', base + sc + 8, f'{where} variation {v} {st}')
-            ctl, code = span(d, base + pctl, nctl, f'{where} variation {v} {st} control section'), span(d, base + pcode, ncode, f'{where} variation {v} {st} code area')
+            ctl = span(d, base + pctl, nctl, f'{where} variation {v} {st} control section')
+            compact = compact_control(ctl)
+            if compact:
+                st = compact[2]
+                # SDK 201 BNSH stage descriptors include a supplementary
+                # native address table after some programs. +0x40 of the
+                # compact control is the executable span; the extra bytes are
+                # not part of the runtime shader key, but BRX recovery needs
+                # them as c1. Keep them after the bounded control bytes, where
+                # key_ctl/check ignore them and the package builder can retain
+                # them independently from executable code.
+                if compact[1] > ncode: red(f'{where} variation {v} {st}: compact control code length {compact[1]:#x} exceeds BNSH descriptor length {ncode:#x}')
+                if ncode > compact[1]:
+                    extra = span(d, base + pcode + compact[1], ncode - compact[1],
+                                 f'{where} variation {v} {st} supplementary address table')
+                    if len(extra) > 0x10000 or len(extra) % 4:
+                        red(f'{where} variation {v} {st}: supplementary address table has invalid length {len(extra):#x}')
+                    ctl += extra
+                ncode = compact[1]
+            code = span(d, base + pcode, ncode, f'{where} variation {v} {st} code area')
             why = check(label, st, ctl, code)
             if why: red(f'{label} BNSH @{base:#x} variation {v} {st}: {why}')
             out.append((f'{label}#BNSH@{base:#x}#var{v}', st, ctl, code))
@@ -227,6 +297,8 @@ def mshd_shaders(d, label):
 
 def glslc_stage(ctl, code):
     """A GLSLC output's stage, from its code area's header (graphics: the SPH's stage bits), or compute when the code has no header and the control's thread group (+0x748) is filled"""
+    compact = compact_control(ctl)
+    if compact: return compact[2]
     headerless_cs = code[:4] not in (CS_MAGIC, GFX_MAGIC) and len(ctl) >= 0x754 and all(struct.unpack_from('<3I', ctl, 0x748))
     return 'cs' if code[:4] == CS_MAGIC or headerless_cs else sph_stage(code) if code[:4] == GFX_MAGIC and len(code) >= 0x34 else None
 
@@ -322,6 +394,14 @@ def nvn_dump_shaders(directory, label):
             with open(os.path.join(directory, name), 'rb') as f: ctl = f.read()
             with open(os.path.join(directory, name[:-4] + '.code'), 'rb') as f: code = f.read()
         except OSError: continue
+        extra_path = os.path.join(directory, name[:-4] + '.extra')
+        if compact_control(ctl) and os.path.isfile(extra_path):
+            try:
+                with open(extra_path, 'rb') as f: extra = f.read(0x10001)
+            except OSError: extra = b''
+            if len(extra) > 0x10000 or len(extra) % 4:
+                red(f'{label}/{name[:-4]}: supplementary address table has invalid length {len(extra):#x}')
+            ctl += extra
         st = glslc_stage(ctl, code)
         if st and not check(f'{label}/{name[:-4]}', st, ctl, code):
             out.append((f'{label}/{name}#NVNDUMP', st, ctl, code))
@@ -2803,9 +2883,18 @@ def main():
         if rec.count(b'BTCDBTCD') != 1: red(f'key {key}: the record separator appears inside the record')
         rows.append((name, len(recs[name]), STAGE_NAME[st], key, where)); recs[name].append(bytes(rec)); stat[st] += 1
         if st == 'cs':
-            x, y, z = struct.unpack_from('<3I', ctl, 0x748); sh = struct.unpack_from('<I', ctl, 0x754)[0]
-            if not x * y * z: red(f'compute shader {key}: control +0x748 thread group is 0 ({where})')
-            facts[key] = {'local': [x, y, z], 'shared': (sh + 15) // 16 * 16}
+            compact_facts = compact_nvn2_facts(ctl, st)
+            if compact_control(ctl):
+                if compact_facts is None: red(f'compute shader {key}: compact control has no valid local invocation dimensions ({where})')
+                facts[key] = compact_facts
+            else:
+                x, y, z = struct.unpack_from('<3I', ctl, 0x748); sh = struct.unpack_from('<I', ctl, 0x754)[0]
+                if not x * y * z: red(f'compute shader {key}: control +0x748 thread group is 0 ({where})')
+                facts[key] = {'local': [x, y, z], 'shared': (sh + 15) // 16 * 16}
+        elif st in ('ts', 'ms'):
+            compact_facts = compact_nvn2_facts(ctl, st)
+            if compact_facts is None: red(f'{STAGE_NAME[st]} shader {key}: compact control has no valid local invocation count ({where})')
+            facts[key] = compact_facts
     for name, rr in recs.items():
         with open(os.path.join(pkg, name), 'wb') as f: f.write(b''.join(rr))
     with open(mapout, 'w') as f:
@@ -2827,7 +2916,7 @@ def main():
         for ln in open(manual):
             if ln.strip() and not ln.startswith('#'): k, v = ln.rstrip('\n').split('\t', 1); facts[k] = {**facts.get(k, {}), **json.loads(v)}
     with open(factsout, 'w') as f:
-        f.write('# Answer table for translation queries (generated by dm/gfx/tools/shader_split.py, do not edit): key <TAB> fact JSON. No PC shader pairing supplied: only the thread group / shared memory of compute shaders (taken from the control section); other queries get the translator defaults\n')
+        f.write('# Answer table for translation queries (generated by dm/gfx/tools/shader_split.py, do not edit): key <TAB> fact JSON. No PC shader pairing supplied: compute thread groups/shared memory and verified NVN2 task/mesh local invocation counts come from their control sections; other queries get the translator defaults\n')
         for k in sorted(facts): f.write(k + '\t' + json.dumps(facts[k], sort_keys=True, separators=(',', ':')) + '\n')
     if pairsout:
         with open(pairsout, 'w') as f:

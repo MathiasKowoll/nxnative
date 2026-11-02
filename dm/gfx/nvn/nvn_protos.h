@@ -479,6 +479,7 @@ typedef uint32_t (*NVNT_nvnEventGetValue)(const NVNevent*);
 typedef void (*NVNT_nvnEventSignal)(NVNevent*, NVNeventSignalMode, uint32_t);
 typedef void (*NVNT_nvnCommandBufferWaitEvent)(NVNcommandBuffer*, const NVNevent*, NVNeventWaitMode, uint32_t);
 typedef void (*NVNT_nvnCommandBufferSignalEvent)(NVNcommandBuffer*, const NVNevent*, NVNeventSignalMode, NVNeventSignalLocation, int, uint32_t);
+typedef void (*NVNT_nvnCommandBufferPushGraphicsConstants)(NVNcommandBuffer*, int, int, int, const void*);
 
 // Names without a prototype in the header (newer interfaces): they can only get named stubs
 //   nvnDeviceBuilderGetFlags
@@ -541,3 +542,19 @@ typedef void (*NVNT_nvnCommandBufferSignalEvent)(NVNcommandBuffer*, const NVNeve
 //   nvnProgramGetSubtileSize
 //   nvnTextureBuilderGetViewOffset
 //   nvnSetExternalDebuggerEnabledNVX
+//   nvnQueueBuilderSetPrimaryQueue
+//   nvnProgramBuilderSetDefaults
+//   nvnProgramBuilderSetDevice
+//   nvnProgramBuilderGetDevice
+//   nvnProgramBuilderSetShaders
+//   nvnProgramBuilderGetShaders
+//   nvnProgramBuilderGetShaderCount
+//   nvnProgramBuilderSetSampleShading
+//   nvnProgramBuilderGetSampleShading
+//   nvnProgramInitializeFromBuilder
+//   nvnCommandBufferSetRecordingMode
+//   nvnCommandBufferSetComputeOverlapMode
+//   nvnCommandBufferBindShadingRateImage
+//   nvnCommandBufferShadingRateImagePalette
+//   nvnCommandBufferSetGeometryProcessingMode
+//   nvnCommandBufferDrawMeshTasks

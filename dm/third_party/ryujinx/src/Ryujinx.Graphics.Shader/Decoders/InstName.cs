@@ -75,6 +75,8 @@ namespace Ryujinx.Graphics.Shader.Decoders
         Imul32i,
         Ipa,
         Isberd,
+        Nvn2IsbeRead,
+        Nvn2IsbeWrite,
         Iscadd,
         Iscadd32i,
         Iset,

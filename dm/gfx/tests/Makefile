@@ -63,12 +63,18 @@ t_builtin: t_builtin.m ../nvn/nvn_builtin.h ../nvn/host_msl.m $(MSL_H)
 	clang -O1 -g -Wall -I$(dir $(MSL_H)) -fobjc-arc -o $@ t_builtin.m ../nvn/host_msl.m -framework Metal -framework Foundation
 t_vin: t_vin.m
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_vin.m -framework Metal -framework Foundation
+t_mesh_object: t_mesh_object.m
+	clang -O1 -g -Wall -fobjc-arc -o $@ t_mesh_object.m -framework Metal -framework Foundation
+check_t_mesh_object: RUN_ENV = MTL_DEBUG_LAYER=1
 t_tbuf2d: t_tbuf2d.m ../nvn/nvn_tex.c ../nvn/nvn_tex.h
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_tbuf2d.m ../nvn/nvn_tex.c -framework Metal -framework Foundation
 t_tbuf_align: t_tbuf_align.m
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_tbuf_align.m -framework Metal -framework Foundation
 t_sparse_layout: t_sparse_layout.c ../nvn/nvn_tex.c ../nvn/nvn_tex.h
 	clang $(CFLAGS) -o $@ t_sparse_layout.c ../nvn/nvn_tex.c
+t_placement_sparse: t_placement_sparse.m ../nvn/nvn_tex.c ../nvn/nvn_tex.h ../tex/nvn_fmt_mtl.c ../tex/nvn_fmt_mtl.h
+	clang -O1 -g -Wall -fobjc-arc -o $@ t_placement_sparse.m ../nvn/nvn_tex.c ../tex/nvn_fmt_mtl.c -framework Metal -framework Foundation
+check_t_placement_sparse: RUN_ENV = MTL_DEBUG_LAYER=1
 t_deswz_gpu: t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../tex/nvn_deswizzle.h ../tex/nvn_deswizzle_gpu.h ../nvn/nvn_tex.c ../nvn/nvn_tex.h ../nvn/host_msl.m $(MSL_H)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../nvn/nvn_tex.c ../nvn/host_msl.m -framework Metal -framework Foundation
 t_tex_layout: t_tex_layout.c ../nvn/nvn_tex.c ../nvn/nvn_tex.h

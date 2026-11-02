@@ -108,6 +108,7 @@ static void probe_dump_once(void) {
     LOG("probe dump %s+%s length %s → %s", mod, o, n, f ? f : def);
 }
 static void watch_dynamic_page(ucontext_t *uc);
+static void poll_dynamic_value(ucontext_t *uc);
 static int probe_hit(ucontext_t *uc) {   // Registered by probe_install with the SIGTRAP branch of crash.c
     uint64_t pc = uc->uc_mcontext->__ss.__pc;
     for (int i = 0; i < g_nprobe; i++) if (g_probe[i].at == pc) {
@@ -126,6 +127,7 @@ static int probe_hit(ucontext_t *uc) {   // Registered by probe_install with the
             if (!strstr(nm, g_hw.want)) { uc->uc_mcontext->__ss.__pc = (uint64_t)g_probe[i].slot; return 1; }
         }
         watch_dynamic_page(uc);
+        poll_dynamic_value(uc);
         probe_dump_once();
         flockfile(stderr);   // One block per hit when threads hit at once
         { extern uint64_t g_t0_ns; uint64_t now_ns(void); uint32_t thr_cur_handle(void); fprintf(stderr, "[dm] PROBE %s #%u [%.4fs] F=%llu T=%x", g_probe[i].name, ++g_probe[i].hits, (now_ns() - g_t0_ns) / 1e9, (unsigned long long)frame, thr_cur_handle()); }
@@ -299,18 +301,31 @@ static int watch_fault(void *addr, int is_write, void *ucv) {
     mprotect((void *)g_wpg, g_wpsz, PROT_READ | PROT_WRITE); atomic_store(&g_warmed, 0);
     return 1;
 }
+static int watch_page_writable(void) {
+    mach_vm_address_t ra = g_wpg; mach_vm_size_t rs = 0; vm_region_basic_info_data_64_t bi; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj = MACH_PORT_NULL;
+    kern_return_t kr = mach_vm_region(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&bi, &cnt, &obj);
+    if (obj != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), obj);
+    return kr == KERN_SUCCESS && ra <= g_wpg && (bi.protection & VM_PROT_WRITE);
+}
 static void *watch_arm(void *p) {
     (void)p;
     for (;;) {
         if (!g_wpg) { usleep(1000); continue; }
+        // Another subsystem can make or remap this page writable after it was
+        // armed (dirty tracking and sparse aliases both change protections).
+        // Notice that here; otherwise g_warmed stays true forever and the
+        // watch silently misses every later store.
+        if (atomic_load(&g_warmed) && watch_page_writable()) atomic_store(&g_warmed, 0);
         if (!atomic_load(&g_warmed)) {
-            mach_vm_address_t ra = g_wpg; mach_vm_size_t rs = 0; vm_region_basic_info_data_64_t bi; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj;
-            if (!mach_vm_region(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&bi, &cnt, &obj) && ra <= g_wpg && (bi.protection & VM_PROT_WRITE)) {
-                if (!g_walias) {   // a second, writable mapping of the same page, for the handler's stores
-                    mach_vm_address_t al = 0; vm_prot_t cur, max;
-                    if (mach_vm_remap(mach_task_self(), &al, g_wpsz, 0, VM_FLAGS_ANYWHERE, mach_task_self(), g_wpg, FALSE, &cur, &max, VM_INHERIT_NONE) == KERN_SUCCESS) g_walias = (uint8_t *)al;
-                    LOG("WATCH %#llx armed, value %#llx%s", (unsigned long long)g_wat, (unsigned long long)watch_val(), g_walias ? "" : " ([RED] no alias mapping: every store unprotects the page)");
-                }
+            if (watch_page_writable()) {
+                // Refresh the writable alias on every re-arm: a remap at the
+                // watched virtual address leaves the previous alias pointing
+                // at the old memory object.
+                if (g_walias) { mach_vm_deallocate(mach_task_self(), (mach_vm_address_t)g_walias, g_wpsz); g_walias = NULL; }
+                mach_vm_address_t al = 0; vm_prot_t cur, max;
+                if (mach_vm_remap(mach_task_self(), &al, g_wpsz, 0, VM_FLAGS_ANYWHERE, mach_task_self(), g_wpg, FALSE, &cur, &max, VM_INHERIT_NONE) == KERN_SUCCESS) g_walias = (uint8_t *)al;
+                { static _Atomic unsigned arms; unsigned n = atomic_fetch_add(&arms, 1);
+                  if (n < 8) LOG("WATCH %#llx armed%s, value %#llx%s", (unsigned long long)g_wat, n ? " again" : "", (unsigned long long)watch_val(), g_walias ? "" : " ([RED] no alias mapping: every store unprotects the page)"); }
                 atomic_store(&g_warmed, 1); mprotect((void *)g_wpg, g_wpsz, PROT_READ); }
         }
         usleep(1000);
@@ -322,6 +337,10 @@ static void *watch_arm(void *p) {
 // Tears of the Kingdom's memory-shortage flag (a word its frame check compares with 1 and clears) lies on such a page. A suffix =<value> (hex) snapshots and dumps only the changes to that value,
 // for a word that changes thousands of times before the bad store (Mario vs. Donkey Kong: a heap block's list link, rewritten by every allocation beside it, until 0x3f landed in it)
 static uint64_t g_poll, g_plen, g_pval; static int g_pwant;
+// DM_PROBE_POLL_REG=xN+offset+length[=value] resolves an ASLR-dependent
+// address from the first matching DM_PROBE hit, then uses the same poller as
+// DM_PROBE_POLL. This catches GPU writes too: CPU page protection does not.
+static int g_poll_reg = -1; static uint64_t g_poll_reg_off, g_poll_reg_len;
 // All threads but this one stopped at once, then their pc, lr and 8 frame-pointer frames read and printed after they run again: the writer is caught a few microseconds after its store
 static void poll_snap(void) {
     enum { MT = 256, NF = 8 }; static uint64_t fr[MT][NF + 2]; static thread_act_t keep[MT];
@@ -364,9 +383,33 @@ static void *poll_run(void *p) {
     }
     return NULL;
 }
+static void poll_dynamic_value(ucontext_t *uc) {
+    if (g_poll_reg < 0 || g_poll) return;
+    uint64_t reg = uc->uc_mcontext->__ss.__x[g_poll_reg];
+    if (!reg) return;
+    g_poll = reg + g_poll_reg_off;
+    g_plen = g_poll_reg_len;
+    LOG("dynamic value poll from x%d=%#llx: %#llx + %#llx%s", g_poll_reg,
+        (unsigned long long)reg, (unsigned long long)g_poll, (unsigned long long)g_plen,
+        g_pwant ? " (filtered value)" : "");
+    pthread_t t; pthread_create(&t, NULL, poll_run, NULL); pthread_detach(t);
+}
 static void watch_install(void) {
+    { const char *e = getenv("DM_PROBE_POLL_REG");
+      if (e && *e) {
+          if (e[0] != 'x') die("DM_PROBE_POLL_REG format: xN+offset+length[=value]");
+          char *end; long reg = strtol(e + 1, &end, 10);
+          if (reg < 0 || reg > 30 || *end != '+') die("DM_PROBE_POLL_REG format: xN+offset+length[=value]");
+          g_poll_reg_off = strtoull(end + 1, &end, 16);
+          if (*end != '+') die("DM_PROBE_POLL_REG format: xN+offset+length[=value]");
+          g_poll_reg_len = strtoull(end + 1, &end, 16);
+          if (*end == '=') { g_pwant = 1; g_pval = strtoull(end + 1, &end, 16); }
+          if (*end || !g_poll_reg_len || g_poll_reg_len > 8) die("DM_PROBE_POLL_REG format: xN+offset+length[=value]");
+          g_poll_reg = (int)reg;
+      } }
     { const char *e = getenv("DM_PROBE_POLL");
-      if (e) { char *end; g_poll = strtoull(e, &end, 16); g_plen = *end == '+' ? strtoull(end + 1, &end, 16) : 4;
+      if (e) { if (g_poll_reg >= 0) die("DM_PROBE_POLL and DM_PROBE_POLL_REG are mutually exclusive");
+               char *end; g_poll = strtoull(e, &end, 16); g_plen = *end == '+' ? strtoull(end + 1, &end, 16) : 4;
                if (*end == '=') { g_pwant = 1; g_pval = strtoull(end + 1, 0, 16); }
                if (!g_poll || !g_plen || g_plen > 8) die("DM_PROBE_POLL format: <address>[+<length up to 8>][=<value>] (hex)");
                pthread_t t; pthread_create(&t, NULL, poll_run, NULL); pthread_detach(t); } }

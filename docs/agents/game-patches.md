@@ -43,11 +43,14 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `game` → `host` | present snapshots | rendering | gap | judgement | 1 | `present_snap`: [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | a setting the game was tested with: a default for every game after `regress.py check` on the games |
 | `build` → `engine` | Unity QualitySettings.vSyncCount held at 1 | frame rate | gap | judgement | 1 | [Fire Emblem Engage](../../dm/games/0100A6301214E000/README.md) | an IL2CPP player registers the setter by its icall name, so the place can be found in any Unity game; holding it at 1 stays this profile's choice (its logic steps by the count) |
 | `build` → `engine` | Unity's Application.targetFrameRate at a fixed address | frame rate | gap | judgement | 1 | [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md) | an IL2CPP player registers the setter by its icall name, so the field can be found in any Unity game; whether to raise it stays the profile's |
+| `build` → `game` | 60 fps frame-rate update cuts | frame rate | gap | judgement | 1 | [Persona 5 Strikers](../../dm/games/0100801011C3E000/README.md) | the cuts block this build's own writes that restore the Switch's 30 fps configuration; the host supplies the selected 60 fps values |
 | `build` → `game` | frame limiter 30 → 60 fps and the 1/60 update step | frame rate | gap | judgement | 1 | [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md) | the game's own limiter constant and fixed step |
 | `build` → `game` | frame limiter spin: its branch back cut | frame rate | gap | judgement | 1 | [Need For Speed™ Hot Pursuit Remastered](../../dm/games/010029B0118E8000/README.md) | the engine's own spin limiter; a function-matched rule could carry it over the game's updates |
 | `build` → `game` | interval controller: the lower bound and the GPU-time path | frame rate | gap | judgement | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | sead::GameFrameworkNx's interval controller in this build; Tears of the Kingdom shares sead but not this code |
 | `build` → `game` | job pool wake-up | race | gap | judgement | 1 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](../../dm/games/010038B015560000/README.md) | a lost wake-up in the game's own job pool, not a host or SDK difference |
 | `build` → `game` | malloc region 60 GB → 4 GB and its first arena | address space | gap | judgement | 1 | [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md) | Monolith's own allocator; its constants span two functions (a multi-function rule). The cause, an iPhone's address space, is a platform limit |
+| `build` → `game` | offline async result and callback-job NULL guards | runtime | gap | judgement | 1 | [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) | the optional result and callback job are dereferenced by the game at the observed menu-loading crash sites; the byte cuts are specific to update 1.8c.cab1 |
+| `build` → `game` | Persona 5 Strikers' frame-rate and vsync fields at fixed addresses | frame rate | gap | judgement | 1 | [Persona 5 Strikers](../../dm/games/0100801011C3E000/README.md) | the game's own boot writes for this build; the profile's patch matches those addresses and the host updates them each present |
 | `build` → `game` | PhysX completion task release | race | gap | judgement | 1 | [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) | a lifetime race in the game's own completion task (its release slot serves this one vtable) |
 | `build` → `game` | render intervals, the forced-interval flag and the render-wait timeout | frame rate | gap | judgement | 1 | [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) | the game's own tables, flag and timeout |
 | `build` → `game` | task ring push and pop barriers | race | gap | judgement | 1 | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | a data race in the game's own task ring |
@@ -75,7 +78,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [ASTRAL CHAIN](#astral-chain) | 0 | 0 | 112 | 0 | 0 | `build` → `game` |
 | [Batman: Arkham Knight](#batman-arkham-knight) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [DARK SOULS: REMASTERED](#dark-souls-remastered) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
-| [EA SPORTS FC 27](#ea-sports-fc-27) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
+| [EA SPORTS FC 27](#ea-sports-fc-27) | 2 | 0 | 0 | 0 | 1 | `build` → `game`, `build` → `engine` |
 | [FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition](#final-fantasy-crystal-chronicles-remastered-edition) | 8 | 0 | 0 | 0 | 0 | `build` → `engine` |
 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](#final-fantasy-tactics---the-ivalice-chronicles) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Fire Emblem Engage](#fire-emblem-engage) | 1 | 0 | 0 | 0 | 0 | `build` → `engine` |
@@ -89,6 +92,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](#nierautomata-the-end-of-yorha-edition-010056b015fe8000) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](#nierautomata-the-end-of-yorha-edition-0100b8e016f76000) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [Paper Mario: The Thousand-Year Door](#paper-mario-the-thousand-year-door) | 1 | 0 | 1 | 0 | 0 | `build` → `game` |
+| [Persona 5 Strikers](#persona-5-strikers) | 8 | 0 | 0 | 0 | 4 | `build` → `game` ×2 |
 | [Pokémon Brilliant Diamond](#pokémon-brilliant-diamond) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
 | [Subnautica](#subnautica) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Subnautica: Below Zero](#subnautica-below-zero) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -256,10 +260,14 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 ### EA SPORTS FC 27
 
-[EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md), `0100C49025D3E000`.
+[EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md), `0100C49025D3E000`, [patches.py](../../dm/games/0100C49025D3E000/patches.py).
 
+- **`build` → `game`**, runtime, gap, judgement: offline async result and callback-job NULL guards. The optional result and callback job are dereferenced by the game at the observed menu-loading crash sites; the byte cuts are specific to update 1.8c.cab1
 - **`build` → `engine`**, frame rate, blocked: one Frostbite game here, judgement: Frostbite's frame regulator at a fixed pointer. Engine code other Frostbite games ship (the simulation's own rate is already set by name)
 
+- **1.8c.cab1 `main`** `fb81983a…` ([patches.py:38](../../dm/games/0100C49025D3E000/patches.py#L38))
+  - cut `+0x804e358`: offline async result may be NULL: guard the menu result copy (SIGSEGV main+0x804e358)
+  - cut `+0x804e370`: release the async callback job only when X0 is non-NULL
 - **1.8d.310c `main`** `a48c0de3…`
   - host [hle_fpslock.c:51](../../dm/host/hle_fpslock.c#L51): engine frame limit set to fps_target: FIFA frame regulator
 
@@ -410,7 +418,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x9bf4d4`: dynamic resolution: optimal frame cost 32.01 -> 16.005 ms at 60 fps (second load)
   - cut `+0x9bf4f8`: dynamic resolution: good frame cost 30 -> 15 ms at 60 fps
   - launcher capabilities: DYNAMIC_RESOLUTION
-  - host [hle_fpslock.c:67](../../dm/host/hle_fpslock.c#L67): frame interval and dynamic-resolution floor
+  - host [hle_fpslock.c:75](../../dm/host/hle_fpslock.c#L75): frame interval and dynamic-resolution floor
 
 ### NieR:Automata The End of YoRHa Edition (0100B8E016F76000)
 
@@ -429,7 +437,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x9c08e8`: dynamic resolution lower bound follows the selected preset
   - cut `+0x9c08f4`: dynamic resolution lower bound follows the selected preset
   - launcher capabilities: DYNAMIC_RESOLUTION
-  - host [hle_fpslock.c:68](../../dm/host/hle_fpslock.c#L68): frame interval and dynamic-resolution floor
+  - host [hle_fpslock.c:76](../../dm/host/hle_fpslock.c#L76): frame interval and dynamic-resolution floor
 
 ### Paper Mario: The Thousand-Year Door
 
@@ -440,6 +448,27 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **1.0.1 `main`** `0effe4af…` ([patches.py:5](../../dm/games/0100ECD018EBE000/patches.py#L5))
   - cut `+0x2e77a4`: frame step floor in 60 Hz vsyncs: mov w9,#2 → mov w9,#1 (the game steps by the vsyncs that passed, down to one)
   - frame step `+0x2e77f8`: frame step: the base clock steps by the host's vsyncs (state page target fps; 0 = the game's measured step)
+
+### Persona 5 Strikers
+
+[Persona 5 Strikers](../../dm/games/0100801011C3E000/README.md), `0100801011C3E000`, [patches.py](../../dm/games/0100801011C3E000/patches.py).
+
+- **`build` → `game`**, frame rate, gap, judgement: 60 fps frame-rate update cuts. The cuts block this build's own writes that restore the Switch's 30 fps configuration; the host supplies the selected 60 fps values
+- **`build` → `game`**, frame rate, gap, judgement: Persona 5 Strikers' frame-rate and vsync fields at fixed addresses. The game's own boot writes for this build; the profile's patch matches those addresses and the host updates them each present
+
+- **1.0.0 `main`** `c4df04f6…` ([patches.py:8](../../dm/games/0100801011C3E000/patches.py#L8))
+  - cut `+0x4f3d68`: 60 fps: block the game's frame-rate update
+  - cut `+0x4f3d7c`: 60 fps: block the game's frame-rate update
+  - cut `+0x4f3d8c`: 60 fps: block the game's frame-rate update
+  - cut `+0x4f3d94`: 60 fps: block the game's frame-rate update
+  - cut `+0x4d8748`: 60 fps: block the game's frame-rate update
+  - cut `+0x4d8754`: 60 fps: block the game's frame-rate update
+  - cut `+0x4d8760`: 60 fps: block the game's frame-rate update
+  - cut `+0x4d876c`: 60 fps: block the game's frame-rate update
+  - host [hle_fpslock.c:56](../../dm/host/hle_fpslock.c#L56): engine frame limit set to fps_target: P5S frame rate
+  - host [hle_fpslock.c:57](../../dm/host/hle_fpslock.c#L57): engine frame limit set to fps_target: P5S vsync count
+  - host [hle_fpslock.c:58](../../dm/host/hle_fpslock.c#L58): engine frame limit set to fps_target: P5S float frame rate
+  - host [hle_fpslock.c:59](../../dm/host/hle_fpslock.c#L59): engine frame limit set to fps_target: P5S interval flag
 
 ### Pokémon Brilliant Diamond
 
@@ -637,7 +666,7 @@ Profile keys (`game.tsv`) whose value changes what the host does, set away from 
 | `render_cond on` | [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md), [Mario Kart 8 Deluxe](../../dm/games/0100152000022000/README.md), [Mario vs. Donkey Kong](../../dm/games/0100B99019412000/README.md), [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) | `game` → `host`, gap | what the GPU does; off by default only because other games drew everything before: a default for every game after `regress.py check` on the games |
 | `alloc_big_align on` | [13 Sentinels: Aegis Rim](../../dm/games/01003FC01670C000/README.md), [13 Sentinels: Aegis Rim (Asia)](../../dm/games/01008D7016438000/README.md), [13 Sentinels: Aegis Rim (Japan)](../../dm/games/010045C014650000/README.md), [Unicorn Overlord](../../dm/games/010069401ADB8000/README.md), [Unicorn Overlord (Asia)](../../dm/games/010054B01AD92000/README.md) | `game` → `host`, gap | the cause is a memory pool's GPU address, big-page aligned on hardware and the CPU address here: pool GPU addresses aligned as hardware does, or this alignment for every game |
 | `op_mode handheld` | [Balatro](../../dm/games/0100CD801CE5E000/README.md), [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md), [Captain Toad: Treasure Tracker](../../dm/games/01009BF0072D4000/README.md), [Rhythm Heaven Groove](../../dm/games/0100D9F01D474000/README.md), [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md), [Super Mario Galaxy 2](../../dm/games/0100FD8022DAA000/README.md), [Taiko Risshiden V DX](../../dm/games/0100346017304000/README.md) | `game`, at goal | the game's controls (handheld: the touch screen instead of a gyro pointer) |
-| `present_interval display` | [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md), [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md), [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md), [Monster Train 2](../../dm/games/010051701FB46000/README.md), [Need For Speed™ Hot Pursuit Remastered](../../dm/games/010029B0118E8000/README.md), [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md), [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md), [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md) | `game`, at goal | right only for games whose logic does not count frames |
+| `present_interval display` | [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md), [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md), [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md), [Monster Train 2](../../dm/games/010051701FB46000/README.md), [Need For Speed™ Hot Pursuit Remastered](../../dm/games/010029B0118E8000/README.md), [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md), [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md), [Persona 5 Strikers](../../dm/games/0100801011C3E000/README.md), [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md) | `game`, at goal | right only for games whose logic does not count frames |
 | `tex_dirty_upload on` | [FINAL FANTASY TACTICS - The Ivalice Chronicles](../../dm/games/010038B015560000/README.md), [Ghost Trick: Phantom Detective](../../dm/games/010029B018432000/README.md), [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md), [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md), [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md), [OCTOPATH TRAVELER](../../dm/games/010057D006492000/README.md), [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md), [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md), [Yoshi's Crafted World](../../dm/games/01006000040C2000/README.md) | `game` → `host`, gap | as tex_flush_upload, for pools the CPU writes without a flush |
 | `tex_flush_upload on` | [FINAL FANTASY TACTICS - The Ivalice Chronicles](../../dm/games/010038B015560000/README.md), [Ghost Trick: Phantom Detective](../../dm/games/010029B018432000/README.md), [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md), [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md), [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md), [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md), [OCTOPATH TRAVELER](../../dm/games/010057D006492000/README.md), [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md), [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md), [Yoshi's Crafted World](../../dm/games/01006000040C2000/README.md) | `game` → `host`, gap | unified memory semantics; off by default because a flushed range could cover an image a shader writes: tracking GPU writes would make it safe for every game |
-| `fps_target 60` | [ASTRAL CHAIN](../../dm/games/01007300020FA000/README.md), [DRAGON QUEST III HD-2D Remake](../../dm/games/01003E601E324000/README.md), [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md), [DRAGON QUEST XI S: Echoes of an Elusive Age – Definitive Edition](../../dm/games/01006C300E9F0000/README.md), [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md), [FINAL FANTASY RESONANCE](../../dm/games/0100606026F12000/README.md), [FINAL FANTASY RESONANCE (Asian release)](../../dm/games/0100B8A026F14000/README.md), [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md), [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md), [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md), [Need For Speed™ Hot Pursuit Remastered](../../dm/games/010029B0118E8000/README.md), [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md), [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md), [OCTOPATH TRAVELER 0](../../dm/games/01005270232F2000/README.md), [OCTOPATH TRAVELER II](../../dm/games/0100A3501946E000/README.md), [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md), [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md), [SHIN MEGAMI TENSEI V: Vengeance](../../dm/games/010069C01AB82000/README.md), [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md), [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) | `game`, at goal | a choice per game |
+| `fps_target 60` | [ASTRAL CHAIN](../../dm/games/01007300020FA000/README.md), [DRAGON QUEST III HD-2D Remake](../../dm/games/01003E601E324000/README.md), [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md), [DRAGON QUEST XI S: Echoes of an Elusive Age – Definitive Edition](../../dm/games/01006C300E9F0000/README.md), [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md), [FINAL FANTASY RESONANCE](../../dm/games/0100606026F12000/README.md), [FINAL FANTASY RESONANCE (Asian release)](../../dm/games/0100B8A026F14000/README.md), [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md), [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md), [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md), [Need For Speed™ Hot Pursuit Remastered](../../dm/games/010029B0118E8000/README.md), [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md), [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md), [OCTOPATH TRAVELER 0](../../dm/games/01005270232F2000/README.md), [OCTOPATH TRAVELER II](../../dm/games/0100A3501946E000/README.md), [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md), [Persona 5 Strikers](../../dm/games/0100801011C3E000/README.md), [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md), [SHIN MEGAMI TENSEI V: Vengeance](../../dm/games/010069C01AB82000/README.md), [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md), [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) | `game`, at goal | a choice per game |

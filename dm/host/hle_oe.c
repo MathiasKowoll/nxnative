@@ -91,6 +91,15 @@ void dm_focus_set(int st) {
 }
 static int opmode(void) { return dm_opmode(); }
 
+// Generic SDK 19's graphics-scale controller is separate from operation mode.
+// The SDK maps service values 10/20/30 to enum 0/1/2. This host keeps the initial
+// scale (0); no dynamic graphics-scale transition occurs, so enabling its
+// notification produces no event. Calling the SDK implementation would read
+// the applet proxy that our direct oe implementation deliberately does not open.
+static _Atomic unsigned g_ntf_graphics_scale;
+HLE_FORCE("_ZN2nn2oe23GetCurrentGraphicsScaleEv", "fixed initial graphics scale; no host adaptive graphics-scale policy", int, h_oe_GetGraphicsScale, void) { return 0; }
+HLE_FORCE("_ZN2nn2oe42SetGraphicsScaleChangedNotificationEnabledEb", "retain the graphics-scale notification subscription; the scale stays fixed", void, h_oe_SetGraphicsScaleNtf, unsigned on) { g_ntf_graphics_scale = on & 0xff; }
+
 // Screenshot / video recording switches: the host has no system screenshot service, no-op
 HLE_FORCE("_ZN2nn2oe17FinishStartupLogoEv", "dismiss the system boot screen (through the am application proxy); the host has no boot screen", void, h_oe_FinishLogo, void) {}   // Metroid Dread calls it at main+0xadfed0
 // am retains the requested inactivity extension even when auto-sleep is disabled.

@@ -17,15 +17,15 @@ import romfs_image
 
 GAME = '010015100B514000'
 SCRIPT = (REPO / 'dm/ios/tools/build_ipa.sh').read_text()
-SIGNING = SCRIPT[SCRIPT.index('# The entitlements of an unsigned IPA'):SCRIPT.index('\nP=Payload/DmIOS.app\n')]
-PACKING = SCRIPT[SCRIPT.index('\nP=Payload/DmIOS.app\n'):]
+SIGNING = SCRIPT[SCRIPT.index('# The entitlements of an unsigned IPA'):SCRIPT.index('\nP=Payload/$DEVICE_PRODUCT.app\n')]
+PACKING = SCRIPT[SCRIPT.index('\nP=Payload/$DEVICE_PRODUCT.app\n'):]
 PREAMBLE = 'set -u\nt() { :; }; die() { echo "$*" >&2; exit 1; }\ngp() { python3 "$PROFILE_TOOL" "$GAME" "$1"; }\n'
 CAN_SIGN = sys.platform == 'darwin' and shutil.which('codesign') and shutil.which('cc')
 
 
 def run_step(script, root, **extra):
     env = {k: v for k, v in os.environ.items() if not k.startswith('DM_') and k not in ('IOS_PULL', 'AOC', 'PSO')}
-    env.update(GAME=GAME, DM=str(root / 'dm'), PROFILE_TOOL=str(REPO / 'dm/games/game.py'), **extra)
+    env.update(GAME=GAME, DM=str(root / 'dm'), PROFILE_TOOL=str(REPO / 'dm/games/game.py'), DEVICE_PRODUCT='DmIOS', **extra)
     return subprocess.run(['/bin/bash', '-c', PREAMBLE + script], cwd=root, env=env, capture_output=True, text=True)
 
 
@@ -47,7 +47,7 @@ class UnsignedIpaTests(unittest.TestCase):
             self.stand_in(root)
             (root / 'DmIOS.app/executable').write_text('app')
             if image: romfs_image.pack(root / 'romfs', root / 'RomFS.img')
-            result = run_step(PACKING, root, APP=str(root / 'DmIOS.app'), MSL_IOS=str(root / 'shaders'), MSLDIR='b-fixture', ROMFS=str(root / ('RomFS.img' if image else 'romfs')),
+            result = run_step(PACKING, root, APP=str(root / 'DmIOS.app'), MSL_DEVICE=str(root / 'shaders'), MSL_IOS=str(root / 'shaders'), MSLDIR='b-fixture', ROMFS=str(root / ('RomFS.img' if image else 'romfs')),
                               AOC=str(root / 'aoc'), OUT_IPA=str(root / 'out.ipa'), O=str(root / 'pkg'), DM_APP_VERSION='1.2.1', PKG='v327680', **extra)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             with zipfile.ZipFile(root / 'out.ipa') as archive:

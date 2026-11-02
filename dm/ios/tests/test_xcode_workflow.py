@@ -88,7 +88,11 @@ class XcodePipelineTests(unittest.TestCase):
             self.assertEqual(environment['DM_LANG'], 'ja')
             self.assertEqual(environment['DM_SHOW_FPS'], '0')
             self.assertIn('DM_ENV_FILE', environment)   # --no-motion bakes DM_MOTION=0 into the app's dm/env.txt
-            self.assertEqual(Path(environment['DM_ENV_FILE']).read_text(), 'DM_MOTION=0\n')
+            env_pairs = build.env_file_pairs(environment['DM_ENV_FILE'])
+            self.assertEqual(env_pairs['DM_MOTION'], '0')
+            if graphics == 'nvn':
+                self.assertEqual(env_pairs['DM_PSO_PREBUILD_THREADS'], '2')
+                self.assertEqual(env_pairs['DM_PSO_PREPARE_THREADS'], '2')
             self.assertEqual(environment['GFXAPI'], graphics)
             self.assertEqual(environment['DM_BUNDLE_ID'], 'com.example.saved')
             self.assertEqual(environment['DM_TEAM_ID'], 'ABCDEFGHIJ')
@@ -120,8 +124,11 @@ class BuildEnvFileTests(unittest.TestCase):
             work = Path(temporary)
             mine = work / 'mine.txt'
             mine.write_text('# diagnostics\nDM_MOTION_LOG=1\nDM_MOTION=1\n')
-            self.assertEqual(build.build_env_file(work, str(mine), True), str(mine))
-            self.assertEqual(Path(build.build_env_file(work, str(mine), False)).read_text(), 'DM_MOTION_LOG=1\nDM_MOTION=0\n')
+            self.assertEqual(build.build_env_file(work, str(mine), True, 'vulkan'), str(mine))
+            self.assertEqual(Path(build.build_env_file(work, str(mine), False, 'vulkan')).read_text(),
+                             '# NXNative bounded AOT defaults; player environment overrides this file.\nDM_MOTION_LOG=1\nDM_MOTION=0\n')
+            aot = Path(build.build_env_file(work, None, True, 'nvn'))
+            self.assertEqual(build.env_file_pairs(aot), {'DM_PSO_PREBUILD_THREADS': '2', 'DM_PSO_PREPARE_THREADS': '2'})
 
 
 class ResourceStagingTests(unittest.TestCase):

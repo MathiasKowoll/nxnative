@@ -355,4 +355,12 @@ A related compiler form is `cmp wS,#N; b.hi; and xI,xS,#M; ldrsw x18,[xB,xI,lsl 
 
 ## Checking a rewriter change
 
+### SIMD writes do not clobber GPR jump indices
+
+- **Symptom:** rewriting stops with `AssertionError: jump table ea4a8`, despite a visible bounds check before the indexed branch.
+- **Cause:** register-write tracking canonicalized every register name by replacing its first character with `w`. A load into `s1` was therefore mistaken for a write to the unrelated integer register `w1`, discarding the jump-table bound.
+- **Fix:** only `wN` and `xN` destinations enter GPR tracking in all three index-recovery paths. SIMD writes leave integer bounds intact; a real GPR overwrite still invalidates them.
+- **Check:** `test_jump_simd.py` exercises the same dispatch with either a SIMD load or a real index-register overwrite.
+- **Found on:** [Mario Kart World's experimental bring-up](../investigations/mario-kart-world.md#confirmed-bring-up-findings); this fix does not establish playability.
+
 Rewrite every extracted module of every title with the old and the new `patch_nso.py` and compare all outputs; only `build_src.sha256` (the rewriter's own hash) may differ for titles the change is not meant for.

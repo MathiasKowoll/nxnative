@@ -1,4 +1,4 @@
-// NVN texture storage layout (Tegra X1 block-linear), see nvn_tex.c.
+// NVN texture storage layout (Tegra block-linear), see nvn_tex.c.
 #pragma once
 #include <stdint.h>
 
@@ -26,3 +26,7 @@ int nvn_tex_sparse_tiles(const nvn_texdesc *d, uint32_t *tw, uint32_t *th, uint3
 // linear 2D texture over the same memory. One row is n texels, its byte length rounded up to align (the linear-texture row alignment); more rows are full 16384-texel rows. 0 when n or bpb is 0
 #define NVN_TBUF_ROW 16384u
 int nvn_tbuf_rows(uint64_t n, uint32_t bpb, uint32_t align, uint32_t *w, uint32_t *h, uint32_t *row);
+// Intra-GOB byte ordering belongs to the console generation, so it is selected
+// once for the whole title without enlarging NVN's fixed-size texture objects.
+void nvn_tex_set_native_tiling(int enabled);
+int nvn_tex_native_tiling(void);

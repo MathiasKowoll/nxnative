@@ -14,7 +14,7 @@ import dmsh_geometry
 def builder_reflection():
     # Isolate pure reflection code from the builder's CLI/profile initialization.
     tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-    names = {'reflect', 'decode_tex', 'decode_ubo_tex', 'const_sampler', 'c2_array'}
+    names = {'reflect', 'decode_tex', 'decode_nvn2_direct', 'decode_ubo_tex', 'const_sampler', 'c2_array'}
     selected = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in names)
                 or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'SSBO' for t in n.targets))
                 or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Tuple) and any(isinstance(e, ast.Name) and e.id == 'TEX_BASE' for e in t.elts) for t in n.targets))]
@@ -60,6 +60,38 @@ class StorageBuffers(unittest.TestCase):
         self.assertIsNone(bindings('gs', [0x414], [1])[0]['reg'])
         self.assertIsNone(bindings('hs', [0x410], [1])[0]['reg'])
 
+    def test_nvn2_compute_uses_native_descriptor_rows(self):
+        source = '''struct spvDescriptorSetBuffer0
+{
+    device uint* cp_s0 [[id(0)]];
+    texture2d<float> cp_t_tcb_38 [[id(1)]];
+    sampler cp_t_tcb_38Smplr [[id(2)]];
+    texture_buffer<uint, access::read_write> cp_i_tcb_C_r32ui [[id(3)]];
+};
+uint x = cp_i_tcb_C_r32ui.atomic_fetch_add(0, 1);
+'''
+        res = {'nvn2_compute': True, 'nvn2_texture_buffer': 0,
+               'sbufs': [{'binding': 40, 'slot': 0, 'cb_slot': 0, 'cb_offset': 44, 'flags': 1}]}
+        got = REFLECT('synthetic', 'cs', source, res)
+        self.assertEqual([(b['kind'], b['reg']) for b in got],
+                         [('sbuf', 0), ('tex', 28), ('samp_tex', 28), ('img', 6)])
+        self.assertEqual(got[0]['native_cb_offset'], 44 * 4)
+        self.assertTrue(got[0]['rw'])
+        self.assertTrue(got[3]['atomic'])
+        self.assertEqual([b.get('descriptor_bank') for b in got[1:]], [0, 0, 0])
+
+    def test_nvn2_compute_descriptor_offset_is_not_an_api_slot(self):
+        source = '''struct spvDescriptorSetBuffer0
+{
+    device uint* cp_s0 [[id(0)]];
+};
+'''
+        res = {'nvn2_compute': True, 'nvn2_texture_buffer': 0,
+               'sbufs': [{'binding': 40, 'slot': 0, 'cb_slot': 0, 'cb_offset': 0, 'flags': 1}]}
+        got = REFLECT('synthetic', 'cs', source, res)
+        self.assertEqual(got[0]['reg'], 0)
+        self.assertEqual(got[0]['native_cb_offset'], 0)
+
 
 class DriverTableArrays(unittest.TestCase):
     def reflect(self, members):
@@ -85,7 +117,7 @@ def builder_unfillable():
         (isinstance(t, ast.Name) and t.id in ('SSBO', 'DRV_FILL', 'SAMPLE_ROWS')) or (isinstance(t, ast.Tuple) and any(isinstance(e, ast.Name) and e.id == 'TEX_BASE' for e in t.elts)) for t in n.targets))
     ns = {'re': re, 'abi': dmsh_abi}
     exec(compile(ast.Module(body=[n for n in tree.body if keep(n)], type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), ns)
-    return lambda src, stage='ps': ns['unfillable'](ns['drv_reads'](src), stage)
+    return lambda src, stage='ps', nvn2_compute=False: ns['unfillable'](ns['drv_reads'](src), stage, nvn2_compute)
 
 
 UNFILLABLE = builder_unfillable()
@@ -110,6 +142,11 @@ class DriverReads(unittest.TestCase):
 
     def test_sample_rows_are_not_filled_for_other_stages(self):
         self.assertEqual(UNFILLABLE(self.SAMPLE_LOOKUP, 'vs'), ['c0 dynamic index', 'c0+0x630'])
+
+    def test_nvn2_compute_reads_native_c0_rows(self):
+        src = ('ulong a = (*spvDescriptorSet0.cp_c0)._m0[6].x;\n'
+               'ulong b = (*spvDescriptorSet0.cp_c0)._m0[13].x;')
+        self.assertEqual(UNFILLABLE(src, 'cs', True), [])
 
 
 if __name__ == '__main__':

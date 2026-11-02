@@ -81,6 +81,9 @@ int main(void) {
         r->color[0] = &in[0]; r->color[1] = &game_tex; r->depth = &in[1];
     }
     p_bind_program *bp = emit(&s0, OP_BIND_PROGRAM, sizeof *bp); bp->prog = &game_prog; bp->stages = 3;
+    p_draw_mesh *dm = emit(&s0, OP_DRAW_MESH, sizeof *dm); *dm = (p_draw_mesh){&game_prog, 0xff, 1, 7, 11};
+    p_push_gfx_const *pc = emit(&s0, OP_PUSH_GFX_CONST, offsetof(p_push_gfx_const, data) + 12);
+    pc->table = 2; pc->offset = 20; pc->size = 12; for (int i = 0; i < 12; i++) pc->data[i] = (uint8_t)(0x70 + i);
     p_set_pool *sp = emit(&s0, OP_SET_TEX_POOL, sizeof *sp); sp->pool = &game_dpool;
     p_bind_vbuf *vb = emit(&s0, OP_BIND_VBUF, offsetof(p_bind_vbuf, r) + 2 * sizeof(NVNbufferRange)); vb->n = 2; vb->r[0] = (NVNbufferRange){(uint64_t)(uintptr_t)pool_a + 0x100, 0x200}; vb->r[1] = (NVNbufferRange){(uint64_t)(uintptr_t)pool_b + 0x40, 0x10};
     p_bind_buf *ub = emit(&s0, OP_BIND_UBO, sizeof *ub); *ub = (p_bind_buf){1, 3, (uint64_t)(uintptr_t)pool_b + 0x800, 0x100};
@@ -151,6 +154,12 @@ int main(void) {
     CHECK(rt->color[0]->mem == new_base[0] + 0x2000 && rt->color[0]->pool == &new_pool && rt->color[0]->serial == 78, "the snapshot's storage relocated");
     CHECK(rt->depth->mem == new_base[0] + 0x4000 && rt->depth->serial == 79, "the depth snapshot relocated");
     CHECK(AT(0, bp, p_bind_program).prog == &new_prog && AT(0, bp, p_bind_program).stages == 3, "program pointer");
+    CHECK(AT(0, dm, p_draw_mesh).prog == &new_prog && AT(0, dm, p_draw_mesh).stages == 0xff &&
+          AT(0, dm, p_draw_mesh).mode == 1 && AT(0, dm, p_draw_mesh).first == 7 && AT(0, dm, p_draw_mesh).count == 11,
+          "mesh-task program pointer and draw range");
+    CHECK(AT(0, pc, p_push_gfx_const).table == 2 && AT(0, pc, p_push_gfx_const).offset == 20 &&
+          AT(0, pc, p_push_gfx_const).size == 12 && AT(0, pc, p_push_gfx_const).data[0] == 0x70 &&
+          AT(0, pc, p_push_gfx_const).data[11] == 0x7b, "graphics root constants stay inline");
     CHECK(AT(0, sp, p_set_pool).pool == &new_dp, "descriptor pool pointer");
     CHECK(AT(0, vb, p_bind_vbuf).r[0].address == (uint64_t)(uintptr_t)new_base[0] + 0x100 && AT(0, vb, p_bind_vbuf).r[1].address == (uint64_t)(uintptr_t)new_base[1] + 0x40 && AT(0, vb, p_bind_vbuf).r[1].size == 0x10, "vertex buffers relocated");
     CHECK(AT(0, ub, p_bind_buf).addr == (uint64_t)(uintptr_t)new_base[1] + 0x800, "uniform buffer relocated");

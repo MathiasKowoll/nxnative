@@ -127,6 +127,7 @@ int dm_main_imports(const char *prefix) {
 
 // SDK major version, from the version string the SDK's libraries keep in the sdk module's read-only data ("NintendoSDK_nnSdk-10_4_0"; SDK 12 spells it NintendoSdk_).
 // Behaviour that follows the SDK version is decided by it (the NVN API version, the shared-font layout), not by the game profile. 0 = no sdk module or no version string
+#include "sdk_version.h"
 int dm_sdk_major(void) {
     static int major = -1;
     if (major >= 0) return major;
@@ -134,8 +135,9 @@ int dm_sdk_major(void) {
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "sdk")) {
         const char *b = (const char *)g_mod[i].base + g_mod[i].ro_off, *e = (const char *)g_mod[i].base + g_mod[i].key_page_off;   // read-only data, data and bss
         for (const char *p = b; (p = memmem(p, (size_t)(e - p), "_nnSdk-", 7)); p += 7)
-            if (p - b >= 11 && !strncasecmp(p - 11, "NintendoSDK", 11) && p[7] >= '0' && p[7] <= '9') {
-                major = atoi(p + 7); LOG("sdk: NintendoSDK nnSdk-%.12s (major %d)", p + 7, major); break; }
+            if (p - b >= 11 && !strncasecmp(p - 11, "NintendoSDK", 11) &&
+                (major = dm_sdk_version_major(p + 7, (size_t)(e - p - 7)))) {
+                LOG("sdk: NintendoSDK nnSdk-%.*s (major %d)", (int)((e - p - 7) < 24 ? (e - p - 7) : 24), p + 7, major); break; }
     }
     if (!major) LOG("[RED] sdk: no SDK version string in the sdk module; SDK-dependent behaviour takes the newer SDKs' side");
     return major;
