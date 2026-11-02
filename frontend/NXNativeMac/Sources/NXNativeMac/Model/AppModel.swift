@@ -5,10 +5,11 @@ import Observation
 /// El estado de la app: preferencias, lo encontrado en disco y los gestores.
 @MainActor @Observable
 final class AppModel {
-    let prefs = Preferences()
-    let toolchain = Toolchain()
-    let builds = BuildQueue()
-    let runner = GameRunner()
+    let prefs: Preferences
+    let toolchain: Toolchain
+    let builds: BuildQueue
+    let runner: GameRunner
+    let gamepad: GamepadInput
 
     private(set) var games: [MacGameBundle] = []
     /// Los juegos en disco, agrupados por title ID base.
@@ -21,14 +22,38 @@ final class AppModel {
     private(set) var compatibility: [CompatibilityEntry] = []
     private(set) var switches: [EnvSwitch] = []
     private(set) var scanning = false
+    /// Permanece en falso hasta completar el primer escaneo para que la app
+    /// pueda mostrar su pantalla de entrada antes de pintar la biblioteca.
+    private(set) var hasLoadedLibrary = false
     /// Mensaje de la última operación de mantenimiento (git, etc.).
     var notice: String?
+    @ObservationIgnored var workshopInput: ((ConsoleAction) -> Bool)?
+    var workshopBackLabel: String?
+
+    init() {
+        let prefs = Preferences()
+        self.prefs = prefs
+        self.toolchain = Toolchain()
+        self.builds = BuildQueue()
+        self.runner = GameRunner()
+        self.gamepad = GamepadInput(preferences: prefs)
+        self.builds.beforeStart = { [weak self] job in
+            await self?.prepareWorkshopJob(job)
+        }
+        self.builds.onSuccess = { [weak self] in
+            Task { await self?.refresh() }
+        }
+    }
 
     var repository: NXRepository { NXRepository(root: prefs.repositoryURL) }
 
     func refresh() async {
+        let firstLoad = !hasLoadedLibrary
         scanning = true
-        defer { scanning = false }
+        defer {
+            scanning = false
+            hasLoadedLibrary = true
+        }
         let repo = repository
         let gameRoots = prefs.gameRootURLs
         let appRoots = prefs.appRootURLs + gameRoots
@@ -56,6 +81,9 @@ final class AppModel {
         compatibility = c
         switches = s
         await toolchain.refresh(prefs)
+        // Evita que el splash desaparezca antes de que el primer frame de la
+        // ventana llegue a mostrarse cuando el escaneo es muy rápido.
+        if firstLoad { try? await Task.sleep(for: .milliseconds(450)) }
     }
 
     enum ProfileState { case registered, unknown }
@@ -121,12 +149,12 @@ final class AppModel {
     func startBuild(_ options: BuildOptions, game: GameEntry) -> String? {
         // El build no toca las partidas, pero reconstruir es justo cuando
         // alguien borra cosas «para empezar limpio»: copia antes, por si acaso.
-        if let installed = self.game(for: game.base) { Task { await autoBackup(installed) } }
         let output = options.output?.deletingLastPathComponent() ?? options.nspFolder
         let job = BuildJob(title: "\(options.platform.label) · \(name(for: game))", folder: options.nspFolder,
                            arguments: options.arguments(script: repository.buildScript),
                            resultDirectory: output,
                            logsDirectory: options.nspFolder.appendingPathComponent("\(game.base)_build/logs"))
+        job.titleID = game.base.description
         return enqueue(job)
     }
 
@@ -200,12 +228,14 @@ final class AppModel {
         let job = BuildJob(title: "Instalar \(appName)", folder: gameFolder,
                            arguments: options.arguments(script: repository.buildScript),
                            resultDirectory: output.deletingLastPathComponent())
+        job.titleID = target.titleID.description
         return enqueue(job)
     }
 
     private func startFC26Build(gameFolder: URL, keys: URL, output: URL) -> String? {
-        let fc26Root = prefs.bundledFC26URL
-            ?? URL(fileURLWithPath: "/Users/mathias/Development/fc26-mac-port", isDirectory: true)
+        guard let fc26Root = prefs.bundledFC26URL else {
+            return "Detecté FC26, pero falta configurar el builder fc26-mac-port en Entorno."
+        }
         let script = fc26Root.appendingPathComponent("games/fc26/build.sh")
         guard FileManager.default.isExecutableFile(atPath: script.path) else {
             return "Detecté FC26, pero no encuentro su builder en \(script.path). Configura el checkout fc26-mac-port."
@@ -227,6 +257,7 @@ final class AppModel {
         let job = BuildJob(title: "Construir EA Sports FC 26", folder: gameFolder, arguments: args,
                            resultDirectory: output.deletingLastPathComponent(), executable: URL(fileURLWithPath: "/bin/bash"),
                            workingDirectory: fc26Root)
+        job.titleID = FCInstallTarget.fc26.titleID.description
         return enqueue(job)
     }
 
@@ -241,9 +272,13 @@ final class AppModel {
         return enqueue(job)
     }
 
-    private func enqueue(_ job: BuildJob) -> String? {
+    func enqueue(_ job: BuildJob) -> String? {
         guard let python = toolchain.python else { return "No hay python3 >= 3.12: revisa Entorno." }
         guard repository.isValid else { return "La toolchain de nxnative no está disponible dentro de esta app." }
+        job.workers = prefs.buildWorkers
+        guard !builds.jobs.contains(where: { $0.isActive && $0.folder == job.folder }) else {
+            return "Este juego ya tiene un trabajo activo o en cola."
+        }
         builds.enqueue(job, python: python, repository: prefs.repositoryURL)
         return nil
     }
@@ -347,12 +382,43 @@ final class AppModel {
     }
 
     /// Jugar desde la app: primero la copia automática, luego el juego.
+    private var preparingGames = Set<String>()
+
+    func isBuildingGame(_ game: MacGameBundle) -> Bool {
+        builds.jobs.contains { $0.isActive && $0.titleID?.uppercased() == game.titleID.uppercased() }
+    }
+
+    func gameLaunchPending(_ titleID: String) -> Bool {
+        preparingGames.contains(titleID) || runner.launching.contains(titleID)
+    }
+
     func play(_ game: MacGameBundle) {
+        guard !isBuildingGame(game) else {
+            notice = "Espera a que termine la reconstrucción de \(game.name)."
+            return
+        }
+        if runner.resume(game) { return }
+        guard !runner.launching.contains(game.titleID), preparingGames.insert(game.titleID).inserted else { return }
         Task {
+            defer { preparingGames.remove(game.titleID) }
+            synchronizeConfiguration(for: game)
             await autoBackup(game)
             // El lanzador solo crea su carpeta de partidas, no la que le pasan.
             if !activeProfile.isMain { try? FileManager.default.createDirectory(at: saveDirectory(for: game), withIntermediateDirectories: true) }
             runner.launch(game, extra: Self.launchEnvironment(for: game, globals: prefs.globalDefaults, profile: activeProfile))
+        }
+    }
+
+    /// El carrusel también puede lanzar sin abrir la pantalla de configuración.
+    /// Reconciliar aquí garantiza que el lanzador vea la misma configuración
+    /// que la app, incluso si `env.txt` se editó fuera de NXNative.
+    private func synchronizeConfiguration(for game: MacGameBundle) {
+        do {
+            _ = try ConfigurationDatabase().synchronize(titleID: game.titleID, envURL: game.userEnv)
+        } catch {
+            // La copia legible por el lanzador sigue siendo operativa; avisar
+            // permite reparar SQLite sin bloquear el arranque del juego.
+            notice = "SQLite no pudo sincronizar \(game.name); se usará env.txt: \(error.localizedDescription)"
         }
     }
 

@@ -75,6 +75,71 @@ import Testing
     }
 }
 
+@Suite struct ConfigurationDatabaseTests {
+    private func paths() throws -> (root: URL, database: URL, env: URL) {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("nxconfig-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return (root, root.appendingPathComponent("configuration.sqlite"), root.appendingPathComponent("game/env.txt"))
+    }
+
+    @Test func importsLegacyFileAndKeepsNormalizedEntries() throws {
+        let p = try paths()
+        let raw = "# del usuario\nDM_FPS_TARGET=60\nDM_FPS_TARGET=30\nDM_RUMBLE=0\n"
+        try FileManager.default.createDirectory(at: p.env.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(raw.utf8).write(to: p.env)
+
+        let database = ConfigurationDatabase(url: p.database)
+        let imported = try database.synchronize(titleID: "0100AAAA00000000", envURL: p.env)
+        #expect(imported.action == .importedFromFile)
+        let loaded = imported.env
+        #expect(loaded.effective == ["DM_FPS_TARGET": "60", "DM_RUMBLE": "0"])
+        #expect(FileManager.default.fileExists(atPath: p.database.path))
+
+        var changed = loaded
+        changed["DM_FPS_TARGET"] = "90"
+        try database.save(titleID: "0100AAAA00000000", env: changed, envURL: p.env)
+        let again = try database.synchronize(titleID: "0100AAAA00000000", envURL: p.env)
+        #expect(again.action == .unchanged)
+        #expect(again.env.effective["DM_FPS_TARGET"] == "90")
+        #expect(again.env.effective["DM_RUMBLE"] == "0")
+    }
+
+    @Test func externalEditWinsAndMissingFileIsRestored() throws {
+        let p = try paths()
+        let database = ConfigurationDatabase(url: p.database)
+        var first = EnvFile()
+        first["DM_PRESENT_HZ"] = "120"
+        try database.save(titleID: "0100BBBB00000000", env: first, envURL: p.env)
+
+        try FileManager.default.removeItem(at: p.env)
+        let restored = try database.synchronize(titleID: "0100BBBB00000000", envURL: p.env)
+        #expect(restored.action == .restoredToFile)
+        #expect(restored.env.effective["DM_PRESENT_HZ"] == "120")
+        #expect(FileManager.default.fileExists(atPath: p.env.path))
+
+        let external = "# edición externa\nDM_PRESENT_HZ=90\n"
+        try Data(external.utf8).write(to: p.env)
+        let edited = try database.synchronize(titleID: "0100BBBB00000000", envURL: p.env)
+        #expect(edited.action == .importedFromFile)
+        #expect(edited.env.effective["DM_PRESENT_HZ"] == "90")
+        #expect(edited.env.text == external)
+    }
+
+    @Test func emptySaveRemovesLegacyFileWithoutRestoringOldValues() throws {
+        let p = try paths()
+        let database = ConfigurationDatabase(url: p.database)
+        var configured = EnvFile()
+        configured["DM_FPS_TARGET"] = "60"
+        try database.save(titleID: "0100CCCC00000000", env: configured, envURL: p.env)
+
+        try database.save(titleID: "0100CCCC00000000", env: EnvFile(), envURL: p.env)
+        #expect(!FileManager.default.fileExists(atPath: p.env.path))
+        let loaded = try database.loadOrImport(titleID: "0100CCCC00000000", envURL: p.env)
+        #expect(loaded.lines.isEmpty)
+    }
+}
+
 @Suite struct LauncherSettingsTests {
     /// El ejemplo de Breath of the Wild de `docs/frontends.md`.
     static let json = #"""

@@ -18,7 +18,7 @@ nxnative cambia esa interfaz, el punto de contacto está en `Sources/NXCore`.
 
 | Pantalla | Qué hay |
 |---|---|
-| **Biblioteca** | Las apps de juego empaquetadas (`DMTitleID` en su `Info.plist`). Jugar / detener, ajustes por juego, log en vivo, copias de las partidas guardadas, interruptores avanzados. |
+| **Biblioteca** | Interfaz tipo consola con hero y carrusel de carátulas. Juegos, Ajustes, Registro, Partidas, Avanzado y Entorno se manejan dentro de la misma pantalla, con teclado, ratón y mando. |
 | **Instalar FC26/FC27** | Flujo de un solo paso: eliges tu carpeta con NSP/NSZ/XCI/XCZ, tu `prod.keys` y el destino; el title ID detecta automáticamente FC26 o FC27 y ejecuta el builder correspondiente. El instalador incluye dentro de su propio `.app` la toolchain de nxnative, los perfiles, traductores de shaders y el builder de FC26. El resultado queda autocontenido con runtime, juego, módulos, shaders y launcher. No incluye ni redistribuye el juego ni las claves. |
 | **Juegos en disco** | Base, actualizaciones y DLC agrupados por title ID, estén en una carpeta por juego o todos juntos con los DLC en subcarpetas. Dice si nxnative tiene perfil y avisa de un XCI que trae la actualización en el cartucho. Construye una app de Mac, una IPA o un build de desarrollo, con todas las opciones del script. Benchmark (`scripts/bench.py`) cuando el perfil tiene ruta. |
 | **Construcciones** | Cola de builds de uno en uno, con etapas, progreso, ETA y la consola del script. Cancelar manda SIGINT (el script sale con 130 y deja lo reutilizable). |
@@ -53,11 +53,16 @@ están.
   partición `secure`: más de uno es un «1G+1U», y nxnative solo usa la base.
 
 - **Ajustes de juego**: se dibujan desde `Contents/Resources/dm/launcher.json`
-  y se escriben en `~/Library/Application Support/nxnative/<title ID>/env.txt`,
-  que el lanzador de nxnative lee. Valen también al abrir el juego desde
-  Finder. Como la app del iPhone, solo se escribe lo que difiere del valor
-  probado, para que un build nuevo pueda mejorar los valores por defecto. Las
-  líneas escritas a mano en ese archivo se conservan.
+  y se guardan en `~/Library/Application Support/NXNativeMac/configuration.sqlite`.
+  Cada perfil se materializa además en `~/Library/Application Support/nxnative/<title ID>/env.txt`,
+  que el lanzador de nxnative lee, por lo que vale también al abrir el juego
+  desde Finder. Como la app del iPhone, solo se escribe lo que difiere del
+  valor probado, para que un build nuevo pueda mejorar los valores por
+  defecto. Las líneas escritas a mano se conservan; si `env.txt` cambia fuera
+  de la app, esa edición se importa en la siguiente carga. Si SQLite no está
+  disponible, `env.txt` sigue siendo el respaldo operativo. La pestaña Ajustes
+  también ofrece «Sincronizar ahora» y cada cambio comprueba antes si el
+  archivo externo cambió mientras la vista estaba abierta.
 - **HUD de Metal.** macOS mete `MTL_HUD_ENABLED=0` en el entorno de toda
   app que abre LaunchServices, y Metal lee esa variable al cargar su librería,
   antes que los constructores del host: el `setenv` del host (sin
@@ -73,6 +78,14 @@ están.
   `~/Library/Application Support/NXNativeMac/fonts/` y la activa por juego con
   `DM_SHARED_FONT_EXT`, sin reconstruir. Solo cambia los juegos que dibujan
   los botones con la fuente del sistema.
+- **Arranque y salida con DualSense.** La biblioteca muestra una pantalla de
+  entrada con el icono de NXNative mientras termina el primer escaneo, para
+  evitar un salto brusco a las carátulas. Mientras un juego está abierto,
+  mantener `Select + Start` (los botones `Options` + `Menu` que expone macOS)
+  o el click del panel táctil de un DualSense durante el tiempo configurado en
+  **Entorno → Salida global con mando** (5 segundos por defecto) envía
+  `SIGTERM` al lanzador y devuelve el foco a `Juegos`; las acciones normales
+  del mando no se roban al juego.
 - **El parser de `env.txt` replica `env_file()` de `dm/mac/launcher.c`**: gana
   la primera aparición, `#` comenta, la clave pierde los espacios finales.
 - **Los juegos se abren por LaunchServices**, no como hijos de esta app: el
@@ -154,6 +167,77 @@ Durante el desarrollo:
 swift test --package-path frontend/NXNativeMac
 ```
 
+## Console navigation
+
+The main window opens on the game library, without a sidebar. Select a cover
+and play; game configuration opens separately inside the same window, preserving
+the selected game when returning.
+
+| Action | Keyboard / mouse | PlayStation | Switch | Xbox |
+| --- | --- | --- | --- | --- |
+| Select game | Left / Right, click a cover | D-pad / left stick | D-pad / left stick | D-pad / left stick |
+| Play / resume | Enter, Play, double-click a cover | Cross | A | A |
+| Open configuration | C, Command-comma, Configuration, cover context menu | Triangle | X | Y |
+| Return to games | Esc, Back | Circle | B | B |
+| Configuration sections | Click a tab, Command-[ / Command-] | L1 / R1 | L / R | LB / RB |
+| Select / adjust a setting | Up / Down, Left / Right, visible row buttons | D-pad | D-pad | D-pad |
+
+Native controls also support Tab and Space. The Advanced page includes a text
+editor for arbitrary values. Global settings and builder/maintenance tools are
+available from the configuration tabs. Controller glyphs are read from
+GameController so the legends reflect system remapping; family labels are only
+fallbacks. The top face button always opens configuration. Nintendo confirmation
+uses the right face button, following the A/B convention of that console.
+
+Back never terminates a game. The separately configured global exit gesture
+(Select + Start or DualSense touchpad click, held for five seconds by default)
+continues to return to the library. A short press does not trigger this exit.
+
+Validation: run `swift test --jobs 2` and build with `SWIFT_BUILD_JOBS=2`.
+Controller routing tests cover library/configuration boundaries, empty libraries,
+explicit exit, and the three controller families. Physical-controller behavior
+and visible keyboard/mouse interaction require testing the installed app.
+
+## Workshop
+
+Configuration → **Taller** opens the build workspace inside the console window.
+The game settings also have **Reconstruir en el Taller**, preserving the selected
+game. **Preparar** chooses source, Mac app or unsigned IPA, output directory and
+one or two workers. **Actividad** contains progress, messages, cancellation and
+explicit retry. **Herramientas** adds source folders and keys, rescans, and opens
+the existing advanced installer/profile/save workflows.
+
+The D-pad or left stick moves between rows; left/right changes a row's value;
+the confirmation button activates it. Triangle / Switch X / Xbox Y cycles the
+three Workshop views. The keyboard uses arrows, Enter, T and Esc. Mouse users
+can activate rows, adjustment buttons and tabs directly. macOS file selectors
+and the legacy advanced forms retain their native keyboard/mouse interaction.
+Build, retry and cancellation confirmations start on Back and are operable with
+controller or keyboard. Opening the Workshop never starts a build.
+
+Builds remain sequential. The default is one worker, with an optional two-worker
+mode, explicit compiler environment limits and background scheduling priority.
+These are concurrency limits, not a hard cap on a compiler's memory allocation.
+macOS memory-pressure warnings hold the next job; critical pressure requests
+cancellation of the active job. Source and key paths are checked again when a
+queued job starts, and the save backup is awaited before rebuilding an installed
+game. A successfully completed build triggers a library refresh.
+
+Build metadata and up to 100 finished jobs are saved in the existing SQLite
+database, without key contents. Jobs interrupted by a previous app session are
+shown for manual review and are never restarted automatically. Retry is refused
+while a recorded previous process ID still exists; that PID is never terminated
+based on the stored number alone. Detailed build logs stay with the source game.
+
+Closing the last window keeps NXNative running while jobs are pending. Quitting
+the app explicitly requires cancelling those jobs and waits for their exit.
+This is an in-app queue with child build processes, not a detached system service.
+An app crash or restart therefore requires reviewing interrupted jobs.
+
+Validation uses `swift test --jobs 2`. The process-queue tests launch only tiny
+local commands, covering failure progression, cancellation before launch and
+history recovery; they do not compile game shaders or establish game playability.
+
 ## Estructura
 
 ```
@@ -161,6 +245,7 @@ Sources/NXCore/        Formatos de nxnative, sin UI (se prueba solo)
   BuildEvent.swift       eventos de --progress json
   BuildState.swift       reductor de etapas y mensajes
   EnvFile.swift          env.txt, con las reglas del lanzador
+  ConfigurationDatabase.swift SQLite + materialización compatible de env.txt
   LauncherSettings.swift dm/launcher.json
   TitleID.swift          title IDs y carpetas NSP
   NCAHeader.swift        title ID con claves (AES-XTS-128 propio)

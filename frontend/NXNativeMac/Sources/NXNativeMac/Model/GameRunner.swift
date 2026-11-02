@@ -11,6 +11,7 @@ import Observation
 final class GameRunner {
     private(set) var running: [String: NSRunningApplication] = [:]   // por title ID
     private(set) var lastError: String?
+    private(set) var launching = Set<String>()
     private var observer: NSObjectProtocol?
 
     init() {
@@ -21,9 +22,19 @@ final class GameRunner {
             let pid = app?.processIdentifier
             MainActor.assumeIsolated {
                 guard let self, let pid else { return }
-                self.running = self.running.filter { $0.value.processIdentifier != pid }
+                self.gameDidTerminate(pid: pid)
             }
         }
+    }
+
+    /// El juego se abre como una aplicación hermana, así que al terminar no
+    /// hay un proceso padre que pueda devolver el foco. Reactivar la ventana
+    /// de NXNative cubre tanto un cierre normal como un crash o un Detener.
+    private func gameDidTerminate(pid: Int32) {
+        guard running.values.contains(where: { $0.processIdentifier == pid }) else { return }
+        running = running.filter { $0.value.processIdentifier != pid }
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.windows.first(where: { $0.isVisible && $0.canBecomeKey })?.makeKeyAndOrderFront(nil)
     }
 
     func isRunning(_ game: MacGameBundle) -> Bool {
@@ -47,6 +58,7 @@ final class GameRunner {
     /// lanzador lee; `extra` son variables solo para esta partida (las del
     /// entorno ganan a las del archivo).
     func launch(_ game: MacGameBundle, extra: [String: String] = [:]) {
+        guard launching.insert(game.titleID).inserted else { return }
         lastError = nil
         let cfg = NSWorkspace.OpenConfiguration()
         cfg.activates = true
@@ -56,15 +68,32 @@ final class GameRunner {
             let message = error?.localizedDescription
             Task { @MainActor in
                 guard let self else { return }
+                self.launching.remove(game.titleID)
                 if let app { self.running[game.titleID] = app }
                 self.lastError = message
             }
         }
     }
 
+    func resume(_ game: MacGameBundle) -> Bool {
+        guard isRunning(game), let app = running[game.titleID] else { return false }
+        app.activate(options: [.activateAllWindows])
+        return true
+    }
+
     /// SIGTERM al lanzador, que lo reenvía al host y sale con su código.
     func stop(_ game: MacGameBundle) {
         guard let app = running[game.titleID] else { return }
         kill(app.processIdentifier, SIGTERM)
+    }
+
+    /// Cierra el juego que la app lanzó más recientemente. Se usa para el
+    /// atajo global del mando cuando NXNative está detrás de la ventana del
+    /// juego; el observador de término reactiva la biblioteca al salir.
+    @discardableResult
+    func stopCurrent() -> Bool {
+        guard let app = running.values.first(where: { !$0.isTerminated }) else { return false }
+        kill(app.processIdentifier, SIGTERM)
+        return true
     }
 }

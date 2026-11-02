@@ -6,9 +6,12 @@ import Observation
 /// Un build de `build_ipa_from_nsp.py`, lanzado con `--progress json`.
 @MainActor @Observable
 final class BuildJob: Identifiable {
-    enum Status: Equatable { case queued, running, succeeded, failed(Int32), cancelled }
+    enum Status: Equatable { case queued, running, succeeded, failed(Int32), cancelled, interrupted }
 
-    let id = UUID()
+    let id: UUID
+    var workers = 1
+    var titleID: String?
+    var onChange: (() -> Void)?
     let title: String
     /// La carpeta NSP del juego: de ahí salen los logs y las salidas.
     let folder: URL
@@ -23,17 +26,20 @@ final class BuildJob: Identifiable {
     let resultDirectory: URL?
     /// `<carpeta>/<title ID>_build/logs`, donde el script deja un log por paso.
     let logsDirectory: URL?
-    private(set) var status: Status = .queued
+    private(set) var status: Status = .queued { didSet { onChange?() } }
     private(set) var state = BuildState()
     private(set) var stderrTail = ""
     private(set) var started: Date?
     private(set) var finished: Date?
 
     private var process: Process?
+    private var previousProcessID: Int32?
     private var splitter = LineSplitter()
+    private(set) var cancellationRequested = false
 
     init(title: String, folder: URL, arguments: [String], resultDirectory: URL? = nil, logsDirectory: URL? = nil,
-         executable: URL? = nil, workingDirectory: URL? = nil) {
+         executable: URL? = nil, workingDirectory: URL? = nil, id: UUID = UUID()) {
+        self.id = id
         self.title = title
         self.folder = folder
         self.arguments = arguments
@@ -41,6 +47,66 @@ final class BuildJob: Identifiable {
         self.logsDirectory = logsDirectory
         self.executable = executable
         self.workingDirectory = workingDirectory
+    }
+
+    convenience init(record: WorkshopBuild) {
+        let record = record.recovered
+        self.init(title: record.title, folder: record.folder, arguments: record.arguments,
+                  resultDirectory: record.resultDirectory, logsDirectory: record.logsDirectory,
+                  executable: record.executable, workingDirectory: record.workingDirectory, id: record.id)
+        workers = record.workers; titleID = record.titleID
+        previousProcessID = record.processID
+        started = record.started; finished = record.finished
+        switch record.status {
+        case .succeeded: status = .succeeded
+        case .failed: status = .failed(-1)
+        case .cancelled: status = .cancelled
+        default: status = .interrupted
+        }
+        if let error = record.error { state.note(BuildEventParser.redPrefix + error) }
+    }
+
+    var record: WorkshopBuild {
+        let savedStatus: WorkshopBuild.Status
+        switch status {
+        case .queued: savedStatus = .queued
+        case .running: savedStatus = .running
+        case .succeeded: savedStatus = .succeeded
+        case .failed: savedStatus = .failed
+        case .cancelled: savedStatus = .cancelled
+        case .interrupted: savedStatus = .interrupted
+        }
+        return WorkshopBuild(id: id, title: title, folder: folder, arguments: arguments,
+                             executable: executable, workingDirectory: workingDirectory,
+                             resultDirectory: resultDirectory, logsDirectory: logsDirectory,
+                             titleID: titleID, workers: workers, status: savedStatus,
+                             started: started, finished: finished, error: lastError ?? String(stderrTail.suffix(4000)),
+                             processID: process?.processIdentifier ?? previousProcessID)
+    }
+
+    func retryCopy() -> BuildJob {
+        let copy = BuildJob(title: title, folder: folder, arguments: arguments, resultDirectory: resultDirectory,
+                            logsDirectory: logsDirectory, executable: executable, workingDirectory: workingDirectory)
+        copy.workers = workers; copy.titleID = titleID
+        return copy
+    }
+
+    var earlierProcessMayBeRunning: Bool {
+        guard let pid = previousProcessID, pid > 0 else { return false }
+        // A PID alone is not enough identity to terminate anything. Conservatively
+        // refuse a retry until the old PID disappears; never signal it here.
+        return kill(pid, 0) == 0 || errno == EPERM
+    }
+
+    func prepare() {
+        started = Date()
+        status = .running
+    }
+
+    func fail(_ message: String) {
+        append(BuildEventParser.redPrefix + message)
+        finished = Date()
+        status = .failed(-1)
     }
 
     var isActive: Bool { status == .queued || status == .running }
@@ -51,14 +117,17 @@ final class BuildJob: Identifiable {
     var lastError: String? { state.lastError }
 
     func start(python: String, repository: URL) {
+        guard status == .running, !cancellationRequested else { return }
         let p = Process()
         let program = executable ?? URL(fileURLWithPath: python)
-        p.executableURL = program
-        p.arguments = arguments
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/nice")
+        p.arguments = ["-n", "10", program.path] + arguments
+        p.qualityOfService = .background
         p.currentDirectoryURL = workingDirectory ?? repository
         var env = Shell.environment(extraPath: [URL(fileURLWithPath: python).deletingLastPathComponent().path,
                                                  program.deletingLastPathComponent().path])
         env["PYTHONUNBUFFERED"] = "1"
+        env.merge(WorkshopBuild.environment(workers: workers)) { _, bounded in bounded }
         p.environment = env
         p.standardInput = FileHandle.nullDevice
         let out = Pipe(), err = Pipe()
@@ -86,20 +155,19 @@ final class BuildJob: Identifiable {
         do {
             try p.run()
             process = p
-            status = .running
-            started = Date()
-            append("$ \(([program.path] + (p.arguments ?? [])).joined(separator: " "))")
+            onChange?()
+            append("Workers: \(workers); background priority.\n$ \(([program.path] + arguments).joined(separator: " "))")
         } catch {
-            append(BuildEventParser.redPrefix + "No se pudo lanzar el builder: \(error.localizedDescription)")
-            status = .failed(-1)
-            finished = Date()
+            fail("No se pudo lanzar el builder: \(error.localizedDescription)")
         }
     }
 
     /// SIGINT, como un Ctrl-C: el script sale con 130 y deja lo reutilizable.
-    func cancel() {
+    func cancel(reason: String? = nil) {
+        if let reason { append(BuildEventParser.redPrefix + reason) }
+        cancellationRequested = true
         guard let process, process.isRunning else {
-            if status == .queued { status = .cancelled }
+            if isActive { finished = Date(); status = .cancelled }
             return
         }
         process.interrupt()
@@ -124,50 +192,102 @@ final class BuildJob: Identifiable {
         for line in splitter.flush() { handle(line) }
         finished = Date()
         let bySignal = process?.terminationReason == .uncaughtSignal && code == SIGINT
-        if code == 0 { status = .succeeded }
-        else if code == 130 || bySignal { status = .cancelled }
-        else { status = .failed(code) }
         process = nil
-        NSApp.requestUserAttention(.informationalRequest)
+        if cancellationRequested || code == 130 || bySignal { status = .cancelled }
+        else if code == 0 { status = .succeeded }
+        else { status = .failed(code) }
+        NSApp?.requestUserAttention(.informationalRequest)
     }
 }
 
-/// Los builds van de uno en uno: cada uno usa todos los núcleos y el disco.
+/// One bounded build at a time, with durable history and explicit recovery.
 @MainActor @Observable
 final class BuildQueue {
     private(set) var jobs: [BuildJob] = []
+    private(set) var persistenceError: String?
+    private(set) var memoryPressure = false
+    var beforeStart: ((BuildJob) async -> String?)?
+    var onSuccess: (() -> Void)?
+    private var python: String?
+    private var repository: URL?
+    private var memoryMonitor: (any DispatchSourceMemoryPressure)?
+    private let database: ConfigurationDatabase
+    private var cancellingAll = false
+
+    init(database: ConfigurationDatabase = ConfigurationDatabase()) {
+        self.database = database
+        do { jobs = try database.loadBuildHistory().map(BuildJob.init(record:)) }
+        catch { persistenceError = error.localizedDescription }
+        let source = DispatchSource.makeMemoryPressureSource(eventMask: [.normal, .warning, .critical], queue: .main)
+        source.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let critical = self.memoryMonitor?.data.contains(.critical) ?? false
+                let warning = self.memoryMonitor?.data.contains(.warning) ?? false
+                self.memoryPressure = critical || warning
+                if critical { self.active?.cancel(reason: "Build cancelled because macOS reported critical memory pressure.") }
+                if !self.memoryPressure { self.pump() }
+            }
+        }
+        source.resume()
+        memoryMonitor = source
+    }
 
     var active: BuildJob? { jobs.first { $0.status == .running } }
     var pendingCount: Int { jobs.filter(\.isActive).count }
 
     func enqueue(_ job: BuildJob, python: String, repository: URL) {
+        self.python = python; self.repository = repository
+        job.onChange = { [weak self, weak job] in
+            guard let self, let job else { return }
+            self.save()
+            self.updateBadge()
+            if !job.isActive {
+                if job.status == .succeeded { self.onSuccess?() }
+                self.pump()
+            }
+        }
         jobs.insert(job, at: 0)
-        pump(python: python, repository: repository)
+        save()
+        pump()
     }
 
-    func clearFinished() { jobs.removeAll { !$0.isActive } }
+    func clearFinished() { jobs.removeAll { !$0.isActive }; save() }
+
+    func cancelAll() {
+        cancellingAll = true
+        // Cancel queued entries first so finishing the active one cannot launch another.
+        for job in jobs where job.status == .queued { job.cancel() }
+        active?.cancel()
+        cancellingAll = false
+    }
+
+    private func save() {
+        do {
+            try database.saveBuildHistory(jobs.filter(\.isActive).map(\.record)
+                + jobs.filter { !$0.isActive }.prefix(100).map(\.record))
+            persistenceError = nil
+        } catch { persistenceError = error.localizedDescription }
+    }
 
     /// Lanza el siguiente en cola si no hay ninguno corriendo, y vuelve a
     /// mirar cuando termina el actual.
-    private func pump(python: String, repository: URL) {
+    private func pump() {
         updateBadge()
-        guard active == nil, let next = jobs.last(where: { $0.status == .queued }) else { return }
-        next.start(python: python, repository: repository)
-        observe(next, python: python, repository: repository)
-    }
-
-    private func observe(_ job: BuildJob, python: String, repository: URL) {
-        withObservationTracking { _ = job.status } onChange: { [weak self] in
-            Task { @MainActor in
-                guard let self else { return }
-                if job.isActive { self.observe(job, python: python, repository: repository) }
-                else { self.pump(python: python, repository: repository) }
+        guard !cancellingAll, !memoryPressure, active == nil, let python, let repository,
+              let next = jobs.last(where: { $0.status == .queued }) else { return }
+        next.prepare()
+        Task { @MainActor [weak self] in
+            if let error = await self?.beforeStart?(next) {
+                if next.status == .running { next.fail(error) }
+            } else {
+                next.start(python: python, repository: repository)
             }
         }
     }
 
     private func updateBadge() {
         let n = pendingCount
-        NSApp.dockTile.badgeLabel = n > 0 ? "\(n)" : nil
+        NSApp?.dockTile.badgeLabel = n > 0 ? "\(n)" : nil
     }
 }

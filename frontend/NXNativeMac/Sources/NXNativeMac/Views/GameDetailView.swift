@@ -3,6 +3,7 @@ import SwiftUI
 
 struct GameDetailView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
     let game: MacGameBundle
 
     enum Tab: String, CaseIterable, Identifiable {
@@ -28,13 +29,33 @@ struct GameDetailView: View {
 
             Group {
                 switch tab {
-                case .settings: if let store { SettingsFormView(store: store) }
+                case .settings:
+                    if let store {
+                        if model.gamepad.isConnected {
+                            GamepadSettingsView(store: store)
+                        } else {
+                            SettingsFormView(store: store)
+                        }
+                    }
                 case .log: if let tail { LogView(tail: tail, game: game) }
                 case .saves: SavesView(game: game)
-                case .advanced: if let store { AdvancedEnvView(store: store) }
+                case .advanced:
+                    if let store {
+                        if model.gamepad.isConnected {
+                            GamepadAdvancedView(store: store)
+                        } else {
+                            AdvancedEnvView(store: store)
+                        }
+                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if model.gamepad.isConnected {
+                Label("Mando: LB/RB cambiar pestaña · B volver", systemImage: "gamecontroller.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .padding(.bottom, 6)
+            }
         }
         .navigationTitle(game.name)
         .task(id: game.id) {
@@ -44,6 +65,20 @@ struct GameDetailView: View {
             tail = t
         }
         .onDisappear { tail?.stop() }
+        .onChange(of: model.gamepad.sequence) { _, _ in
+            switch model.gamepad.lastAction {
+            case .previousTab: cycleTab(by: -1)
+            case .nextTab: cycleTab(by: 1)
+            case .back: dismiss()
+            default: break
+            }
+        }
+    }
+
+    private func cycleTab(by amount: Int) {
+        let tabs = Tab.allCases
+        guard let index = tabs.firstIndex(of: tab) else { return }
+        tab = tabs[(index + amount + tabs.count) % tabs.count]
     }
 
     private var header: some View {
@@ -111,11 +146,14 @@ struct SettingsFormView: View {
                 HighRefreshSection(store: store)
                 Section {
                     HStack {
-                        Text("Se guardan en \(store.game.userEnv.path) y valen también al abrir el juego desde Finder. Solo se escribe lo que difiere del valor probado.")
+                        Text("Se guardan en SQLite y se materializan en \(store.game.userEnv.path), por lo que valen también al abrir el juego desde Finder. Solo se escribe lo que difiere del valor probado.")
                             .font(.caption).foregroundStyle(.secondary)
                         Spacer()
+                        Button("Sincronizar ahora") { store.synchronize() }
                         Button("Restablecer valores probados") { store.resetAll() }
                     }
+                    Label(store.syncSummary, systemImage: "arrow.triangle.2.circlepath")
+                        .font(.caption).foregroundStyle(.secondary)
                     if let e = store.error { Text(e).foregroundStyle(.red) }
                 }
             }

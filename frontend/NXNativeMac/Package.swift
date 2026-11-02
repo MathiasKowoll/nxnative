@@ -12,5 +12,6 @@ let package = Package(
         .target(name: "NXCore"),
         .executableTarget(name: "NXNativeMac", dependencies: ["NXCore"]),
         .testTarget(name: "NXCoreTests", dependencies: ["NXCore"], resources: [.copy("Fixtures")]),
+        .testTarget(name: "NXMacTests", dependencies: ["NXNativeMac", "NXCore"]),
     ]
 )

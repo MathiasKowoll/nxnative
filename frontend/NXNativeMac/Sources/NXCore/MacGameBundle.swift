@@ -71,6 +71,10 @@ public struct MacGameBundle: Sendable, Hashable, Identifiable {
 
     public var launcher: URL { url.appendingPathComponent("Contents/MacOS/nxnative") }
     public var resources: URL { url.appendingPathComponent("Contents/Resources", isDirectory: true) }
+    /// La carátula extraída del control data y convertida a AppIcon.icns por
+    /// pack_app.py. Si un wrapper viejo no la trae, la interfaz usa el icono
+    /// que LaunchServices le entrega a la app.
+    public var iconURL: URL { resources.appendingPathComponent("AppIcon.icns") }
     public var launcherJSON: URL { resources.appendingPathComponent("dm/launcher.json") }
     public var bundledEnv: URL { resources.appendingPathComponent("dm/env.txt") }
     public var hasPipelineArchive: Bool {

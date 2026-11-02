@@ -11,6 +11,7 @@ ipa	EaSportsFc27.ipa
 app_category	public.app-category.sports-games
 
 # ---- Versions ----
+build	v262144	1.8c.cab1	main=fb81983aa1cc3a2e97402497e2ca6528	sdk=fed212d6e0963706f9f4b16ea5d65879
 build	v393216	1.8d.310c	main=a48c0de3bc353efa0e4d359bde05ef24	sdk=fed212d6e0963706f9f4b16ea5d65879
 package	v393216
 shader_versions	v393216

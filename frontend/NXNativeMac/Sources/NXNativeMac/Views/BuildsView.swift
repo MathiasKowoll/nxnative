@@ -8,7 +8,7 @@ struct BuildsView: View {
         Group {
             if model.builds.jobs.isEmpty {
                 ContentUnavailableView("Sin construcciones", systemImage: "hammer",
-                                       description: Text("Lanza una desde Carpetas NSP. Van de una en una: cada build usa todos los núcleos."))
+                                       description: Text("Prepara un juego desde el Taller. Los builds van de uno en uno, con uno o dos trabajadores."))
             } else {
                 ScrollView {
                     LazyVStack(spacing: 14) {
@@ -92,6 +92,7 @@ struct BuildJobCard: View {
         case .succeeded: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
         case .failed: Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
         case .cancelled: Image(systemName: "stop.circle").foregroundStyle(.secondary)
+        case .interrupted: Image(systemName: "exclamationmark.arrow.triangle.2.circlepath").foregroundStyle(.orange)
         }
     }
 
@@ -104,6 +105,7 @@ struct BuildJobCard: View {
         case .succeeded: return "Terminado" + t
         case let .failed(code): return "Falló (código \(code))" + t
         case .cancelled: return "Cancelado" + t
+        case .interrupted: return "Interrumpido · revisa el origen antes de reintentar"
         }
     }
 }

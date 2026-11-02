@@ -142,6 +142,27 @@ struct EnvironmentView: View {
             }
 
             Section {
+                Toggle("Permitir cierre global desde el mando", isOn: $prefs.globalExitEnabled)
+                Toggle("Select + Start", isOn: $prefs.globalExitSelectStart)
+                    .disabled(!prefs.globalExitEnabled)
+                Toggle("Click del panel táctil DualSense", isOn: $prefs.globalExitTouchpad)
+                    .disabled(!prefs.globalExitEnabled)
+                LabeledContent("Mantener pulsado") {
+                    Stepper(value: $prefs.globalExitHoldSeconds, in: 1...10, step: 1) {
+                        Text("\(Int(prefs.globalExitHoldSeconds.rounded())) s")
+                            .monospacedDigit()
+                            .frame(minWidth: 42, alignment: .trailing)
+                    }
+                    .disabled(!prefs.globalExitEnabled)
+                }
+            } header: {
+                Text("Salida global con mando")
+            } footer: {
+                Text("Se aplica a todos los juegos y no se guarda por juego. Mantén la combinación elegida durante el tiempo indicado para evitar cierres accidentales; el valor inicial es 5 segundos.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section {
                 PathRow(label: "Copias de partidas", path: $prefs.backupsPath, directory: true,
                         placeholder: SaveVault.defaultRoot.path)
                 Toggle("Copia automática al jugar y al reconstruir", isOn: $prefs.autoBackup)

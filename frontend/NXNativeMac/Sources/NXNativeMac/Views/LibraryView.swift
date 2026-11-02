@@ -3,70 +3,120 @@ import SwiftUI
 
 struct LibraryView: View {
     @Environment(AppModel.self) private var model
-    @State private var path: [MacGameBundle] = []
-
-    private let columns = [GridItem(.adaptive(minimum: 150, maximum: 190), spacing: 18)]
+    @State private var selectedGameID: MacGameBundle.ID?
+    @State private var navigation = ConsoleNavigation()
+    @State private var store: GameSettingsStore?
+    @State private var tail: LogTail?
+    @FocusState private var libraryFocused: Bool
 
     var body: some View {
-        NavigationStack(path: $path) {
-            Group {
-                if model.games.isEmpty {
-                    ContentUnavailableView {
-                        Label("Sin juegos empaquetados", systemImage: "gamecontroller")
-                    } description: {
-                        Text("Las apps de Mac que crea nxnative (--platform mac-app) aparecen aquí. Construye una desde Carpetas NSP, o añade la carpeta donde las guardas en Entorno.")
-                    }
-                } else {
-                    ScrollView {
-                        LazyVGrid(columns: columns, spacing: 22) {
-                            ForEach(model.games) { game in
-                                NavigationLink(value: game) { GameTile(game: game) }
-                                    .buttonStyle(.plain)
-                                    .contextMenu { tileMenu(game) }
-                            }
-                        }
-                        .padding(22)
-                    }
+        GeometryReader { proxy in
+            VStack(spacing: 0) {
+                ConsoleTopBar(panel: $navigation.page, game: selectedGame)
+                    .disabled(model.gamepad.dialogPresented)
+                if navigation.page == .games, !model.games.isEmpty {
+                    GameCarouselView(games: model.games, selection: $selectedGameID,
+                                     configure: { game in
+                        selectedGameID = game.id
+                        handle(.configure)
+                    })
                 }
+                activePanel
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
+                ConsoleCommandBar(page: navigation.page, hasGame: selectedGame != nil,
+                                  canPlay: selectedGame.map { !model.isBuildingGame($0) } ?? false,
+                                  action: handle)
+                    .disabled(model.gamepad.dialogPresented)
             }
-            .navigationTitle("Biblioteca")
-            .navigationDestination(for: MacGameBundle.self) { GameDetailView(game: $0) }
-            .toolbar {
-                AllSavesMenu()
-                Button { Task { await model.refresh() } } label: { Label("Escanear", systemImage: "arrow.clockwise") }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+            // Artwork is a background, never a participant in window measurement.
+            .background { ConsoleBackdrop(game: selectedGame).clipped() }
+            .clipped()
+        }
+        .preferredColorScheme(.dark)
+        .focusable()
+        .focusEffectDisabled()
+        .focused($libraryFocused)
+        .onKeyPress(.leftArrow) { libraryKey(.left) }
+        .onKeyPress(.rightArrow) { libraryKey(.right) }
+        .onKeyPress(.return, phases: .down) { _ in libraryKey(.primary) }
+        .focusedSceneValue(\.consoleConfigurationAction, { handle(.configure) })
+        .onExitCommand {
+            handle(.back)
+        }
+        .onAppear {
+            selectFirstIfNeeded()
+            libraryFocused = true
+        }
+        .onChange(of: model.games) { _, _ in selectFirstIfNeeded() }
+        .onChange(of: navigation.page) { _, page in
+            if page == .games { libraryFocused = true }
+        }
+        .task(id: selectedGameID) {
+            store = selectedGame.map { GameSettingsStore(game: $0) }
+        }
+        .task(id: navigation.page) {
+            tail?.stop()
+            tail = nil
+            if navigation.page == .log, let game = selectedGame {
+                let log = LogTail(url: game.log)
+                log.start()
+                tail = log
+            }
+        }
+        .onDisappear { tail?.stop() }
+        .onChange(of: model.gamepad.sequence) { _, _ in
+            handle(model.gamepad.lastAction)
+        }
+    }
+
+    private var selectedGame: MacGameBundle? {
+        model.games.first { $0.id == selectedGameID }
+    }
+
+    @ViewBuilder private var activePanel: some View {
+        switch navigation.page {
+        case .environment:
+            ConsolePanelSurface { EnvironmentView(compact: false) }
+        case .tools:
+            ConsolePanelSurface { WorkshopView(preferredGame: selectedGame) }
+        default:
+            if let game = selectedGame {
+                ConsolePanelContent(panel: navigation.page, game: game,
+                                    store: store?.game.id == game.id ? store : nil, tail: tail,
+                                    openWorkshop: { navigation.page = .tools })
+                    .id(game.id)
+            } else {
+                ConsoleEmptyLibrary()
             }
         }
     }
 
-    @ViewBuilder private func tileMenu(_ game: MacGameBundle) -> some View {
-        Button("Jugar") { model.play(game) }
-        Button("Mostrar en Finder") { Finder.reveal(game.url) }
-        Button("Abrir el log") { Finder.open(game.log) }
+    private func libraryKey(_ action: ConsoleAction) -> KeyPress.Result {
+        guard navigation.page == .games, !model.gamepad.dialogPresented else { return .ignored }
+        handle(action)
+        return .handled
     }
-}
 
-struct GameTile: View {
-    @Environment(AppModel.self) private var model
-    let game: MacGameBundle
+    private func selectFirstIfNeeded() {
+        if selectedGame == nil { selectedGameID = model.games.first?.id }
+        if selectedGame == nil, navigation.page != .games { navigation.page = .environment }
+    }
 
-    var body: some View {
-        VStack(spacing: 8) {
-            Image(nsImage: NSWorkspace.shared.icon(forFile: game.url.path))
-                .resizable()
-                .interpolation(.high)
-                .frame(width: 112, height: 112)
-                .overlay(alignment: .topTrailing) {
-                    if model.runner.isRunning(game) {
-                        Image(systemName: "play.circle.fill")
-                            .font(.title2).foregroundStyle(.white, .green)
-                    }
-                }
-            Text(game.name).font(.callout.weight(.medium)).lineLimit(2).multilineTextAlignment(.center)
-            Text(game.version.isEmpty ? game.titleID : "v\(game.version)")
-                .font(.caption).foregroundStyle(.secondary)
+    private func handle(_ action: ConsoleAction) {
+        if navigation.page == .tools, model.workshopInput?(action) == true { return }
+        guard !model.gamepad.dialogPresented else { return }
+        switch navigation.handle(action, hasGame: selectedGame != nil) {
+        case .none: break
+        case .moveGame(let delta):
+            guard !model.games.isEmpty else { return }
+            let current = model.games.firstIndex { $0.id == selectedGameID } ?? 0
+            selectedGameID = model.games[min(max(0, current + delta), model.games.count - 1)].id
+        case .play:
+            if let game = selectedGame { model.play(game) }
+        case .closeGame:
+            _ = model.runner.stopCurrent()
         }
-        .frame(maxWidth: .infinity)
-        .padding(10)
-        .contentShape(Rectangle())
     }
 }

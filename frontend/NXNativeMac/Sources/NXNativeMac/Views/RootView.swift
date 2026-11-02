@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 enum SidebarItem: String, CaseIterable, Identifiable {
@@ -29,55 +30,107 @@ enum SidebarItem: String, CaseIterable, Identifiable {
 
 struct RootView: View {
     @Environment(AppModel.self) private var model
-    @State private var selection: SidebarItem? = .library
 
     var body: some View {
-        NavigationSplitView {
-            List(SidebarItem.allCases, selection: $selection) { item in
-                Label(item.title, systemImage: item.symbol)
-                    .badge(badge(for: item))
-                    .tag(item)
+        Group {
+            if model.hasLoadedLibrary {
+                LibraryView()
+            } else {
+                LaunchSplashView(scanning: model.scanning)
             }
-            .navigationSplitViewColumnWidth(min: 190, ideal: 210)
-            .safeAreaInset(edge: .top, alignment: .leading) { ProfileSwitcher() }
-            .safeAreaInset(edge: .bottom) { statusFooter }
-        } detail: {
-            switch selection ?? .library {
-            case .installer: FC27InstallerView(onBuild: { selection = .builds })
-            case .library: LibraryView()
-            case .folders: DiskGamesView(onBuild: { selection = .builds })
-            case .builds: BuildsView()
-            case .compatibility: CompatibilityView()
-            case .environment: EnvironmentView(compact: false)
+        }
+        .animation(.easeInOut(duration: 0.28), value: model.hasLoadedLibrary)
+    }
+
+}
+
+/// Builder and maintenance workflows remain inside the console window.
+struct ConsoleToolsView: View {
+    @State private var selection: SidebarItem = .folders
+    var body: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Picker("Herramienta", selection: $selection) {
+                    ForEach([SidebarItem.folders, .installer, .builds, .compatibility]) { item in
+                        Text(item.title).tag(item)
+                    }
+                }
+                .frame(maxWidth: 350)
+                Spacer()
+                ProfileSwitcher()
+                AllSavesMenu()
+            }
+            .padding(.horizontal, 18).padding(.top, 14)
+            NavigationStack {
+                switch selection {
+                case .installer: FC27InstallerView(onBuild: { selection = .builds })
+                case .folders: DiskGamesView(onBuild: { selection = .builds })
+                case .builds: BuildsView()
+                case .compatibility: CompatibilityView()
+                default: EmptyView()
+                }
             }
         }
     }
+}
 
-    private func badge(for item: SidebarItem) -> Int {
-        switch item {
-        case .installer: 0
-        case .library: model.games.count
-        case .folders: model.library.count
-        case .builds: model.builds.pendingCount
-        case .environment: model.toolchain.checks.filter { $0.status == .failure }.count
-        case .compatibility: 0
-        }
-    }
+/// Pantalla de entrada de la biblioteca. Se mantiene visible durante el
+/// primer escaneo para que el arranque no parezca una ventana vacía o un
+/// salto brusco directo a las carátulas.
+struct LaunchSplashView: View {
+    let scanning: Bool
 
-    @ViewBuilder private var statusFooter: some View {
-        if model.scanning || model.toolchain.running {
-            HStack(spacing: 6) {
-                ProgressView().controlSize(.small)
-                Text("Escaneando…").font(.caption).foregroundStyle(.secondary)
+    var body: some View {
+        GeometryReader { proxy in
+            let logoSize = min(180, max(112, min(proxy.size.width, proxy.size.height) * 0.22))
+
+            ZStack {
+                RadialGradient(
+                    colors: [Color(red: 0.20, green: 0.10, blue: 0.42),
+                             Color(red: 0.025, green: 0.018, blue: 0.07)],
+                    center: .center,
+                    startRadius: 10,
+                    endRadius: max(proxy.size.width, proxy.size.height) * 0.72
+                )
+                LinearGradient(
+                    colors: [.black.opacity(0.08), .black.opacity(0.62)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+
+                VStack(spacing: 22) {
+                    Image(nsImage: NSApp.applicationIconImage)
+                        .resizable()
+                        .interpolation(.high)
+                        .scaledToFit()
+                        .frame(width: logoSize, height: logoSize)
+                        .shadow(color: .black.opacity(0.45), radius: 28, y: 14)
+
+                    VStack(spacing: 8) {
+                        Text("NXNATIVE")
+                            .font(.system(size: 30, weight: .black, design: .rounded))
+                            .tracking(4)
+                            .foregroundStyle(.white)
+                        Text("Tu biblioteca de juegos")
+                            .font(.title3.weight(.medium))
+                            .foregroundStyle(.white.opacity(0.78))
+                    }
+
+                    VStack(spacing: 10) {
+                        ProgressView()
+                            .controlSize(.regular)
+                            .tint(.white)
+                        Text(scanning ? "Preparando juegos y perfiles…" : "Preparando la biblioteca…")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.62))
+                    }
+                    .padding(.top, 4)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .padding(10)
-        } else if let job = model.builds.active {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(job.title).font(.caption).lineLimit(1)
-                ProgressView(value: job.overallFraction ?? 0).controlSize(.small)
-            }
-            .padding(10)
+            .frame(width: proxy.size.width, height: proxy.size.height)
         }
+        .ignoresSafeArea()
     }
 }
 

@@ -16,3 +16,10 @@ CUTS = {
         (0x4D876C, '09a10fb9', '1f2003d5', "60 fps: block the game's frame-rate update"),
     ],
 }
+
+# How general each patch is and could be (dm/tools/docs_patches.py "Binding", listed in docs/agents/game-patches.md): what, its binding now, the loosest it could have (goal),
+# purpose, why; checked: what was checked on game files (else a judgement)
+BINDING = [
+    {'what': '60 fps frame-rate update cuts', 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
+     'why': "the cuts block this build's own writes that restore the Switch's 30 fps configuration; the host supplies the selected 60 fps values"},
+]

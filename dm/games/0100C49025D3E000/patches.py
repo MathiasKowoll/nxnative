@@ -43,3 +43,10 @@ CODE = {
 OBS = {}
 FRAME_STEP = {}
 MATCH_CUTS = {}
+
+# How general each patch is and could be (dm/tools/docs_patches.py "Binding", listed in docs/agents/game-patches.md): what, its binding now, the loosest it could have (goal),
+# purpose, why; checked: what was checked on game files (else a judgement)
+BINDING = [
+    {'what': 'offline async result and callback-job NULL guards', 'now': 'build', 'goal': 'game', 'purpose': 'runtime',
+     'why': 'the optional result and callback job are dereferenced by the game at the observed menu-loading crash sites; the byte cuts are specific to update 1.8c.cab1'},
+]
