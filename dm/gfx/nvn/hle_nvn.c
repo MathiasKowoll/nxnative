@@ -116,6 +116,7 @@ HLE_FORCE("nvnBootstrapLoader", "the NVN graphics API is replaced wholesale with
 #define B(x) ((x) & 0xff)
 
 #include "nvn_obj.h"
+#include "nvn_shader_control.h"
 #include "nvn_capture.h"   // DM_NVN_CAPTURE hooks
 
 // ---------- Device ----------
@@ -657,16 +658,11 @@ static void pk_drop(const void *p) {
 #define NVN2_KEY_CTL 0x48
 static int nvn2_ctl(const uint8_t *c) { uint32_t magic, ver; memcpy(&magic, c, 4); memcpy(&ver, c + 4, 4); return magic == 0x98761234u && ver == 0xc9; }
 void nvn_ctl_lens(const void *control, uint32_t *nctl, uint32_t *ncode) {
-    const uint8_t *c = control; uint32_t own;
-    if (nvn2_ctl(c)) { memcpy(ncode, c + 0x44, 4); *nctl = NVN2_KEY_CTL; return; }
-    memcpy(ncode, c + 0x704, 4);
-    memcpy(&own, c + 0x20, 4);
-    *nctl = own >= 0x760 && own < 0x880 ? own : 0x880;
+    if (!nvn_shader_control_layout(control, nctl, ncode)) *nctl = *ncode = 0;
 }
 static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
     uint32_t ncode = 0, nctl; void *mb; uint64_t mo;
-    if (!sd->control) return 0;
-    nvn_ctl_lens(sd->control, &nctl, &ncode);
+    if (!nvn_shader_control_layout(sd->control, &nctl, &ncode)) return 0;
     int code = sd->data && ncode && ncode < (1u << 24);
     if (mapped && !(code && mtl_addr(sd->data, ncode, &mb, &mo))) return 0;
     uint8_t md[CC_SHA256_DIGEST_LENGTH]; CC_SHA256_CTX hc; CC_SHA256_Init(&hc);
@@ -686,7 +682,10 @@ static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
 int prog_key(const prog_t *p, unsigned st, uint8_t key[8]) {
     if (st >= p->nstage) return 0;
     prog_keys_t *k = pk_get(p, 1);
-    if (!(k->ok >> st & 1)) { keys_hash(&p->sd[st], 0, k->key[st]); k->ok |= (uint8_t)(1u << st); }
+    if (!(k->ok >> st & 1)) {
+        if (!keys_hash(&p->sd[st], 0, k->key[st])) return 0;
+        k->ok |= (uint8_t)(1u << st);
+    }
     memcpy(key, k->key[st], 8);
     return 1;
 }
@@ -711,7 +710,11 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
             }
         }
         // DM_NVN_SHDUMP (debugging): keep a copy of the control section so the replay layer can save shaders missing from the map (never freed)
-        if (dump && sd[i].control) { void *c = malloc(0x880); memcpy(c, sd[i].control, 0x880); o->sd[i].control = c; }
+        uint32_t nctl, ncode;
+        if (dump && nvn_shader_control_layout(sd[i].control, &nctl, &ncode)) {
+            void *c = malloc(nctl); if (!c) die("shader control copy allocation failed");
+            memcpy(c, sd[i].control, nctl); o->sd[i].control = c;
+        }
     }
     OLOG("ProgramSetShaders %p n=%d data0=%#llx", (void *)p, n, n ? (unsigned long long)sd[0].data : 0ull);
     mtl_prog_prefetch(o);   // its libraries load in the background now, not at its first draw

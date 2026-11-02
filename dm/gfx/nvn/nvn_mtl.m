@@ -19,6 +19,7 @@
 #endif
 #include "nvn_mtl.h"
 #include "nvn_obj.h"
+#include "nvn_shader_control.h"
 #include "../tex/nvn_fmt_mtl.h"
 #include "../tex/nvn_deswizzle.h"
 #include "../tex/nvn_deswizzle_gpu.h"
@@ -4222,7 +4223,8 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
     NvProg *o = [NvProg new];
     for (unsigned i = 0; i < p->nstage; i++) {
         // Key = sha256(first 0x880 bytes of the control section + code area): many of Mario's shaders share a control section but differ in code (dm/gfx/tools/shader_split.py). It was computed at SetShaders (hle_nvn.c): by now the game may have freed the control section
-        uint8_t md[8]; prog_key(p, i, md);
+        uint8_t md[8];
+        if (!prog_key(p, i, md)) { MLOG("[RED] program stage %u has no valid shader key", i); continue; }
         NSString *k = [NSString stringWithFormat:@"%02x%02x%02x%02x%02x%02x%02x%02x", md[0], md[1], md[2], md[3], md[4], md[5], md[6], md[7]];
         NSString *stage = g_shmap[k];
         if (!stage) {   // Not in the package: look up the compute kernels embedded in the main body (nvn_builtin.h)
@@ -7917,7 +7919,7 @@ static void shader_prefetch_rest(void) {
         const p_bind_program *bp_ = aq; const prog_t *pg = bp_->prog;
         if (!pg || (pg->serial && serial_get(pg->serial))) continue;   // resolved already
         for (unsigned i = 0; i < pg->nstage; i++) {
-            uint8_t md[8]; prog_key(pg, i, md);
+            uint8_t md[8]; if (!prog_key(pg, i, md)) continue;
             NSString *k = [NSString stringWithFormat:@"%02x%02x%02x%02x%02x%02x%02x%02x", md[0], md[1], md[2], md[3], md[4], md[5], md[6], md[7]];
             NSString *stage = g_shmap[k]; int st = stage ? stage_of(stage) : -1;
             if (st < 0) continue;
@@ -10201,7 +10203,7 @@ void mtl_prog_prefetch(const prog_t *cp) {
     if (!g_dev || !prefetch_on()) return;
     shmap_read_once();   // the map only: the prewarm starts on the submit thread (shmap_load)
     for (unsigned i = 0; i < p->nstage; i++) {
-        uint8_t md[8]; prog_key(p, i, md);
+        uint8_t md[8]; if (!prog_key(p, i, md)) continue;
         NSString *k = [NSString stringWithFormat:@"%02x%02x%02x%02x%02x%02x%02x%02x", md[0], md[1], md[2], md[3], md[4], md[5], md[6], md[7]];
         NSString *stage = g_shmap[k]; int st = stage ? stage_of(stage) : -1;
         if (st < 0) continue;   // not in the package: a built-in kernel (prog_get)
