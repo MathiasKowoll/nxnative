@@ -1,0 +1,350 @@
+import GameController
+import NXCore
+import NXRuntime
+import SwiftUI
+
+/// Preferences applied uniformly whenever the app launches a game.
+struct GlobalPreferencesView: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        @Bindable var prefs = model.prefs
+        Form {
+            Section {
+                Toggle("Pantalla completa al arrancar", isOn: $prefs.globalFullscreen)
+                Picker("Escalado para todos", selection: $prefs.globalUpscale) {
+                    Text("El de cada juego").tag("")
+                    ForEach(GlobalDefaults.upscales, id: \.value) { Text($0.label).tag($0.value) }
+                }
+                Picker("Filtro de escalado", selection: $prefs.globalFilter) {
+                    Text("El de cada juego").tag("")
+                    ForEach(GlobalDefaults.filters, id: \.value) { Text($0.label).tag($0.value) }
+                }
+                Toggle("Nitidez para todos", isOn: Binding(get: { model.prefs.globalSharpen >= 0 },
+                                                           set: { model.prefs.globalSharpen = $0 ? 0.5 : -1 }))
+                if model.prefs.globalSharpen >= 0 {
+                    LabeledContent("Cantidad") {
+                        HStack {
+                            Slider(value: Binding(get: { max(0, model.prefs.globalSharpen) },
+                                                  set: { model.prefs.globalSharpen = (($0 * 20).rounded() / 20) }), in: 0...1)
+                            Text("\(Int((max(0, model.prefs.globalSharpen) * 100).rounded())) %").monospacedDigit().frame(width: 48, alignment: .trailing)
+                        }
+                    }
+                }
+            } header: {
+                Text("Todos los juegos")
+            } footer: {
+                Text("Se aplican al jugar desde esta app. Un juego con su propia elección en Ajustes se queda con la suya. MetalFX solo se usa cuando el dispositivo y el tamaño lo soportan; en otro caso el host vuelve a escalado estándar. El filtro y la nitidez necesitan el juego construido con esta versión de nxnative; la pantalla completa vale ya.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section {
+                Toggle("Permitir cierre global desde el mando", isOn: $prefs.globalExitEnabled)
+                Toggle("Select + Start", isOn: $prefs.globalExitSelectStart)
+                    .disabled(!prefs.globalExitEnabled)
+                Toggle("Click del panel táctil DualSense", isOn: $prefs.globalExitTouchpad)
+                    .disabled(!prefs.globalExitEnabled)
+                LabeledContent("Mantener pulsado") {
+                    Stepper(value: $prefs.globalExitHoldSeconds, in: 1...10, step: 1) {
+                        Text("\(Int(prefs.globalExitHoldSeconds.rounded())) s")
+                            .monospacedDigit()
+                            .frame(minWidth: 42, alignment: .trailing)
+                    }
+                    .disabled(!prefs.globalExitEnabled)
+                }
+            } header: {
+                Text("Salida global con mando")
+            } footer: {
+                Text("Se aplica a todos los juegos y no se guarda por juego. Mantén la combinación elegida durante el tiempo indicado para evitar cierres accidentales; el valor inicial es 5 segundos.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+/// Diagnostic, build, and installation controls kept apart from daily preferences.
+struct DeveloperView: View {
+    @Environment(AppModel.self) private var model
+    @State private var identities: [String] = []
+    @State private var controllers: [String] = []
+    @State private var pendingAppsOrigin: URL?
+    @State private var pendingAppsDestination: URL?
+    @State private var pendingApps: [URL] = []
+    @State private var showingMoveAppsPrompt = false
+
+    var body: some View {
+        @Bindable var prefs = model.prefs
+        Form {
+            Section {
+                ForEach(model.toolchain.checks) { c in
+                    HStack(alignment: .firstTextBaseline) {
+                        icon(c.status).frame(width: 18)
+                        Text(c.title).frame(width: 150, alignment: .leading)
+                        Text(c.detail).foregroundStyle(.secondary).textSelection(.enabled)
+                    }
+                }
+                if model.toolchain.metalToolchainMissing {
+                    HStack {
+                        Spacer()
+                        if model.downloadingMetal { ProgressView().controlSize(.small) }
+                        Button("Descargar Metal Toolchain") { Task { await model.downloadMetalToolchain() } }
+                            .disabled(model.downloadingMetal)
+                    }
+                }
+            } header: {
+                HStack {
+                    Text("Comprobaciones")
+                    Spacer()
+                    Button("Repetir") { Task { await model.toolchain.refresh(model.prefs) } }
+                        .disabled(model.toolchain.running)
+                }
+            }
+
+            Section("nxnative") {
+                Label("Toolchain incluida en esta app", systemImage: "shippingbox.fill")
+                Text("Incluye los scripts, perfiles y técnicas de extracción, reescritura, shaders y empaquetado de FC27, además del builder de FC26. El juego, las claves y los resultados se mantienen fuera del bundle.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let n = model.notice { Text(n).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
+            }
+
+            Section {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Entorno de Python de la app")
+                        Spacer()
+                        if model.settingUpPython { ProgressView().controlSize(.small) }
+                        Button("Preparar Python") { Task { await model.setUpPython(includeOptional: false) } }
+                            .disabled(model.settingUpPython)
+                        if model.toolchain.nszMissing {
+                            Button("Añadir nsz") { Task { await model.setUpPython(includeOptional: true) } }
+                                .disabled(model.settingUpPython)
+                        }
+                    }
+                    Text("El Python de Homebrew no deja instalar paquetes con pip. La app crea uno propio en \(PythonEnv.directory.path) con lz4, capstone y fonttools, y lo usa para los builds.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    ForEach(Array(model.pythonLog.enumerated()), id: \.offset) { _, line in
+                        Text(line).font(.caption.monospaced())
+                            .foregroundStyle(BuildEventParser.isError(line) ? .red : .secondary)
+                            .textSelection(.enabled)
+                    }
+                }
+            } header: {
+                Text("Python")
+            }
+
+            Section {
+                PathRow(label: "prod.keys", path: $prefs.keysPath, directory: false)
+                PathRow(label: "python3", path: $prefs.pythonPath, directory: false, placeholder: "automático: el entorno de la app, si no uno >= 3.12")
+            } header: {
+                Text("Claves y herramientas")
+            } footer: {
+                Text("Las claves salen de TU consola. La app guarda la ruta y solo lee header_key, para descifrar la cabecera del NCA de metadatos e identificar archivos sin etiqueta; nunca muestra los valores. Al script se lo pasa con -k.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section {
+                FolderList(paths: $prefs.gameRoots)
+            } header: {
+                Text("Carpetas de juegos")
+            } footer: {
+                Text("Cada una contiene carpetas NSP, una por juego. El script escribe ahí <title ID>_build/ (puede ocupar decenas de GB): mejor un disco externo que la carpeta de inicio.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("Dónde buscar apps de juego") {
+                FolderList(paths: $prefs.appRoots)
+                Text("La carpeta que contiene NXNative.app también se revisa automáticamente; las apps de juego pueden quedar junto a este selector.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("Apps generadas") {
+                LabeledContent("Destino por defecto") {
+                    HStack {
+                        Text(prefs.gameAppsPath.isEmpty ? "~/Applications" : prefs.gameAppsPath)
+                            .lineLimit(1).truncationMode(.middle)
+                            .foregroundStyle(.secondary)
+                        Button("Elegir…") { chooseGeneratedAppsDestination() }
+                    }
+                }
+                Text("El instalador FC26/FC27 dejará aquí la app final si no eliges otro destino. Esta carpeta también se añade automáticamente a la biblioteca.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section {
+                PathRow(label: "Copias de partidas", path: $prefs.backupsPath, directory: true,
+                        placeholder: SaveVault.defaultRoot.path)
+                Toggle("Copia automática al jugar y al reconstruir", isOn: $prefs.autoBackup)
+            } header: {
+                Text("Partidas")
+            } footer: {
+                Text("Una carpeta en iCloud Drive o en otro disco hace que las copias sobrevivan a un desinstalador que limpie Application Support o a un cambio de Mac. Las copias que ya existan no se mueven solas.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("Firma de las apps de Mac") {
+                Picker("Identidad por defecto", selection: $prefs.macSignIdentity) {
+                    Text("Ad hoc").tag("")
+                    ForEach(identities, id: \.self) { Text($0).tag($0) }
+                }
+            }
+
+            Section("Mandos que ve macOS") {
+                if controllers.isEmpty {
+                    Text("Ninguno conectado.").foregroundStyle(.secondary)
+                }
+                ForEach(controllers, id: \.self) { Label($0, systemImage: "gamecontroller") }
+            }
+        }
+        .formStyle(.grouped)
+        .navigationTitle("Desarrollo")
+        .task {
+            identities = await Toolchain.signingIdentities()
+            refreshControllers()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .GCControllerDidConnect)) { _ in refreshControllers() }
+        .onReceive(NotificationCenter.default.publisher(for: .GCControllerDidDisconnect)) { _ in refreshControllers() }
+        .onChange(of: model.prefs.gameRoots) { Task { await model.refresh() } }
+        .onChange(of: model.prefs.appRoots) { Task { await model.refresh() } }
+        .onChange(of: model.prefs.keysPath) { Task { await model.toolchain.refresh(model.prefs) } }
+        .onChange(of: model.prefs.pythonPath) { Task { await model.toolchain.refresh(model.prefs) } }
+        .confirmationDialog("¿Mover las apps generadas?", isPresented: $showingMoveAppsPrompt,
+                            titleVisibility: .visible) {
+            Button("Mover \(pendingApps.count) \(pendingApps.count == 1 ? "app" : "apps")") {
+                applyPendingDestination(moveApps: true)
+            }
+            Button("Cambiar destino sin mover") {
+                applyPendingDestination(moveApps: false)
+            }
+            Button("Cancelar", role: .cancel) { clearPendingDestination() }
+        } message: {
+            Text("La carpeta actual contiene \(pendingApps.count) app(s) de juego generada(s). ¿Quieres moverlas a la nueva ubicación?")
+        }
+    }
+
+    private func chooseGeneratedAppsDestination() {
+        guard let destination = Finder.chooseFolder(prompt: "Elegir destino de las apps generadas") else { return }
+        let origin = model.prefs.gameAppsURL.standardizedFileURL
+        let selected = destination.standardizedFileURL
+        guard origin != selected else { return }
+        let apps = MacGameBundle.scan(roots: [origin], depth: 0).map(\.url)
+        guard !apps.isEmpty else {
+            model.prefs.gameAppsPath = destination.path
+            Task { await model.refresh() }
+            return
+        }
+        pendingAppsOrigin = origin
+        pendingAppsDestination = destination
+        pendingApps = apps
+        showingMoveAppsPrompt = true
+    }
+
+    private func applyPendingDestination(moveApps: Bool) {
+        guard let destination = pendingAppsDestination else { return }
+        var moved = 0
+        var skipped = 0
+        var failure: String?
+        if moveApps {
+            do {
+                try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+                for app in pendingApps {
+                    let target = destination.appendingPathComponent(app.lastPathComponent, isDirectory: true)
+                    if FileManager.default.fileExists(atPath: target.path) {
+                        skipped += 1
+                        continue
+                    }
+                    do {
+                        try FileManager.default.moveItem(at: app, to: target)
+                        moved += 1
+                    } catch {
+                        failure = "No se pudo mover \(app.lastPathComponent): \(error.localizedDescription)"
+                        break
+                    }
+                }
+            } catch {
+                failure = "No se pudo preparar el destino: \(error.localizedDescription)"
+            }
+        }
+        model.prefs.gameAppsPath = destination.path
+        if let origin = pendingAppsOrigin,
+           !moveApps || moved < pendingApps.count,
+           !model.prefs.appRoots.contains(origin.path) {
+            // Si una app se queda atrás, mantener la carpeta visible en la
+            // biblioteca aunque deje de ser el destino por defecto.
+            model.prefs.appRoots.append(origin.path)
+        }
+        if let failure {
+            model.notice = failure
+        } else if moveApps {
+            let suffix = skipped == 0 ? "" : " \(skipped) quedaron en la ubicación anterior porque ya existían en el destino."
+            model.notice = "Se movieron \(moved) app(s) generada(s).\(suffix)"
+        } else {
+            model.notice = "Destino cambiado. Las apps existentes se mantienen en su ubicación anterior."
+        }
+        clearPendingDestination()
+        Task { await model.refresh() }
+    }
+
+    private func clearPendingDestination() {
+        pendingAppsOrigin = nil
+        pendingAppsDestination = nil
+        pendingApps = []
+        showingMoveAppsPrompt = false
+    }
+
+    private func refreshControllers() {
+        controllers = GCController.controllers().map { c in
+            let kind = c.extendedGamepad != nil ? "completo" : "básico"
+            let haptics = c.haptics != nil ? ", vibración" : ""
+            return "\(c.vendorName ?? "Mando") (\(c.productCategory), \(kind)\(haptics))"
+        }
+    }
+
+    @ViewBuilder private func icon(_ s: Check.Status) -> some View {
+        switch s {
+        case .ok: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+        case .warning: Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+        case .failure: Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
+        case .info: Image(systemName: "info.circle").foregroundStyle(.secondary)
+        }
+    }
+}
+
+struct PathRow: View {
+    let label: String
+    @Binding var path: String
+    let directory: Bool
+    var placeholder = ""
+
+    var body: some View {
+        LabeledContent(label) {
+            HStack {
+                TextField("", text: $path, prompt: Text(placeholder))
+                    .textFieldStyle(.roundedBorder)
+                Button("Elegir…") {
+                    if let url = directory ? Finder.chooseFolder() : Finder.chooseFile() { path = url.path }
+                }
+            }
+        }
+    }
+}
+
+struct FolderList: View {
+    @Binding var paths: [String]
+
+    var body: some View {
+        ForEach(paths, id: \.self) { p in
+            HStack {
+                Image(systemName: FileManager.default.fileExists(atPath: (p as NSString).expandingTildeInPath)
+                      ? "folder" : "folder.badge.questionmark")
+                Text(p).lineLimit(1).truncationMode(.middle)
+                Spacer()
+                Button { paths.removeAll { $0 == p } } label: { Image(systemName: "minus.circle") }
+                    .buttonStyle(.borderless)
+            }
+        }
+        Button("Añadir carpeta…") {
+            if let url = Finder.chooseFolder(prompt: "Añadir"), !paths.contains(url.path) { paths.append(url.path) }
+        }
+    }
+}
