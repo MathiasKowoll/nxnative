@@ -203,7 +203,7 @@ and visible keyboard/mouse interaction require testing the installed app.
 Configuration → **Taller** opens the build workspace inside the console window.
 The game settings also have **Reconstruir en el Taller**, preserving the selected
 game. **Preparar** chooses source, Mac app or unsigned IPA, output directory and
-one or two workers. **Actividad** contains progress, messages, cancellation and
+one, two, four or six workers. **Actividad** contains progress, messages, cancellation and
 explicit retry. **Herramientas** adds source folders and keys, rescans, and opens
 the existing advanced installer/profile/save workflows.
 
@@ -215,8 +215,11 @@ and the legacy advanced forms retain their native keyboard/mouse interaction.
 Build, retry and cancellation confirmations start on Back and are operable with
 controller or keyboard. Opening the Workshop never starts a build.
 
-Builds remain sequential. The default is one worker, with an optional two-worker
-mode, explicit compiler environment limits and background scheduling priority.
+Builds remain sequential. The default is one worker, with optional two-, four-
+and six-worker modes, explicit compiler environment limits and background
+scheduling priority. Four and six workers can shorten shader and compiler stages
+on machines with enough CPU and memory, but use more RAM and do not accelerate
+serial stages.
 These are concurrency limits, not a hard cap on a compiler's memory allocation.
 macOS memory-pressure warnings hold the next job; critical pressure requests
 cancellation of the active job. Source and key paths are checked again when a

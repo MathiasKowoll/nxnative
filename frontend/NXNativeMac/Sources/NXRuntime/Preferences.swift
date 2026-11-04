@@ -36,7 +36,11 @@ public final class Preferences {
     public var globalExitSelectStart: Bool { didSet { defaults.set(globalExitSelectStart, forKey: "globalExitSelectStart") } }
     public var globalExitTouchpad: Bool { didSet { defaults.set(globalExitTouchpad, forKey: "globalExitTouchpad") } }
     public var globalExitHoldSeconds: Double { didSet { defaults.set(globalExitHoldSeconds, forKey: "globalExitHoldSeconds") } }
-    public var buildWorkers: Int { didSet { defaults.set(min(2, max(1, buildWorkers)), forKey: "buildWorkers") } }
+    public var buildWorkers: Int { didSet {
+        let normalized = WorkshopBuild.normalizedWorkers(buildWorkers)
+        if buildWorkers != normalized { buildWorkers = normalized }
+        defaults.set(buildWorkers, forKey: "buildWorkers")
+    } }
     /// Title IDs asignados a mano a archivos sin etiqueta, por ruta.
     public var assignedTitleIDs: [String: String] { didSet { defaults.set(assignedTitleIDs, forKey: "assignedTitleIDs") } }
 
@@ -60,7 +64,7 @@ public final class Preferences {
         globalExitTouchpad = defaults.object(forKey: "globalExitTouchpad") as? Bool ?? true
         let hold = defaults.object(forKey: "globalExitHoldSeconds") as? Double ?? 5
         globalExitHoldSeconds = min(10, max(1, hold))
-        buildWorkers = min(2, max(1, defaults.object(forKey: "buildWorkers") as? Int ?? 1))
+        buildWorkers = WorkshopBuild.normalizedWorkers(defaults.object(forKey: "buildWorkers") as? Int ?? 1)
         assignedTitleIDs = defaults.dictionary(forKey: "assignedTitleIDs") as? [String: String] ?? [:]
     }
 

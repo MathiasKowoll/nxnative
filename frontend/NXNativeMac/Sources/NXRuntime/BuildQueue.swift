@@ -54,7 +54,7 @@ public final class BuildJob: Identifiable {
         self.init(title: record.title, folder: record.folder, arguments: record.arguments,
                   resultDirectory: record.resultDirectory, logsDirectory: record.logsDirectory,
                   executable: record.executable, workingDirectory: record.workingDirectory, id: record.id)
-        workers = record.workers; titleID = record.titleID
+        workers = WorkshopBuild.normalizedWorkers(record.workers); titleID = record.titleID
         previousProcessID = record.processID
         started = record.started; finished = record.finished
         switch record.status {
@@ -87,7 +87,7 @@ public final class BuildJob: Identifiable {
     public func retryCopy() -> BuildJob {
         let copy = BuildJob(title: title, folder: folder, arguments: arguments, resultDirectory: resultDirectory,
                             logsDirectory: logsDirectory, executable: executable, workingDirectory: workingDirectory)
-        copy.workers = workers; copy.titleID = titleID
+        copy.workers = WorkshopBuild.normalizedWorkers(workers); copy.titleID = titleID
         return copy
     }
 
@@ -118,6 +118,7 @@ public final class BuildJob: Identifiable {
 
     func start(python: String, repository: URL) {
         guard status == .running, !cancellationRequested else { return }
+        workers = WorkshopBuild.normalizedWorkers(workers)
         let p = Process()
         let program = executable ?? URL(fileURLWithPath: python)
         p.executableURL = URL(fileURLWithPath: "/usr/bin/nice")

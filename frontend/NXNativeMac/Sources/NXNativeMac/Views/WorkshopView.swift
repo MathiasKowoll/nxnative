@@ -142,7 +142,7 @@ struct WorkshopView: View {
                     .font(.callout).foregroundStyle(.orange)
             }
             row("platform", "Salida", value: platform == .macApp ? "App de Mac" : "IPA sin firmar", symbol: "shippingbox", adjustable: true)
-            row("workers", "Recursos", value: model.prefs.buildWorkers == 1 ? "Tranquilo · 1 trabajador" : "Equilibrado · 2 trabajadores", symbol: "cpu", adjustable: true)
+            row("workers", "Recursos", value: workerLabel, symbol: "cpu", adjustable: true)
             row("destination", "Destino", value: output?.path ?? "Depende del juego", symbol: "folder")
             if let source {
                 if let dump = source.extracted {
@@ -248,11 +248,20 @@ struct WorkshopView: View {
             let index = candidates.firstIndex { $0.id == gameID } ?? 0
             gameID = candidates[(index + delta + candidates.count) % candidates.count].id
         case "platform": platform = platform == .macApp ? .ios : .macApp
-        case "workers": model.prefs.buildWorkers = model.prefs.buildWorkers == 1 ? 2 : 1
+        case "workers": model.prefs.buildWorkers = WorkshopBuild.adjustedWorkers(model.prefs.buildWorkers, delta: delta)
         case "log":
             let total = max(1, ((detail?.messages.count ?? 0) + 11) / 12)
             logPage = min(total - 1, max(0, logPage - delta))
         default: break
+        }
+    }
+
+    private var workerLabel: String {
+        switch WorkshopBuild.normalizedWorkers(model.prefs.buildWorkers) {
+        case 1: return "Tranquilo · 1 trabajador"
+        case 2: return "Equilibrado · 2 trabajadores"
+        case 4: return "Rápido · 4 trabajadores"
+        default: return "Máximo · 6 trabajadores"
         }
     }
 

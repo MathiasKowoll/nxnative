@@ -279,7 +279,7 @@ final class AppModel {
     func enqueue(_ job: BuildJob) -> String? {
         guard let python = toolchain.python else { return "No hay python3 >= 3.12: revisa Entorno." }
         guard repository.isValid else { return "La toolchain de nxnative no está disponible dentro de esta app." }
-        job.workers = prefs.buildWorkers
+        job.workers = WorkshopBuild.normalizedWorkers(prefs.buildWorkers)
         guard !builds.jobs.contains(where: { $0.isActive && $0.folder == job.folder }) else {
             return "Este juego ya tiene un trabajo activo o en cola."
         }
