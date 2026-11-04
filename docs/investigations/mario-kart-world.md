@@ -70,8 +70,9 @@ current visual evidence.
    that relationship while retaining independent replay state and serialized
    Metal execution. Cross-device and self-primary queues are rejected.
 7. NVN2 uses ProgramBuilder and compact 201.7/201.11 shader control sections. Their
-   control length is at `+0x30`, padded code span at `+0x40`; the observed controls
-   are usually 216 bytes. A bounded census of four shader archives checked 20
+   control length is at `+0x30`; `+0x38` is the exact instruction length, `+0x40`
+   rounds it to 0x100 and `+0x44` ends the code area after optional c1 data. The
+   observed controls are usually 216 bytes. A bounded census of four shader archives checked 20
    version-201.7 and 2,230 version-201.11 descriptors against these spans, without
    mismatches. Legacy `+0x704` reads would overrun compact controls. Program initialization,
    keys and diagnostic dumps now respect the compact layout. Unsupported forced

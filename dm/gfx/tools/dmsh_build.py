@@ -581,7 +581,7 @@ def apply_host_shared_limit(j):
         return
     requested, host = int(j.get('shared', 0)), int(j['shared_host'])
     if j.get('stage') != 'cs' or requested <= 0 or host <= 0 or host > requested or host % 16:
-        sys.exit(f'[RED] {j.get("key", "?")}: shared_host must be a positive 16-byte-aligned compute limit no larger than shared ({requested})')
+        sys.exit(f'[RED] {j.get("key", abi.KIND_UNKNOWN)}: shared_host must be a positive 16-byte-aligned compute limit no larger than shared ({requested})')
     j['shared_requested'] = requested
     j['shared'] = host
 

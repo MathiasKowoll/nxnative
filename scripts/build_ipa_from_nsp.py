@@ -1475,7 +1475,7 @@ def build_mac_host(repo, out, env, logs, g):
     chain_text = re.sub(r'(?m)^#define DMSH_CHAIN "[^"]*"$', '#define DMSH_CHAIN "<chain>"', chain_header.read_text()) if chain_header.is_file() else None
     decoder = fingerprint('oodle-host-v1', common, ('files', [p for p in srcs if p != chain_header]), chain_text)
     if out.is_file() and reused(kf, key) is not None and decoder_host_key(out) == decoder:
-        verify_host_chain(out, chain_header)
+        verify_host_chain(out, chain)
         return out
     rmtree(kf); out.parent.mkdir(parents=True, exist_ok=True)
     run(cmd, logs / 'mac_host_build.log', env=env, cwd=host)

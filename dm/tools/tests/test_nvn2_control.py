@@ -20,7 +20,7 @@ int main(void) {
     uint32_t ctl, code;
     void *p = calloc(1, 0xd8);
     put(p,0,0x98761234); put(p,4,201); put(p,8,7);
-    put(p,0x30,0xd8); put(p,0x40,0x1500);
+    put(p,0x30,0xd8); put(p,0x38,0x1400); put(p,0x40,0x1400); put(p,0x44,0x1500);
     assert(nvn_shader_control_layout(p,&ctl,&code) && ctl==0xd8 && code==0x1500);
     assert(nvn_shader_control_stage(p)==0);
     put(p,0x54,1u<<16); assert(nvn_shader_control_stage(p)==1);
@@ -31,8 +31,8 @@ int main(void) {
     assert(nvn_shader_control_layout(p,&ctl,&code) && ctl==0xd8 && code==0x1500);
     put(p,0xc4,0xd8); put(p,0x30,0); assert(nvn_shader_control_layout(p,&ctl,&code) && ctl==0xd8);
     put(p,0xc4,0); assert(!nvn_shader_control_layout(p,&ctl,&code));
-    put(p,0x30,0xd8); put(p,8,7); put(p,0x40,0x1501); assert(!nvn_shader_control_layout(p,&ctl,&code));
-    put(p,0x40,0x1500); put(p,0x30,0x40); assert(!nvn_shader_control_layout(p,&ctl,&code));
+    put(p,0x30,0xd8); put(p,8,7); put(p,0x44,0x1501); assert(!nvn_shader_control_layout(p,&ctl,&code));
+    put(p,0x44,0x1500); put(p,0x30,0x40); assert(!nvn_shader_control_layout(p,&ctl,&code));
     put(p,0x30,0xd8); put(p,8,8); assert(!nvn_shader_control_layout(p,&ctl,&code));
     free(p);
     p=calloc(1,0x880); put(p,0,0x98761234); put(p,4,29); put(p,0x20,0x850); put(p,0x704,0x1230);
