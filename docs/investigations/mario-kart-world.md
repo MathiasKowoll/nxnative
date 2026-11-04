@@ -627,6 +627,17 @@ relaxing the baseline's requirement would not establish the requested baseline.
 
 ### Native compact graphics rebuild, 2026-11-03
 
+The full shader inventory used by the validated app is derived from
+[`pahorema/kartnative` at `47f2d1d5`](https://github.com/pahorema/kartnative/tree/47f2d1d5c8298a562190dd0493da8a4eb18e4626/dm/games/0400C3F00006E000):
+its 11,567-entry `shader_map.tsv`, 5,176 shader pairs and 6,524-entry pipeline
+manifest match the packaged tables byte for byte. The NXNative integration layer
+adds `native_sparse on`, `texture_gob_layout nx2` and `shader_abi nvn2`, records
+the runtime shader facts, and regenerates `c1_full.tsv` and `cb_extent.tsv` from
+the resulting libraries. Keep that provenance when contributing the profile;
+the external inventory and note are not independent work from this branch. The
+general sparse-texture, compact-control, Ampere translation and synchronization
+fixes remain changes to NXNative itself and apply beyond this profile.
+
 The complete 11,567-shader KartNative-derived inventory exposed a bridge-only
 failure before any new library stamp was written: fragment shader
 `0203f1e1c31ab456` contains native opcode `0xd08`, which the optional
