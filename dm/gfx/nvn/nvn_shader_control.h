@@ -13,7 +13,7 @@ static inline int nvn_shader_control_layout(const void *control, uint32_t *nctl,
     if (magic != 0x98761234u) return 0;
     if (version == 201) {
         if (minor != 7 && minor != 11) return 0;
-        memcpy(nctl, p + 0x30, 4); memcpy(ncode, p + 0x40, 4);
+        memcpy(nctl, p + 0x30, 4); memcpy(ncode, p + 0x44, 4);
         if (!*nctl) {
             uint32_t runtime_size; memcpy(&runtime_size, p + 0xc4, 4);
             if (runtime_size == 0xd8) *nctl = runtime_size;

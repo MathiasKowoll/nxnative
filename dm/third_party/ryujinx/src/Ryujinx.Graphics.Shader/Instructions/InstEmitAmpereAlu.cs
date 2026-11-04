@@ -73,6 +73,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x882, InstName.Mov, AUMov, N, uniform: true);
             x(0x883, InstName.P2r, AUp2ur, N, uniform: true);
             x(0xc82, InstName.Mov, AUMov, N, uniform: true);
+            x(0x2be, InstName.Bfe, AUbrev, N, uniform: true);
             x(0x805, InstName.Cs2r, ACs2r, N);
             x(0x919, InstName.S2r, AS2r, N);
             x(0x9c3, InstName.S2r, AS2r, N, uniform: true);
@@ -1245,6 +1246,19 @@ namespace Ryujinx.Graphics.Shader.Instructions
             ASet(context, x, context.BitCount(src), u);
         }
 
+        // UBREV URd, URb: reverse all 32 bits, without an intermediate vector-register lowering.
+        public static void AUbrev(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+
+            if (x.Bits(22, 32) != 0 || x.Bits(38, 64) != 0 || x.Bits(64, 96) != 0x08000000)
+            {
+                throw AFail(context, "UBREV source or modifiers");
+            }
+
+            ASet(context, x, context.BitfieldReverse(AGet(context, new ASrc(AKind.UReg, x.Bits(32, 38)))), true);
+        }
+
         // FLO Rd, b: the index of the most significant set bit (signed 73: of the first bit unlike the sign), .SH (74) as a shift amount; 63 negates the input
         public static void AFlo(EmitterContext context)
         {
@@ -1320,18 +1334,31 @@ namespace Ryujinx.Graphics.Shader.Instructions
             EmitP2r(context, Register(x.Ra, RegisterType.Gpr), Register(x.Rd, RegisterType.Gpr), mask, (ByteSel)x.Bits(76, 78), false);
         }
 
-        // UP2UR URd, URZ, 1: the uniform predicate UP0 as 0 or 1 in a uniform register. Pokemon Pokopia's two compute shaders with it use this one encoding (a mask over UP0..UP6 with a merge source
-        // is P2R's form, not seen here)
+        // UP2UR URd, URZ, mask: selected uniform predicates packed into their
+        // matching bits. The compact NVN2 graphics shaders use single-bit masks
+        // such as 0x08 and 0x40; URZ makes every unselected bit zero.
         public static void AUp2ur(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
+            uint mask = x.Imm32;
 
-            if (x.Bits(24, 30) != RegisterConsts.UniformZeroIndex || x.Imm32 != 1)
+            if (x.Bits(24, 30) != RegisterConsts.UniformZeroIndex || (mask & ~0x7fu) != 0)
             {
                 throw AFail(context, "UP2UR with a merge source or another mask");
             }
 
-            ASet(context, x, context.ConditionalSelect(APredReg(0, uniform: true), Const(1), Const(0)), uniform: true);
+            Operand value = Const(0);
+
+            for (int index = 0; index < 7; index++)
+            {
+                if ((mask & (1u << index)) != 0)
+                {
+                    Operand bit = context.ConditionalSelect(APredReg(index, uniform: true), Const(1 << index), Const(0));
+                    value = context.BitwiseOr(value, bit);
+                }
+            }
+
+            ASet(context, x, value, uniform: true);
         }
 
         // PLOP3 Pd0, Pd1, a (87..90), b (77..80), c (68..71; uniform with bit 67), lut0 (64..67 | 72..77 << 3), lut1 (16..24)

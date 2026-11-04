@@ -43,7 +43,18 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
         NSArray *bs = j[@"bindings"];
         if (![bs isKindOfClass:[NSArray class]]) FAIL("missing bindings");
         if (bs.count > NVN_REFL_MAXB) FAIL("%lu bindings, over the limit %d", (unsigned long)bs.count, NVN_REFL_MAXB);
-        o->route_b = 1; o->abi = 0;   // spirv-cross set 0 → [[buffer(0)]]
+        o->route_b = 1; o->abi = 0; o->nvn2_compute = [j[@"nvn2_compute"] boolValue];   // spirv-cross set 0 → [[buffer(0)]]
+        if (o->nvn2_compute) {
+            NSDictionary *l = j[@"nvn2_layout"];
+            if (![l isKindOfClass:[NSDictionary class]]) FAIL("missing native compute driver layout");
+            int push = [l[@"push_bytes"] intValue], size = [l[@"size"] intValue];
+            int u = [l[@"ubo_count"] intValue], s = [l[@"ssbo_count"] intValue], t = [l[@"tex_count"] intValue], im = [l[@"img_count"] intValue];
+            int ub = 16 + ((push + 15) & ~15), sb = ub + 16 * u, tb = sb + 16 * s, ib = tb + 8 * t;
+            if (push < 0 || push > DMSH_PUSH_SIZE || u < 0 || u > 16 || s < 0 || s > 16 || t < 0 || t > 128 || im < 0 || im > DMSH_C2_IMG_SLOTS || size > DMSH_DRV_SIZE || ib + 8 * im > size ||
+                ub != [l[@"ubo_base"] intValue] || sb != [l[@"ssbo_base"] intValue] || tb != [l[@"tex_base"] intValue] || ib != [l[@"img_base"] intValue]) FAIL("invalid native compute driver layout");
+            o->nvn2_push_bytes = push; o->nvn2_ubo_base = ub; o->nvn2_ssbo_base = sb; o->nvn2_tex_base = tb; o->nvn2_img_base = ib;
+            o->nvn2_ubo_count = u; o->nvn2_ssbo_count = s; o->nvn2_tex_count = t; o->nvn2_img_count = im;
+        }
         for (NSDictionary *b in bs) {
             NSString *k = b[@"kind"]; nvn_rbind *r = &o->b[o->nb];
             id rg = b[@"reg"]; int reg = [rg isKindOfClass:[NSNumber class]] ? [rg intValue] : -1, aid = [b[@"arg_id"] intValue];
@@ -84,10 +95,13 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             else if ([k isEqualToString:@DMSH_KIND_IMG]) { r->kind = NVN_RB_IMG; dummy_kind(b[@"msl_type"], &r->dtt, &r->dpf);   // rw: the shader writes it (access::write / read_write; a load-only view of the slot is not)
                 r->rw = [ty isKindOfClass:[NSString class]] && ([ty containsString:@"access::write"] || [ty containsString:@"access::read_write"]); r->atom = [b[@"atomic"] boolValue]; }
             else if ([k isEqualToString:@DMSH_KIND_TBUF]) { r->kind = NVN_RB_TBUF; uint8_t tt; dummy_kind(b[@"msl_type"], &tt, &r->dpf); }
-            else if ([k isEqualToString:@DMSH_KIND_SBUF]) { r->kind = NVN_RB_SBUFP; r->rw = sbuf_rw(b); }
+            else if ([k isEqualToString:@DMSH_KIND_SBUF]) {
+                r->kind = NVN_RB_SBUFP; r->rw = sbuf_rw(b);
+            }
             else if ([k isEqualToString:@DMSH_KIND_UBO_PTR]) r->kind = NVN_RB_UBOP;
             else if ([k isEqualToString:@DMSH_KIND_SBUF_UBO]) { r->kind = NVN_RB_SBUFU; r->rw = sbuf_rw(b); r->off = (uint16_t)[b[@"off"] intValue]; }
             else if ([k isEqualToString:@DMSH_KIND_GEOMETRY]) { if (reg < 0 || reg > 4) FAIL("invalid geometry helper slot"); r->kind = NVN_RB_GEOMETRY; }
+            else if ([k isEqualToString:@DMSH_KIND_NVN2_SCRATCH]) { r->kind = NVN_RB_NVN2_SCRATCH; r->rw = sbuf_rw(b); }
             else if ([k isEqualToString:@DMSH_KIND_SUPPORT]) r->kind = NVN_RB_SUPPORT;
             else if ([k isEqualToString:@DMSH_KIND_GMEM_MAP]) { r->kind = NVN_RB_GMEM; r->rw = [b[@"rw"] boolValue]; }
             else if ([k isEqualToString:@DMSH_KIND_GMEM_LOG]) { r->kind = NVN_RB_GMEML; r->rw = 1; }
@@ -177,6 +191,8 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
         }
         NSArray *tg = j[@"threadgroup_size"];
         if ([tg isKindOfClass:[NSArray class]] && tg.count == 3) for (int i = 0; i < 3; i++) o->tg[i] = (uint16_t)[tg[i] intValue];
+        { id sd = j[@"shared_device_bytes"]; unsigned long long n = [sd isKindOfClass:[NSNumber class]] ? [sd unsignedLongLongValue] : 0;
+          if (n > UINT32_MAX) FAIL("shared device scratch is %llu bytes", n); o->shared_device = (uint32_t)n; }
         for (NSDictionary *u in j[@"first_store"]) { if (o->nfirst >= 4) FAIL("more than 4 first-invocation stores");
             int reg = [u[@"reg"] intValue]; if (reg < 0 || reg >= 16) FAIL("first-invocation store to storage slot %d", reg);
             o->first[o->nfirst].reg = (uint8_t)reg; o->first[o->nfirst].word = (uint16_t)[u[@"word"] intValue]; o->first[o->nfirst++].value = (uint32_t)[u[@"value"] unsignedIntValue]; }

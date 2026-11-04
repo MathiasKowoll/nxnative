@@ -210,6 +210,14 @@ static void watch_where(const char *tag, uint64_t a) {
     else fprintf(stderr, " %s=%#llx", tag, (unsigned long long)a);
 }
 static uint64_t watch_val(void) { uint64_t v = 0; memcpy(&v, (void *)g_wat, g_wlen < 8 ? g_wlen : 8); return v; }
+// GPU stores do not fault on CPU page protections. The graphics diagnostic can
+// sample this same watched word at completed command-buffer boundaries.
+int dm_probe_watch_sample(uint64_t *address, uint64_t *value) {
+    if (!atomic_load(&g_warmed) || g_wlen > 8) return 0;
+    vm_size_t got = 0; *value = 0;
+    if (vm_read_overwrite(mach_task_self(), g_wat, g_wlen, (vm_address_t)value, &got) || got != g_wlen) return 0;
+    *address = g_wat; return 1;
+}
 // Decode the store at pc: its address, size and data (up to 64 bytes); the base register write-back (wb: register number, value) for pre- and post-index forms. 0 when not a decodable store
 static int watch_decode(ucontext_t *uc, uint32_t in, uint64_t *ea, unsigned *len, uint8_t *data, int *wb, uint64_t *wbv) {
     _STRUCT_ARM_THREAD_STATE64 *ss = &uc->uc_mcontext->__ss; _STRUCT_ARM_NEON_STATE64 *ns = &uc->uc_mcontext->__ns;

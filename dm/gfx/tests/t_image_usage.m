@@ -7,16 +7,60 @@ void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return bp_now(); }
 static int checks, failed;
 #define CHECK(c, label) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
-static void read_level(id<MTLTexture> texture, unsigned level, uint16_t *out) {
+static void read_slice(id<MTLTexture> texture, unsigned level, unsigned slice, uint16_t *out) {
     NSUInteger n = texture.width >> level;
     id<MTLBuffer> readback = [g_dev newBufferWithLength:n * n * 2 options:MTLResourceStorageModeShared];
     id<MTLCommandBuffer> command = q_cb(); id<MTLBlitCommandEncoder> copy = [command blitCommandEncoder];
-    [copy copyFromTexture:texture sourceSlice:0 sourceLevel:level sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(n,n,1)
+    [copy copyFromTexture:texture sourceSlice:slice sourceLevel:level sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(n,n,1)
                 toBuffer:readback destinationOffset:0 destinationBytesPerRow:n * 2 destinationBytesPerImage:n * n * 2];
     [copy endEncoding]; [command commit]; [command waitUntilCompleted];
     CHECK(command.status == MTLCommandBufferStatusCompleted, "readback completed");
     memcpy(out, readback.contents, n * n * 2);
 }
+static void read_level(id<MTLTexture> texture, unsigned level, uint16_t *out) { read_slice(texture, level, 0, out); }
+
+static void image_dimensions_case(int array_backing) { @autoreleasepool {
+    tex_t texture = {.magic=MAGIC('T','E','X',0), .serial=99801 + array_backing, .off=(uint64_t)(4 + array_backing) << 20};
+    texture.d = (nvn_texdesc){.target=array_backing ? NVN_TEXTURE_TARGET_2D_ARRAY : NVN_TEXTURE_TARGET_2D,
+                            .format=NVN_FORMAT_R16F, .flags=NVN_TEXTURE_FLAGS_IMAGE,
+                            .width=8, .height=8, .depth=array_backing ? 3 : 1, .levels=2, .samples=1};
+    nvn_tex_layout(&texture.d, &texture.L); mtl_tex_init(&texture);
+    id<MTLTexture> base = tex_mtl(&texture);
+    for (NSUInteger slice=0; slice<base.arrayLength; slice++) for (NSUInteger level=0; level<2; level++) {
+        id<MTLCommandBuffer> seed=q_cb(); MTLRenderPassDescriptor *rp=[MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture=base; rp.colorAttachments[0].level=level; rp.colorAttachments[0].slice=slice;
+        rp.colorAttachments[0].loadAction=MTLLoadActionClear; rp.colorAttachments[0].storeAction=MTLStoreActionStore;
+        rp.colorAttachments[0].clearColor=MTLClearColorMake(0.75,0,0,1);
+        [[seed renderCommandEncoderWithDescriptor:rp] endEncoding]; [seed commit]; [seed waitUntilCompleted];
+        CHECK(seed.status == MTLCommandBufferStatusCompleted, "array mip seeded");
+    }
+    view_t view={.set_levels=1,.base_level=1,.nlevels=1,.set_layers=1,.min_layer=array_backing ? 1 : 0,.nlayers=array_backing ? 2 : 1};
+    int tid=620+array_backing; mtl_reg_image(tid,&texture,&view);
+    nvn_rbind binding={.kind=NVN_RB_IMG,.rw=1,.dtt=array_backing ? MTLTextureType2D : MTLTextureType2DArray,.dpf=NVN_DPF_FLOAT};
+    os_unfair_lock_lock(&g_rmu); uint64_t rid; int real;
+    id<MTLTexture> image=img_binding(tid,&binding,&rid,&real);
+    CHECK(real && image.textureType == binding.dtt, "image dimension matches its instruction");
+    CHECK(image.width == 4 && image.parentRelativeLevel == 1 && image.parentRelativeSlice == (array_backing ? 1 : 0), "image view retains mip and first selected layer");
+    CHECK(rid == image.gpuResourceID._impl, "image uses the compatible view resource ID");
+    os_unfair_lock_unlock(&g_rmu);
+    NSError *error=nil;
+    NSString *src=array_backing ? @"#include <metal_stdlib>\nusing namespace metal; kernel void put(texture2d<float,access::write> t [[texture(0)]]) { t.write(float4(0.25),uint2(1,1)); }" :
+                                 @"#include <metal_stdlib>\nusing namespace metal; kernel void put(texture2d_array<float,access::write> t [[texture(0)]]) { t.write(float4(0.25),uint2(1,1),0); }";
+    id<MTLLibrary> lib=[g_dev newLibraryWithSource:src options:nil error:&error];
+    id<MTLComputePipelineState> pipeline=[g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"put"] error:&error];
+    CHECK(pipeline != nil, "dimension-specific image writer compiled");
+    id<MTLCommandBuffer> write=q_cb(); id<MTLComputeCommandEncoder> enc=[write computeCommandEncoder];
+    [enc setComputePipelineState:pipeline]; [enc setTexture:image atIndex:0];
+    [enc dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
+    [enc endEncoding]; [write commit]; [write waitUntilCompleted];
+    CHECK(write.status == MTLCommandBufferStatusCompleted, "dimension-compatible image write completed");
+    for (NSUInteger slice=0; slice<base.arrayLength; slice++) for (NSUInteger level=0; level<2; level++) {
+        uint16_t pixels[64]; read_slice(base,(unsigned)level,(unsigned)slice,pixels); int same=1;
+        for (NSUInteger i=0; i<(base.width>>level)*(base.height>>level); i++)
+            same &= pixels[i] == (level==1 && slice==(array_backing ? 1 : 0) && i==5 ? 0x3400 : 0x3a00);
+        CHECK(same,"only the requested mip, layer and pixel changed");
+    }
+} }
 static void image_case(int explicit_image) { @autoreleasepool {
     tex_t texture = {.magic=MAGIC('T','E','X',0), .serial=99501 + 10 * explicit_image, .off=(uint64_t)explicit_image << 20};
     texture.d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D, .format=NVN_FORMAT_R16F, .flags=NVN_TEXTURE_FLAGS_COMPRESSIBLE,
@@ -76,7 +120,7 @@ static void image_case(int explicit_image) { @autoreleasepool {
     CHECK(same, "sampled alias sees the image write and untouched pixels");
 } }
 int main(void) { @autoreleasepool {
-    mtl_init(); image_case(0); image_case(1);
+    mtl_init(); image_case(0); image_case(1); image_dimensions_case(0); image_dimensions_case(1);
     printf("explicit image usage: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

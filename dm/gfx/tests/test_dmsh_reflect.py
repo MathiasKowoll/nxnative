@@ -129,6 +129,9 @@ class DriverReads(unittest.TestCase):
     def test_computed_c0_index_is_refused(self):
         self.assertEqual(UNFILLABLE('float x = (*spvDescriptorSet0.fp_c0)._m0[int(_5)].x;'), ['c0 dynamic index'])
 
+    def test_compute_uniform_pointer_row_is_filled(self):   # NVN2's native c0+0x60 UBO 5 maps to the canonical compute table at c0+0x260; nvn_mtl.m fills that row
+        self.assertEqual(UNFILLABLE('uint2 p = (*spvDescriptorSet0.cp_c0)._m0[38].xy;', 'cs'), [])
+
     def test_c2_word_outside_the_tables_is_refused(self):
         self.assertEqual(UNFILLABLE('float x = (*spvDescriptorSet0.fp_c2)._m0[0].x;'), ['c2+0x0'])
 

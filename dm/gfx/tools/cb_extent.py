@@ -30,7 +30,11 @@ def extents(source, bindings):
     """{reg: bytes} for the cbuf bindings whose every read is a proven index into _m0"""
     out, definitions = {}, None
     for b in bindings:
-        if b.get("kind") != abi.KIND_CBUF or "reg" not in b: continue
+        # Compact NVN2 bindings whose descriptor slot is not decoded keep
+        # ``reg: null`` in reflection.  They are deliberately conservative:
+        # the runtime treats them as unbounded, and this optional table must
+        # not try to sort a null register beside classic integer slots.
+        if b.get("kind") != abi.KIND_CBUF or b.get("reg") is None: continue
         name = b["msl_name"]
         uses = len(re.findall(r"\b" + re.escape(name) + r"\b", source))
         reads = re.findall(r"\(\*spvDescriptorSet0\." + re.escape(name) + r"\)\._m0\[([^\]]+)\]", source)
@@ -56,7 +60,7 @@ def unwritten(source, bindings):
     writable (device, not const device), so the host takes a binding as written unless the table lists it"""
     out = []
     for b in bindings:
-        if b.get("kind") != abi.KIND_SBUF or "reg" not in b: continue
+        if b.get("kind") != abi.KIND_SBUF or b.get("reg") is None: continue
         name = "spvDescriptorSet0." + b["msl_name"]; ok = True
         for m in re.finditer(r"\(\*" + re.escape(name) + r"\b", source):
             j = m.end()

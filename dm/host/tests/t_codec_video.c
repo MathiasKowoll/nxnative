@@ -19,7 +19,12 @@ void hle_signal_system_event(void *e) { g_ev[ev_slot(e)].set = 1; }
 void hle_clear_system_event(void *e) { g_ev[ev_slot(e)].set = 0; }
 static int ev_set(void *e) { return g_ev[ev_slot(e)].set; }
 static void destroy_ev(void *e) { g_ev[ev_slot(e)].bound = g_ev[ev_slot(e)].set = 0; }   // nn::os::DestroySystemEvent: closing the handle unbinds the event
-void *guest_sym(const char *n) { return !strcmp(n, "_ZN2nn2os18DestroySystemEventEPNS0_15SystemEventTypeE") ? (void *)destroy_ev : NULL; }
+static bool trywait_ev(void *e) { return ev_set(e); }
+void *guest_sym(const char *n) {
+    if (!strcmp(n, "_ZN2nn2os18DestroySystemEventEPNS0_15SystemEventTypeE")) return (void *)destroy_ev;
+    if (!strcmp(n, "_ZN2nn2os18TryWaitSystemEventEPNS0_15SystemEventTypeE")) return (void *)trywait_ev;
+    return NULL;
+}
 static vpx_image_t *black_i420(unsigned w, unsigned h) {
     vpx_image_t *c = vpx_img_alloc(NULL, VPX_IMG_FMT_I420, w, h, 1); if (!c) return NULL;
     memset(c->planes[0], 16, (size_t)c->stride[0] * h);
@@ -50,31 +55,32 @@ static const uint8_t vp9[] = {
 
 int main(void) {
     _Alignas(16) static uint8_t dec[0x400], pool[3][0x40], spt[0x80], mem[16 * 16 * 4];
-    uint64_t size, align, id; uint32_t idx; cv_sync sync; uint16_t w, h, cw, ch; int64_t ts; bool eos;
+    uint64_t size, align, id; uint32_t idx, color; cv_sync sync; uint16_t w, h, cw, ch; int64_t ts; bool eos;
 
     // Pools: one picture each, NV12 (format 3, as Bananza asks)
     cv_pref pref = h_cv_pref(16, 16, 3, 0);
     assert(!h_cv_poolsize(&size, &align, &pref, 1) && size >= 16 * 16 * 4 && align == CV_NATIVE_ALIGN);
     for (int i = 0; i < 3; i++) assert(!h_cv_pool(pool[i], mem, size, &pref, 1, 0) && pool_of(pool[i]));
 
-    // Decoder: the submission-ready event is bound in its type and signalled
+    // Decoder: the submission-ready event is bound at the SDK's +8 field, then Start signals it
     assert(!h_cv_vp9init2(dec, 0x10000, 16, 16, 1, 1, 3));
     cv_dec *d = cv_of(dec); assert(d && d->vpx_ok);
-    void *ev = NULL; assert(!h_cv_vp9event(&ev, dec) && ev == dec + CV_EVENT_OFF && g_ev[ev_slot(ev)].bound && ev_set(ev));
+    void *ev = NULL; assert(!h_cv_vp9event(&ev, dec) && ev == dec + 8 && g_ev[ev_slot(ev)].bound && !ev_set(ev));
+    assert(!h_cv_vp9start(dec) && ev_set(ev));
 
-    // Registering makes a buffer acquirable at once, its sync handle signalled; an empty queue answers 3604
+    // Registering makes a buffer acquirable and ready to receive its first picture; the first handle is not reached yet
     for (uint32_t i = 0; i < 2; i++) assert(!h_cv_vp9reg(dec, i, pool[i], 0));
-    for (uint32_t i = 0; i < 2; i++) { assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == i && sync.magic == CV_SYNC && sync.gen == 0 && h_gs_trywait(&sync)); }
+    cv_sync first[2];
+    for (uint32_t i = 0; i < 2; i++) { assert(!h_cv_vp9acq(&idx, &first[i], dec) && idx == i && first[i].magic == CV_SYNC && first[i].gen == 1 && !h_gs_trywait(&first[i])); }
     assert(h_cv_vp9acq(&idx, &sync, dec) == CV_NONE);
     assert(h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 0) == CV_NONE);
 
-    // Released: acquirable again with a new handle that signals once a picture is in the buffer; the picture's properties and its NV12 / RGBA readback
-    h_cv_vp9rel(dec, 0, sync);
-    assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 0 && sync.gen == 1 && !h_gs_trywait(&sync));
-    assert(h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 0) == CV_NONE);
+    // The first submission fills the first registered buffer without a preceding release
     assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 1000, false) && id == 1);
-    assert(h_gs_trywait(&sync));
+    assert(h_gs_trywait(&first[0]));
     assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 0) && w == 16 && h == 16 && cw == 16 && ch == 16 && ts == 1000 && !eos);
+    color = 0xffffffff;
+    assert(!h_cv_vp9props20(&w, &h, &cw, &ch, &color, &ts, &eos, dec, 0) && color == 0 && w == 16 && h == 16 && ts == 1000);
     uint8_t nv12[16 * 16 * 3 / 2], rgba[16 * 16 * 4];
     assert(!h_cv_nv12(pool[0], 0, 0, 0, 16, 16, nv12, 16, 256, nv12 + 256, 16, 128));
     for (int i = 0; i < 256; i++) assert(abs(nv12[i] - 81) <= 3);
@@ -84,25 +90,30 @@ int main(void) {
     assert(!h_cv_rgba(pool[0], 0, 0, 0, 16, 16, rgba, 64, sizeof rgba));
     for (int i = 0; i < 1024; i += 4) assert(rgba[i] >= 250 && rgba[i + 1] <= 5 && rgba[i + 2] <= 5 && rgba[i + 3] == 255);
 
-    // No released buffer: pictures wait (4), then packets are refused (3603) and the event is cleared; a release takes the oldest and signals again
+    // Fill the other initial buffer. With no buffer left awaiting a picture, four pictures wait and the next packet is refused (3603)
+    assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 1500, false) && h_gs_trywait(&first[1]));
     for (int i = 0; i < CV_HOLD; i++) assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 2000 + i, false));
     assert(d->nheld == CV_HOLD && !ev_set(ev));
     assert(h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 9999, false) == CV_BUSY);
-    h_cv_vp9rel(dec, 1, sync);
+    h_cv_vp9rel(dec, 1, first[1]);
     assert(d->nheld == CV_HOLD - 1 && ev_set(ev));
     assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 1 && h_gs_trywait(&sync));
     assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 1) && ts == 2000);
 
     // Sync point event: armed on an unfilled buffer, signalled when the picture lands; one armed on a filled buffer is signalled at once
     assert(!h_spt_create(spt) && g_ev[ev_slot(spt)].bound);
-    h_cv_vp9rel(dec, 0, sync);   // buffer 0 takes the next waiting picture at once
+    assert(!h_spt_trywait(spt));
+    h_spt_cancel(spt); assert(h_spt_trywait(spt));
+    h_cv_vp9rel(dec, 0, first[0]);   // buffer 0 takes the next waiting picture at once
     assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 0);
-    assert(!h_spt_request(spt, &sync) && ev_set(spt) && !SPT(spt)->armed);
-    assert(!h_cv_vp9reg(dec, 2, pool[2], 0) && !h_cv_vp9acq(&idx, &sync, dec) && idx == 2);
+    assert(!h_spt_request(spt, &sync) && h_spt_trywait(spt) && !SPT(spt)->armed);
     for (int i = 0; i < 2; i++) { h_cv_vp9rel(dec, (uint32_t)i, sync); assert(!h_cv_vp9acq(&idx, &sync, dec)); }   // the last two waiting pictures go out
-    h_cv_vp9rel(dec, 2, sync); assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 2 && !h_gs_trywait(&sync));
-    assert(!h_spt_request(spt, &sync) && !ev_set(spt) && SPT(spt)->armed);
-    assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 3000, false) && ev_set(spt) && !SPT(spt)->armed && h_gs_trywait(&sync));
+    // A newly registered buffer awaits its first picture; its initial handle remains pending
+    cv_sync third;
+    assert(!h_cv_vp9reg(dec, 2, pool[2], 0) && !h_cv_vp9acq(&idx, &third, dec) && idx == 2 && !h_gs_trywait(&third));
+    sync = third; idx = 2;
+    assert(!h_spt_request(spt, &sync) && !h_spt_trywait(spt) && SPT(spt)->armed);
+    assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 3000, false) && h_spt_trywait(spt) && !SPT(spt)->armed && h_gs_trywait(&sync));
 
     // End of stream with no data: the next released buffer carries it, with no picture
     assert(!h_cv_vp9submit(&id, dec, NULL, 0, 0, true) && d->eos_pending);
@@ -119,15 +130,19 @@ int main(void) {
     assert(!h_cv_vp9fin(dec) && !cv_of(dec) && !g_ev[ev_slot(ev)].bound);
     // A decoder initialised again in the same memory, cleared in between (Donkey Kong Bananza's second movie): its event is bound anew
     memset(dec, 0, sizeof dec);
-    assert(!h_cv_vp9init2(dec, 0x10000, 16, 16, 1, 1, 3) && cv_of(dec) && g_ev[ev_slot(ev)].bound && ev_set(ev));
+    assert(!h_cv_vp9init2(dec, 0x10000, 16, 16, 1, 1, 3) && cv_of(dec) && g_ev[ev_slot(ev)].bound && !ev_set(ev));
+    assert(!h_cv_vp9start(dec) && ev_set(ev));
     assert(!h_cv_vp9fin(dec) && !cv_of(dec) && !g_ev[ev_slot(ev)].bound);
+    // SDK 20.5's remote-memory overload has two size_t values before width and height. It must select the same host decoder and preserve their positions in the ABI.
+    memset(dec, 0, sizeof dec);
+    assert(!h_cv_vp9init20(dec, 0x1111, 0x2222, 16, 16, 1, 1, 3) && cv_of(dec) && cv_of(dec)->codec == CV_VP9 && cv_of(dec)->w == 16 && cv_of(dec)->h == 16);
+    assert(!h_cv_vp9fin(dec) && !cv_of(dec));
     for (int i = 0; i < 3; i += 2) { h_cv_poolfin(pool[i]); assert(!pool_of(pool[i])); }
     // VP8 (libvpx) and H.264 (VideoToolbox) take the same protocol: one released buffer, one key frame, its picture read back red
     {   _Alignas(16) static uint8_t d8[0x400], p8[0x40], m8[16 * 16 * 4];
         assert(!h_cv_poolsize(&size, &align, &pref, 1) && !h_cv_pool(p8, m8, size, &pref, 1, 0));
         assert(!h_cv_vp8init2(d8, 0x10000, 16, 16, 1, 1, 3) && cv_of(d8) && cv_of(d8)->codec == CV_VP8 && cv_of(d8)->vpx_ok);
-        assert(!h_cv_vp8reg(d8, 0, p8, 0) && !h_cv_vp8acq(&idx, &sync, d8) && idx == 0);
-        h_cv_vp8rel(d8, 0, sync); assert(!h_cv_vp8acq(&idx, &sync, d8) && !h_gs_trywait(&sync));
+        assert(!h_cv_vp8reg(d8, 0, p8, 0) && !h_cv_vp8acq(&idx, &sync, d8) && idx == 0 && !h_gs_trywait(&sync));
         assert(!h_cv_vp8submit(&id, d8, vp8, sizeof vp8, 7000, false) && h_gs_trywait(&sync));
         assert(!h_cv_vp8props(&w, &h, &cw, &ch, &ts, &eos, d8, 0) && w == 16 && h == 16 && ts == 7000);
         assert(!h_cv_nv12(p8, 0, 0, 0, 16, 16, nv12, 16, 256, nv12 + 256, 16, 128));
@@ -141,8 +156,7 @@ int main(void) {
         cv_pref p64 = h_cv_pref(64, 64, 3, 0);
         assert(!h_cv_poolsize(&size, &align, &p64, 1) && !h_cv_pool(ph, mh, size, &p64, 1, 0));
         assert(!h_cv_h264init2(dh, 0x10000, 64, 64, 1, 1, 3) && cv_of(dh) && cv_of(dh)->codec == CV_H264 && cv_of(dh)->avc);
-        assert(!h_cv_h264reg(dh, 0, ph, 0) && !h_cv_h264acq(&idx, &sync, dh));
-        h_cv_h264rel(dh, 0, sync); assert(!h_cv_h264acq(&idx, &sync, dh) && !h_gs_trywait(&sync));
+        assert(!h_cv_h264reg(dh, 0, ph, 0) && !h_cv_h264acq(&idx, &sync, dh) && !h_gs_trywait(&sync));
         assert(!h_cv_h264submit(&id, dh, h264, sizeof h264, 5000000, true) && h_gs_trywait(&sync));   // end of stream: VideoToolbox gives its picture out
         assert(!h_cv_h264props(&w, &h, &cw, &ch, &ts, &eos, dh, 0) && w == 64 && h == 64 && ts == 5000000 && eos);
         assert(!h_cv_nv12(ph, 0, 0, 0, 64, 64, yuv, 64, 4096, yuv + 4096, 64, 2048));
@@ -153,7 +167,8 @@ int main(void) {
     {   // AV1: a decoder of its own codec through SDK 22's entry point, whose last two arguments lie on the stack (the guest's 8-byte slots), and a packet with no sequence header yet gives no picture
         uint8_t da[0x400]; memset(da, 0, sizeof da);
         assert(!h_cv_av1tm(da, NULL, 0, 0x10000, 0xabcd0080, 0xabcd0040, 1, 3, 2, 2) && cv_of(da) && cv_of(da)->codec == CV_AV1 && cv_of(da)->w == 0x80 && cv_of(da)->h == 0x40);
-        assert(h_cv_av1ev22(da) == da + CV_EVENT_OFF && ev_set(da + CV_EVENT_OFF));
+        assert(h_cv_av1ev22(da) == da + CV_EVENT_OFF22 && !ev_set(da + CV_EVENT_OFF22));
+        assert(!h_cv_av1start(da) && ev_set(da + CV_EVENT_OFF22));
         static const uint8_t delimiter[] = {0x12, 0x00};   // a temporal delimiter OBU alone
         uint64_t n; assert(!h_cv_av1submit(&n, da, delimiter, sizeof delimiter, 0, false) && !cv_of(da)->nheld);
         assert(!h_cv_av1fin(da) && !cv_of(da));

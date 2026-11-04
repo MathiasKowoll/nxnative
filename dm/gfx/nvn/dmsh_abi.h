@@ -27,8 +27,10 @@
 #define DMSH_C0_SSBO_CS 0x310            // compute stage storage buffer table
 #define DMSH_C0_SSBO_GS 0x410            // geometry stage storage buffer table (NieR:Automata); the hull and domain stages' bases were never seen
 #define DMSH_C0_SSBO_PS 0x510            // pixel stage storage buffer table
+#define DMSH_C0_SSBO_TS 0x670            // compact NVN2 task stage storage buffer table
+#define DMSH_C0_SSBO_MS 0x770            // compact NVN2 mesh stage storage buffer table
 #define DMSH_C0_DISPATCH 0x200           // compute: the dispatch's workgroup counts x, y, z (32 bits each; Link's Awakening's light culling)
-#define DMSH_C0_DISPATCH_NVN2 4          // NVN2 compute keeps them here, below its per-shader layout at 0x10 (x and y read by Fire Emblem Fortune's Weave's light culling; z by their order)
+#define DMSH_NVN2_C0_DISPATCH 0x4        // compact NVN2 compute: native launch row after its reserved first word
 #define DMSH_C0_CS_UBO 0x210             // compute: uniform slot r's address and size at 0x210 + 0x10 r, read through global memory (the build's ubo_ptr bindings); it ends where the storage buffer table starts
 #define DMSH_C0_CS_UBO_SLOTS 16          // uniform slots of that table
 
@@ -42,12 +44,24 @@
 #define DMSH_C0_SAMPLE_INFO 0x630        // pixel stage: the table's index words: sample index mask, log2 of the sample count, grid x mask (also the shift of y), grid y mask (Metroid Prime Remastered)
 #define DMSH_C0_BASE_INSTANCE 0x644      // graphics stages: the draw's base instance, which GLSLC adds to Maxwell's instance ID (Pokémon Legends: Z-A's occlusion boxes)
 
+// Compact NVN2 task/mesh exchange. The optional Ampere bridge lowers both
+// stages to compute and uses one private scratch buffer. Each mesh workgroup
+// receives three spaces for primitive counts, attributes and indices.
+#define DMSH_NVN2_SPACE_WORDS 0x10000
+#define DMSH_NVN2_MESH_GROUP_WORDS 0x30000
+#define DMSH_NVN2_MAX_MESH_GROUPS 32
+#define DMSH_NVN2_OBJECT_BASE_WORD 0x10000
+#define DMSH_NVN2_DISPATCH_WORD 0x10004
+#define DMSH_NVN2_MESH_OUTPUT_WORD 0x20000
+#define DMSH_NVN2_SCRATCH_BYTES 0x1880000
+
 // Binding kinds: the "kind" of each binding in a shader's <key>_b.json, as the build writes it and the host reads it (nvn_refl.m turns each into an NVN_RB_* code, nvn_refl.h)
 #define DMSH_KIND_CBUF "cbuf"            // uniform buffer slot reg (c[3 + reg])
 #define DMSH_KIND_C1 "c1"                // the shader's own constant segment c[1] (its bytes are the json's c1)
 #define DMSH_KIND_DRVCB "drvcb"          // a driver segment, c[bank] (bank 0 or 2): NVN_RB_DRV0 / NVN_RB_DRV2
 #define DMSH_KIND_SUPPORT "support"      // the translator's support buffer
 #define DMSH_KIND_GEOMETRY "geometry"    // one of the geometry lowering's helper buffers, reg = its index (dmsh_geometry.py HELPERS)
+#define DMSH_KIND_NVN2_SCRATCH "nvn2_scratch" // private compact NVN2 task/mesh exchange and raster-output buffer; never an NVN storage slot
 #define DMSH_KIND_SBUF "sbuf"            // storage buffer slot reg, its address in the stage's c0 table; rw = the shader writes it
 #define DMSH_KIND_SBUF_UBO "sbuf_ubo"    // a storage buffer whose address the game keeps in its own uniform slot reg at byte off
 #define DMSH_KIND_UBO_PTR "ubo_ptr"      // compute: uniform slot reg read through its address in c0 (DMSH_C0_CS_UBO)

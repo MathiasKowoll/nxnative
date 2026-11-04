@@ -24,6 +24,13 @@ class Translated(unittest.TestCase):
             r = subprocess.run([os.environ['DMSH_TEST_XLATE'], str(work / 'jobs.json'), d], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertTrue((work / 'k.spv').exists(), r.stdout + r.stderr)
+            words = struct.unpack('<%dI' % ((work / 'k.spv').stat().st_size // 4), (work / 'k.spv').read_bytes())
+            self.spirv_ops = []
+            i = 5
+            while i < len(words):
+                count = words[i] >> 16
+                self.spirv_ops.append((words[i] & 0xffff, words[i+1:i+count]))
+                i += count
             sys.path.insert(0, str(TOOLS)); import dmsh_geometry
             dmsh_geometry.flatten_sets(work / 'k.spv')
             r = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-texture-buffer-native',
@@ -41,6 +48,58 @@ class Suatom(Translated):
     def test_result_kept(self):   # the old value is the shader's (it shuffles it to the warp): the atomic's result is used, not discarded
         msl = self.translate(inst(*SUATOM) + inst(*EXIT))
         self.assertRegex(msl, r'uint \w+ = [^;]*atomic_fetch_add')
+
+
+class NativeCompute(Translated):
+    def test_dispatch_dimensions_use_the_host_launch_row(self):
+        for axis in range(3):
+            with self.subTest(axis=axis):
+                code = inst(0x000fc00000000800, ((4 + axis * 4) << 38) | (7 << 16) | 0x7ab9)
+                code += inst(0x000fc00008000000, (7 << 32) | (12 << 16) | 0x7c02)
+                msl = self.translate(code + inst(*SUATOM) + inst(*EXIT))
+                self.assertRegex(msl, rf'cp_c0\)\.\w+\[32\]\.{"xyz"[axis]}')
+
+    def test_surface_reduction_keeps_image_slot_and_atomic(self):
+        # SURED.ADD.U32 [R4], R4, c0[0x30]: image slot 1, no returned value.
+        msl = self.translate(inst(0x000fe2000010e000, 0x00000c040400759f) + inst(*EXIT))
+        self.assertIn('atomic_fetch_add', msl)
+        self.assertIn('cp_i_tcb_4A_r32ui', msl)
+
+    def test_memory_barriers_keep_scope_without_execution_barrier(self):
+        for scope, flag in ((0, 'mem_threadgroup'), (2, 'mem_device'), (3, 'mem_device'), (5, 'mem_device')):
+            with self.subTest(scope=scope):
+                msl = self.translate(inst(0x000fc00000000000 | (scope << 12), 0x7992) + inst(*EXIT))
+                self.assertIn(flag, msl)
+                # SPIRV-Cross may implement a memory fence with a Metal group barrier;
+                # the native frontend must emit OpMemoryBarrier, not OpControlBarrier.
+                constants = {args[1]: args[2] for op, args in self.spirv_ops if op == 43}
+                barriers = [args for op, args in self.spirv_ops if op == 225]
+                self.assertEqual(len(barriers), 1)
+                self.assertEqual(constants[barriers[0][0]], 2 if scope == 0 else 1)
+                self.assertNotIn(224, [op for op, _ in self.spirv_ops])
+
+    def test_error_barrier_retains_memory_ordering(self):
+        msl = self.translate(inst(0x000fc00000000000, 0x79ab) + inst(*EXIT))
+        self.assertIn('mem_device', msl)
+
+    def test_uniform_bit_reverse_reads_uniform_data(self):
+        # ULDC.U32 UR7, c3[0]; UBREV UR6, UR7; MOV R12, UR6; atomic-add R12.
+        code = inst(0x000fc00000000800, (3 << 54) | (7 << 16) | 0x7ab9)
+        code += inst(0x000fc80008000000, (7 << 32) | (6 << 16) | 0x72be)
+        code += inst(0x000fc00008000000, (6 << 32) | (12 << 16) | 0x7c02)
+        msl = self.translate(code + inst(*SUATOM) + inst(*EXIT))
+        self.assertIn('reverse_bits', msl)
+        self.assertIn('cp_c3', msl)
+        self.assertIn('atomic_fetch_add', msl)
+
+    def test_uniform_predicate_masks_pack_the_selected_bit(self):
+        # UP2UR UR6, URZ, mask; MOV R12, UR6; atomic-add R12. Compact NVN2
+        # graphics uses both masks below; translating either used to be refused.
+        mov_result = inst(0x000fc00008000000, (6 << 32) | (12 << 16) | 0x7c02)
+        for mask in (0x08, 0x40):
+            with self.subTest(mask=mask):
+                up2ur = inst(0x000fe20008000000, (mask << 32) | (63 << 24) | (6 << 16) | 0x7883)
+                self.assertIn('atomic_fetch_add', self.translate(up2ur + mov_result + inst(*SUATOM) + inst(*EXIT)))
 
 
 class MufuF16(Translated):

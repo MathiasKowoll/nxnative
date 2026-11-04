@@ -180,6 +180,8 @@ namespace Ryujinx.Graphics.Shader.Decoders
             Add("00011111xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", InstName.Imul32i,     InstEmit.Imul32i,     InstProps.Rd  | InstProps.Ra);
             Add("11100000xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", InstName.Ipa,         InstEmit.Ipa,         InstProps.Rd  | InstProps.Ra  | InstProps.Rb  | InstProps.Rc);
             Add("1110111111010xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", InstName.Isberd,      InstEmit.Isberd,      InstProps.Rd  | InstProps.Ra);
+            Add("1111111111110xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", InstName.Nvn2IsbeRead,  InstEmit.Nvn2IsbeRead,  InstProps.Rd | InstProps.Ra);
+            Add("1111111111111xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", InstName.Nvn2IsbeWrite, InstEmit.Nvn2IsbeWrite, InstProps.Ra | InstProps.Rb);
             Add("0101110000011xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", InstName.Iscadd,      InstEmit.IscaddR,     InstProps.Rd  | InstProps.Ra  | InstProps.Rb);
             Add("0011100x00011xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", InstName.Iscadd,      InstEmit.IscaddI,     InstProps.Rd  | InstProps.Ra  | InstProps.Ib);
             Add("0100110000011xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", InstName.Iscadd,      InstEmit.IscaddC,     InstProps.Rd  | InstProps.Ra);

@@ -3295,6 +3295,37 @@ namespace Ryujinx.Graphics.Shader.Decoders
         public bool P => (_opcode & 0x80000000) != 0;
     }
 
+    // Private instructions produced only by the offline NVN2 bridge. They
+    // replace Ampere ISBE operations after ordinary lowering, preserving one
+    // instruction per source operation so branch addresses remain unchanged.
+    readonly struct InstNvn2IsbeRead
+    {
+        private readonly ulong _opcode;
+        public InstNvn2IsbeRead(ulong opcode) => _opcode = opcode;
+        public int Dest => (int)(_opcode & 0xFF);
+        public int SrcA => (int)((_opcode >> 8) & 0xFF);
+        public int Pred => (int)((_opcode >> 16) & 0x7);
+        public bool PredInv => (_opcode & 0x80000) != 0;
+        public int ImmediateOffset => (int)((_opcode >> 28) & 0xFFFF);
+        public int Space => (int)((_opcode >> 44) & 0x7);
+        public int Width => 1 << (int)((_opcode >> 47) & 0x3);
+        public bool Skew => (_opcode & (1UL << 49)) != 0;
+    }
+
+    readonly struct InstNvn2IsbeWrite
+    {
+        private readonly ulong _opcode;
+        public InstNvn2IsbeWrite(ulong opcode) => _opcode = opcode;
+        public int SrcA => (int)((_opcode >> 8) & 0xFF);
+        public int Pred => (int)((_opcode >> 16) & 0x7);
+        public bool PredInv => (_opcode & 0x80000) != 0;
+        public int SrcB => (int)((_opcode >> 20) & 0xFF);
+        public int ImmediateOffset => (int)((_opcode >> 28) & 0xFFFF);
+        public int Space => (int)((_opcode >> 44) & 0x7);
+        public int Width => 1 << (int)((_opcode >> 47) & 0x3);
+        public bool Skew => (_opcode & (1UL << 49)) != 0;
+    }
+
     readonly struct InstIscaddR
     {
         private readonly ulong _opcode;

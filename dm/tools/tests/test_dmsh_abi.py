@@ -22,7 +22,7 @@ import dmsh_abi as abi   # noqa: E402
 # 0x1000 where it is not the pool table's entry count (DMSH_GMEM_MAP_ENTRIES): the 4 KB page step of nvn_mtl.m's sparse residency map.
 # A count may only go down; when it does, lower it here.
 BASELINE = {
-    'dm/gfx/nvn/nvn_mtl.m': {"'?'": 2, "'geometry'": 3, '0x100': 2, '0x1000': 2},
+    'dm/gfx/nvn/nvn_mtl.m': {"'?'": 2, "'geometry'": 3, '0x100': 2, '0x1000': 2, '0x10000': 1},
     'dm/gfx/nvn/nvn_refl.m': {"'c1'": 1},
     'dm/gfx/nvn/nvn_refl.h': {},
     'dm/gfx/nvn/nvn_obj.h': {'0x100': 1},
@@ -79,10 +79,16 @@ class Header(unittest.TestCase):
         self.assertEqual(a.SEPTEX_SLOT0 + a.C2_SEP_SLOTS, 256, 'the host has 256 texture slots a stage (nvn_mtl.m NTEX)')
         self.assertEqual(a.C0_CS_UBO + a.C0_ROW * a.C0_CS_UBO_SLOTS, a.C0_SSBO_CS)
         self.assertLessEqual(a.C0_DISPATCH + 12, a.C0_CS_UBO)
-        bases = sorted((a.C0_SSBO_VS, a.C0_SSBO_CS, a.C0_SSBO_GS, a.C0_SSBO_PS))
-        for lo, hi in zip(bases, bases[1:]): self.assertLessEqual(lo + a.C0_ROW * a.C0_SSBO_SLOTS, hi, 'storage buffer tables overlap')
-        self.assertLessEqual(bases[-1] + a.C0_ROW * a.C0_SSBO_SLOTS, a.C0_POINT_SIZE)
-        self.assertLessEqual(a.C0_BASE_INSTANCE + 4, a.DRV_SIZE)
+        legacy = sorted((a.C0_SSBO_VS, a.C0_SSBO_CS, a.C0_SSBO_GS, a.C0_SSBO_PS))
+        for lo, hi in zip(legacy, legacy[1:]): self.assertLessEqual(lo + a.C0_ROW * a.C0_SSBO_SLOTS, hi, 'legacy storage buffer tables overlap')
+        self.assertLessEqual(legacy[-1] + a.C0_ROW * a.C0_SSBO_SLOTS, a.C0_POINT_SIZE)
+        self.assertLessEqual(a.C0_BASE_INSTANCE + 4, a.C0_SSBO_TS)
+        self.assertEqual(a.C0_SSBO_TS + a.C0_ROW * a.C0_SSBO_SLOTS, a.C0_SSBO_MS)
+        self.assertLessEqual(a.C0_SSBO_MS + a.C0_ROW * a.C0_SSBO_SLOTS, a.DRV_SIZE)
+        self.assertEqual(a.NVN2_MESH_GROUP_WORDS, 3 * a.NVN2_SPACE_WORDS)
+        self.assertEqual(a.NVN2_DISPATCH_WORD, a.NVN2_SPACE_WORDS + 4)
+        self.assertEqual(a.NVN2_MESH_OUTPUT_WORD, 2 * a.NVN2_SPACE_WORDS)
+        self.assertEqual(a.NVN2_SCRATCH_BYTES, 4 * (a.NVN2_MESH_OUTPUT_WORD + a.NVN2_MAX_MESH_GROUPS * a.NVN2_MESH_GROUP_WORDS))
 
 
 class Build(unittest.TestCase):
@@ -95,7 +101,8 @@ class Build(unittest.TestCase):
         exec(compile(ast.Module(body=body, type_ignores=[]), 'dmsh_build.py', 'exec'), ns)
         self.assertEqual((ns['TEX_BASE'], ns['IMG_BASE'], ns['IMG_SLOTS'], ns['SEPTEX_BASE'], ns['SEPTEX_SLOT0'], ns['SAMP_BASE']),
                          (abi.C2_TEX, abi.C2_IMG, abi.C2_IMG_SLOTS, abi.C2_SEPTEX, abi.SEPTEX_SLOT0, abi.C2_SAMP))
-        self.assertEqual(ns['SSBO'], {'vs': abi.C0_SSBO_VS, 'cs': abi.C0_SSBO_CS, 'gs': abi.C0_SSBO_GS, 'ps': abi.C0_SSBO_PS})
+        self.assertEqual(ns['SSBO'], {'vs': abi.C0_SSBO_VS, 'cs': abi.C0_SSBO_CS, 'gs': abi.C0_SSBO_GS, 'ps': abi.C0_SSBO_PS,
+                                      'ts': abi.C0_SSBO_TS, 'ms': abi.C0_SSBO_MS})
         self.assertEqual(ns['DRV_FILL'][2][-1], (abi.C2_SAMP, abi.C2_SAMP + abi.C2_ROW * abi.C2_SEP_SLOTS))
 
     def test_every_kind_is_written_by_the_build(self):

@@ -63,8 +63,14 @@ static int busy_wait(range_t *r, uintptr_t p) {
 static int live_at(int i) { return atomic_load_explicit(&rg(i)->live, memory_order_acquire); }
 // The registered range that holds all of [a, a+len) (used for a texture's tracking / protection / dirty check)
 static range_t *find_span(uintptr_t a, size_t len) {
+    // Sparse page walks repeatedly visit runs from the same physical pool.
+    // Range slots never move or disappear; recheck liveness and bounds because
+    // retirement can reuse a slot for another pool before the next call.
+    static _Thread_local range_t *recent;
+    if (recent && atomic_load_explicit(&recent->live, memory_order_acquire)
+        && a >= recent->base && a + len <= recent->end) return recent;
     int n = atomic_load(&g_nr);
-    for (int i = 0; i < n; i++) { range_t *r = rg(i); if (live_at(i) && a >= r->base && a + len <= r->end) return r; }
+    for (int i = 0; i < n; i++) { range_t *r = rg(i); if (live_at(i) && a >= r->base && a + len <= r->end) { recent = r; return r; } }
     return NULL;
 }
 static void stamp_page(range_t *r, uintptr_t p) {

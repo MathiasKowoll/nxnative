@@ -54,6 +54,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0xb9b, InstName.Sust, ASurface, N, writesRd: false);
             x(0xb9d, InstName.Sust, ASurface, N, writesRd: false);
             x(0x593, InstName.Suatom, ASuatom, N);
+            x(0x59f, InstName.Sured, ASured, N, writesRd: false);
+            x(0x992, InstName.Membar, AMembar, N, writesRd: false);
+            x(0x9ab, InstName.Membar, AErrbar, N, writesRd: false);
             x(0xb1d, InstName.Bar, ABar, N, writesRd: false);
         }
 
@@ -316,17 +319,6 @@ namespace Ryujinx.Graphics.Shader.Instructions
             ASet(context, x, res);
         }
 
-        // MEMBAR: the order of this thread's memory operations
-        public static void AMembar(EmitterContext context)
-        {
-            context.MemoryBarrier();
-        }
-
-        // ERRBAR, after a MEMBAR: waits for errors of earlier memory operations to be reported, which here is nothing to do
-        public static void AErrbar(EmitterContext context)
-        {
-        }
-
         // ATOMS.CAS Rd, [Ra + offset], Rb (expected), Rc (new value): Rd = 1 when the swap happened, not the old value (Fire Emblem Fortune's Weave's only use is a retry loop for a float add that repeats until Rd == 1).
         // Only the 32-bit form (operation 3 at 87..91, size 0) occurs
         public static void AAtomsCas(EmitterContext context)
@@ -456,6 +448,65 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
 
             EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, (SuatomOp)x.Bits(87, 91), (SuatomSize)x.Bits(73, 76), handle, x.Ra, x.Rb, 0, x.Rd, false, isBindless: false, compareAndSwap: false);
+        }
+
+        // SURED.I [Ra], Rb: the same integer image reduction as Maxwell, with no result register.
+        public static void ASured(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            (int handle, int cbufSlot) = ATexHandle(context, x);
+            int size = x.Bits(73, 76);
+
+            if (cbufSlot != TextureOperation.DefaultCbufSlot || x.Rd != 0 || x.Bits(64, 72) != 0 ||
+                x.Bit(76) || x.Bits(81, 84) != 0 || x.Bits(90, 105) != 0)
+            {
+                throw AFail(context, "SURED descriptor form");
+            }
+
+            if (x.Bits(61, 64) > 5 || x.Bits(59, 61) != 0 || x.Bit(72) ||
+                size is not (0 or 1 or 6) || x.Bits(77, 81) != 7 || x.Bits(84, 87) != 1)
+            {
+                throw AFail(context, "SURED image mode");
+            }
+
+            EmitSured(context, (SuDim)x.Bits(61, 64), 0, (RedOp)x.Bits(87, 90),
+                (SuatomSize)size, handle, x.Ra, x.Rb, 0, false, false);
+        }
+
+        // MEMBAR.SC orders memory, rather than synchronizing workgroup execution (BAR.SYNC).
+        // Preserve the same workgroup/device distinction as the Maxwell memory-barrier frontend.
+        public static void AMembar(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            int scope = x.Bits(76, 79);
+
+            if (x.Bits(32, 64) != 0 || x.Bits(64, 96) != scope << 12 || scope is not (0 or 2 or 3 or 5))
+            {
+                throw AFail(context, "MEMBAR scope or modifiers");
+            }
+
+            if (scope == 0)
+            {
+                context.GroupMemoryBarrier();
+            }
+            else
+            {
+                context.MemoryBarrier();
+            }
+        }
+
+        // ERRBAR completes prior memory operations before errors are observed. Metal reports
+        // execution faults at command completion; retain device memory ordering in the shader.
+        public static void AErrbar(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+
+            if (x.Bits(32, 64) != 0 || x.Bits(64, 96) != 0)
+            {
+                throw AFail(context, "ERRBAR operands");
+            }
+
+            context.MemoryBarrier();
         }
 
         // BAR.SYNC: the workgroup barrier

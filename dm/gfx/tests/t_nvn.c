@@ -545,6 +545,35 @@ int main(void) {
         EXPECT("lists of 56..504 bytes stay in their 512 (no host segment)", (504 - 56) / 8 + 1, jumps_fit);
         P(nvnCommandBufferFinalize)(&c3); P(nvnMemoryPoolFinalize)(&mp);
     }
+    // BindProgram snapshots the current program version. Mario Kart World
+    // records a vertex+fragment program, then reuses the same NVNprogram for a
+    // vertex-only version before submitting the old list. The recorded bind
+    // must continue to resolve the original two shader keys and stages.
+    {
+        static uint8_t m[4096] __attribute__((aligned(4096))); NVNmemoryPoolBuilder mb; NVNmemoryPool mp; NVNcommandBuffer c2; NVNprogram program;
+        P(nvnMemoryPoolBuilderSetDefaults)(&mb); P(nvnMemoryPoolBuilderSetStorage)(&mb, m, sizeof m); P(nvnMemoryPoolInitialize)(&mp, &mb);
+        P(nvnCommandBufferInitialize)(&c2, &dev); P(nvnProgramInitialize)(&program, &dev);
+        prog_t *p = (prog_t *)&program; p->nstage = 2; p->serial = nvn_new_serial();
+        prog_keys_t *k = pk_get(p, 1); k->ok = k->stage_ok = 3;
+        const uint8_t vertex_key[8] = {0xe5, 0x4d, 0xdf, 0x49, 0xf6, 0xe9, 0xd1, 0x62};
+        const uint8_t fragment_key[8] = {0x1c, 0x83, 0xf6, 0x04, 0xe4, 0xac, 0xf6, 0xe8};
+        memcpy(k->key[0], vertex_key, 8); memcpy(k->key[1], fragment_key, 8);
+        k->stage[0] = NVN_SHADER_STAGE_VERTEX; k->stage[1] = NVN_SHADER_STAGE_FRAGMENT;
+        P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&c2);
+        P(nvnCommandBufferBindProgram)(&c2, &program, NVN_SHADER_STAGE_VERTEX_BIT | NVN_SHADER_STAGE_FRAGMENT_BIT);
+        P(nvnCommandBufferEndRecording)(&c2);
+        const p_bind_program *recorded = (const p_bind_program *)(m + sizeof(op_hdr)); const prog_t *version = recorded->prog;
+        p->nstage = 1; k->ok = k->stage_ok = 1; k->snapshot = NULL; memset(k->key[1], 0, 8); k->stage[1] = 0;
+        uint8_t got_vertex[8], got_fragment[8];
+        EXPECT("BindProgram records an immutable program object", 1, version != p && version->nstage == 2 && version->serial != p->serial);
+        EXPECT("recorded program retains both shader keys", 1,
+               prog_key(version, 0, got_vertex) && prog_key(version, 1, got_fragment) &&
+               !memcmp(got_vertex, vertex_key, 8) && !memcmp(got_fragment, fragment_key, 8));
+        EXPECT("recorded program retains vertex and fragment stages", 1,
+               prog_stage(version, 0) == NVN_SHADER_STAGE_VERTEX && prog_stage(version, 1) == NVN_SHADER_STAGE_FRAGMENT);
+        EXPECT("direct mesh state uses the recorded program version", (uintptr_t)version, (uintptr_t)((cmd_t *)&c2)->last_program);
+        P(nvnProgramFinalize)(&program); P(nvnCommandBufferFinalize)(&c2); P(nvnMemoryPoolFinalize)(&mp);
+    }
     // 5b''. Host segment sizes (hostseg_size), as Super Mario Odyssey grants 512 bytes from an empty pool before recording: such a grant gets a HOSTSEG_SMALL segment; a recording
     //       that outgrows it with no callback JUMPs into a full one and replays whole through its first handle; a record larger than HOSTSEG_SZ gets a segment that holds it;
     //       a free small segment is not taken for a full one, and the cap counts every segment's bytes

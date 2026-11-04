@@ -107,7 +107,10 @@ NVN2_KEY_CTL = 0x48
 def nvn2_ctl(ctl):
     """An NVN2 (Switch 2) control section: version 0xc9 at +4, the code area's length at +0x44 (dmsh_ampere.py). +0x30 holds the section's length in BNSH files (0xd8; 0xd0 in
     effects, 0x930 / 0x338 in sead's primitive drawer) and 0 in agl's BAHS files and in memory, so the key takes the first 0x48 bytes with +0x30 as zero (the host's keys_hash)"""
-    return len(ctl) >= NVN2_KEY_CTL and ctl[:4] == CTL_MAGIC and ctl[4:8] == b'\xc9\0\0\0'
+    if len(ctl) < NVN2_KEY_CTL or ctl[:4] != CTL_MAGIC or ctl[4:8] != b'\xc9\0\0\0': return False
+    # 0xc9 is decimal 201.  The compact SDK-19 201.7/201.11 layout is a
+    # separate ABI whose key includes its complete bounded control section.
+    return struct.unpack_from('<I', ctl, 8)[0] not in (7, 11)
 
 def compact_control(ctl):
     """Return (control bytes, code bytes, stage) for bounded NVN2 201.7/201.11 controls."""
@@ -216,15 +219,17 @@ def bahs_shaders(d, label):
     out = []
     for a in range(0, region - 16, 4):
         off, z, csz, rel = struct.unpack_from('<IIIi', d, a)
-        nvn2 = 0x48 <= csz < 0x10000 and 0 <= a + rel and a + rel + csz <= region and nvn2_ctl(d[a + rel:a + rel + csz])
+        ctl = d[a + rel:a + rel + csz] if 0 <= a + rel and a + rel + csz <= region else b''
+        compact = compact_control(ctl)
+        nvn2 = 0x48 <= csz < 0x10000 and (compact is not None or nvn2_ctl(ctl))
         # control length: Mario 0x880 / 0x88c, 3D World's BAHS version 9 0x848; NVN2 (Donkey Kong Bananza's agl resources) 0xd8
         if z or not (nvn2 or csz in (0x880, 0x88c) or 0x760 <= csz < 0x880) or off % 0x100: continue
         c = a + rel
         if c < 0 or c + csz > region or d[c:c + 4] != CTL_MAGIC: continue
-        n = struct.unpack_from('<I', d, c + (0x44 if nvn2 else 0x704))[0]
+        n = compact[1] if compact else struct.unpack_from('<I', d, c + (0x44 if nvn2 else 0x704))[0]
         if off + n > rsz: continue
-        code, ctl = d[region + off:region + off + n], d[c:c + csz]
-        st = nvn2_stage(ctl, code) if nvn2 else 'cs' if code[:4] == CS_MAGIC else sph_stage(code) if code[:4] == GFX_MAGIC else None
+        code = d[region + off:region + off + n]
+        st = compact[2] if compact else nvn2_stage(ctl, code) if nvn2 else 'cs' if code[:4] == CS_MAGIC else sph_stage(code) if code[:4] == GFX_MAGIC else None
         if not st or check(label, st, ctl, code): continue
         out.append((f'{label}#BAHS@{a:#x}', st, ctl, code))
     bahs_variations(d, label, [o[0] for o in out])
@@ -250,21 +255,30 @@ def ndsr_shaders(d, label):
     """agl's NDSR pack (Lib/agl/agl_resource.*.sarc.zs agl_ndsr.pck, Donkey Kong Bananza: the dynamic super-resolution upscaler that writes the frame's output): 'NDSR', then from +0x10
     16-byte records up to a zero one: u32 control section offset, u32 (control length << 4 | type), u32 code area offset, u32 (code length / 16 << 8 | type). Records whose first word
     is an NVN2 control section are shaders (types 0 / 3 graphics, 6 compute; a vertex record is followed by its pixel record); the others (type 0xb, 0x50c) hold constant data.
-    The control section's stage byte (+0x56) and its code length (+0x44) decide the stage and the code area, as for BNSH.
+    The control section's stage byte (+0x56) and its code length (+0x44), or a compact control's bounded layout, decide the stage and the code area, as for BNSH.
     The records start at +0x14 in Splatoon Raiders' pack, whose header has another word and other values (+4 0x40100, against 0x300 in Bananza's), so the start is the one whose first
     records point at control sections. Read from +0x10 the same pack gave no shader, the upscaler's draws were skipped and every 3D frame reached the window black"""
     if d[:4] != b'NDSR' or len(d) < 0x20: return []
+    def control(c, cl):
+        ctl = d[c:c + max(cl >> 4, 0x48)]
+        return ctl, compact_control(ctl)
     def records_from(o):   # how many of the first records point at an NVN2 control section
-        return sum(1 for c, cl, _, _ in struct.iter_unpack('<4I', d[o:o + 16 * 16]) if c + 0x48 <= len(d) and nvn2_ctl(d[c:c + 0x48]))
+        found = 0
+        for c, cl, _, _ in struct.iter_unpack('<4I', d[o:o + 16 * 16]):
+            if c + 0x48 > len(d): continue
+            ctl, compact = control(c, cl)
+            found += compact is not None or nvn2_ctl(ctl)
+        return found
     out = []; o = max((0x10, 0x14), key=records_from); prog = None
     while o + 16 <= len(d):
         c, cl, k, _ = struct.unpack_from('<4I', d, o)
         if not c and not cl: break
         o += 16
-        if not (c + 0x48 <= len(d) and nvn2_ctl(d[c:c + 0x48])): continue
-        ctl = d[c:c + max(cl >> 4, 0x48)]
-        code = d[k:k + struct.unpack_from('<I', ctl, 0x44)[0]]
-        st = nvn2_stage(ctl, code)
+        if c + 0x48 > len(d): continue
+        ctl, compact = control(c, cl)
+        if compact is None and not nvn2_ctl(ctl): continue
+        code = d[k:k + (compact[1] if compact else struct.unpack_from('<I', ctl, 0x44)[0])]
+        st = compact[2] if compact else nvn2_stage(ctl, code)
         if st is None or check(label, st, ctl, code): continue
         where = f'{label}#NDSR@{c:#x}'
         out.append((where, st, ctl, code))

@@ -23,6 +23,29 @@ static NSDictionary *load(const char *key) {
 
 int main(void) { @autoreleasepool {
     nvn_refl r; char err[160] = "";
+    {
+        NSDictionary *layout = @{@"push_bytes": @0, @"size": @288, @"ubo_base": @16, @"ubo_count": @7,
+            @"ssbo_base": @128, @"ssbo_count": @6, @"tex_base": @224, @"tex_count": @6, @"img_base": @272, @"img_count": @2};
+        NSDictionary *j = @{@"route": @"B", @"bindings": @[
+            @{@"kind": @"sbuf", @"reg": @3, @"index": @0, @"arg_id": @0, @"msl_name": @"cp_s0", @"msl_type": @"const device Data*", @"rw": @NO},
+            @{@"kind": @"sbuf", @"reg": @5, @"index": @1, @"arg_id": @1, @"msl_name": @"cp_s1", @"msl_type": @"device Data*", @"rw": @YES},
+            @{@"kind": @"ubo_ptr", @"reg": @6, @"index": @2, @"arg_id": @2, @"msl_name": @"cp_s2", @"msl_type": @"const device Data*", @"rw": @NO}
+            ], @"nvn2_compute": @YES, @"nvn2_layout": layout};
+        check("native compute layout accepted", 0, nvn_refl_from_json(j, &r, err, sizeof err));
+        check("native compute storage table", 128, r.nvn2_ssbo_base);
+        check("native compute texture table", 224, r.nvn2_tex_base);
+        check("native compute image count", 2, r.nvn2_img_count);
+        check("native compute first storage keeps declared slot", 3, r.b[0].reg);
+        check("native compute writable storage keeps declared slot", 5, r.b[1].reg);
+        check("native compute storage write flag", 1, r.b[1].rw);
+        check("native compute uniform pointer kind", NVN_RB_UBOP, r.b[2].kind);
+        check("native compute uniform pointer slot", 6, r.b[2].reg);
+        NSMutableDictionary *bad = [layout mutableCopy]; bad[@"ssbo_base"] = @0;
+        NSMutableDictionary *invalid = [j mutableCopy]; invalid[@"nvn2_layout"] = bad;
+        check("native compute inconsistent table rejected", 1, nvn_refl_from_json(invalid, &r, err, sizeof err));
+        [invalid removeObjectForKey:@"nvn2_layout"];
+        check("native compute missing layout rejected", 1, nvn_refl_from_json(invalid, &r, err, sizeof err));
+    }
     {   // native image atomics (dmsh_atomic.py): one read_write image, marked atomic by the build; an image the shader only stores to is not
         NSDictionary *j = @{@"route": @"B", @"bindings": @[
             @{@"kind": @"img", @"reg": @2, @"arg_id": @0, @"msl_name": @"cp_i_cb2_4C_r32ui", @"msl_type": @"texture_buffer<uint, access::read_write>", @"atomic": @YES},

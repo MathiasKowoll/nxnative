@@ -646,8 +646,12 @@ NVN(nvnProgramFinalize, void, NVNprogram *p) {
     pthread_mutex_lock(&g_sub_mu); mtl_prog_forget((const prog_t *)p); pthread_mutex_unlock(&g_sub_mu);
     mtl_prog_release((prog_t *)p); ((prog_t *)p)->magic = 0; pk_drop(p);
 }
-// a program's per-stage keys (side table: guest NVNprogram address → host object; bit i of ok = stage i computed)
-typedef struct { uint8_t key[6][8]; uint8_t ok; } prog_keys_t;
+// Per-descriptor keys and compact-control stages stay in a side table because
+// growing prog_t would write beyond older games' NVNprogram allocation.
+typedef struct {
+    uint8_t key[6][8], stage[6], ok, stage_ok;
+    prog_t *snapshot;   // immutable version recorded by BindProgram; process-lifetime because command lists may outlive the guest object
+} prog_keys_t;
 static pthread_mutex_t g_pk_mu = PTHREAD_MUTEX_INITIALIZER; static CFMutableDictionaryRef g_pk;   // a dedicated table (keys not shared with other side tables)
 static prog_keys_t *pk_get(const void *p, int make) {
     pthread_mutex_lock(&g_pk_mu);
@@ -663,13 +667,45 @@ static void pk_drop(const void *p) {
     if (k) { CFDictionaryRemoveValue(g_pk, p); free(k); }
     pthread_mutex_unlock(&g_pk_mu);
 }
+// NVN records the program state selected at BindProgram, not a pointer whose
+// contents are looked up when the command list is submitted. Engines reuse an
+// NVNprogram object for another stage combination after recording old lists;
+// retaining the guest pointer made those lists observe the newer shaders.
+//
+// Snapshots deliberately live for the host process. A game may retain and call
+// a recorded command list after finalizing the source NVNprogram, and NVN gives
+// the host no command-list destruction event from which to recover ownership.
+static const prog_t *pk_snapshot(const prog_t *p) {
+    pthread_mutex_lock(&g_pk_mu);
+    if (!g_pk) g_pk = CFDictionaryCreateMutable(NULL, 0, NULL, NULL);
+    prog_keys_t *k = (prog_keys_t *)CFDictionaryGetValue(g_pk, p);
+    if (!k) { k = calloc(1, sizeof *k); if (!k) die("program key allocation failed"); CFDictionarySetValue(g_pk, p, k); }
+    if (!k->snapshot) {
+        prog_t *s = malloc(sizeof *s); prog_keys_t *sk = calloc(1, sizeof *sk);
+        if (!s || !sk) die("program snapshot allocation failed");
+        *s = *p; s->serial = nvn_new_serial();
+        *sk = *k; sk->snapshot = s;
+        CFDictionarySetValue(g_pk, s, sk);
+        k->snapshot = s;
+    }
+    const prog_t *s = k->snapshot;
+    pthread_mutex_unlock(&g_pk_mu);
+    return s;
+}
 // mapped = 1: computed only when the code area is in a registered memory pool (at SetShaders: Mario sets some programs with an unmapped address first and fills it in before the first draw)
 // The control section's bytes in the key and the code area's length. NVN: +0x704 is the code area's length; +0x20 holds the section's own length: sections of at least
 // 0x880 bytes (all of Mario's, Engage's, Dread's and 13 Sentinels') use the first 0x880; SDK 10's 3D World has 0x850-byte ones followed by other data, so only their own
 // length is used (shader_split.py ctl_len). NVN2 (Switch 2, version 0xc9 at +4): the code area's length at +0x44; the key takes the first 0x48 bytes (through the shader's
 // own hash at +0x20 and the code lengths), +0x30 hashed as zero: Donkey Kong Bananza's BNSH files hold the section's length there (0xd8, 0xd0 in effects), agl's BAHS 0, also in memory
 #define NVN2_KEY_CTL 0x48
-static int nvn2_ctl(const uint8_t *c) { uint32_t magic, ver; memcpy(&magic, c, 4); memcpy(&ver, c + 4, 4); return magic == 0x98761234u && ver == 0xc9; }
+static int nvn2_ctl(const uint8_t *c) {
+    uint32_t magic, ver, minor;
+    memcpy(&magic, c, 4); memcpy(&ver, c + 4, 4); memcpy(&minor, c + 8, 4);
+    // 0xc9 is decimal 201.  Compact SDK-19 controls use 201.7/201.11 and
+    // hash their complete bounded control; only the newer BNSH layout uses
+    // the 0x48-byte normalized key below.
+    return magic == 0x98761234u && ver == 0xc9 && minor != 7 && minor != 11;
+}
 void nvn_ctl_lens(const void *control, uint32_t *nctl, uint32_t *ncode) {
     if (!nvn_shader_control_layout(control, nctl, ncode)) *nctl = *ncode = 0;
 }
@@ -702,6 +738,17 @@ int prog_key(const prog_t *p, unsigned st, uint8_t key[8]) {
     memcpy(key, k->key[st], 8);
     return 1;
 }
+int prog_stage(const prog_t *p, unsigned index) {
+    if (index >= p->nstage) return -1;
+    prog_keys_t *k = pk_get(p, 1);
+    if (!(k->stage_ok >> index & 1)) {
+        int stage = nvn_shader_control_stage(p->sd[index].control);
+        if (stage < 0) return -1;
+        k->stage[index] = (uint8_t)stage;
+        k->stage_ok |= (uint8_t)(1u << index);
+    }
+    return k->stage[index];
+}
 NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData *sd) {
     prog_t *o = (prog_t *)p;
     if (n < 0 || n > 6) { LOG("[RED] ProgramSetShaders stage count %d", n); return 0; }
@@ -711,14 +758,16 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
     static const char *trace; static int trace_init;
     if (!trace_init) { trace = getenv("DM_NVN_PROGTRACE"); trace_init = 1; }
     prog_keys_t *k = pk_get(p, 1);
-    k->ok = 0;
+    k->ok = k->stage_ok = 0; k->snapshot = NULL;
     for (int i = 0; i < n; i++) {
         if (keys_hash(&sd[i], 1, k->key[i])) k->ok |= (uint8_t)(1u << i);
+        int stage = nvn_shader_control_stage(sd[i].control);
+        if (stage >= 0) { k->stage[i] = (uint8_t)stage; k->stage_ok |= (uint8_t)(1u << i); }
         // Diagnostic: trace the loader of selected shader keys (comma-separated hex).
         if (trace && (k->ok & (1u << i))) {
             char key[17]; for (int j = 0; j < 8; j++) snprintf(key + j * 2, 3, "%02x", k->key[i][j]);
             if (strstr(trace, key)) {
-                LOG("[nvn] ProgramSetShaders key=%s control=%p code=%#llx", key, sd[i].control, (unsigned long long)sd[i].data);
+                LOG("[nvn] ProgramSetShaders program=%p count=%d key=%s control=%p code=%#llx", (void *)p, n, key, sd[i].control, (unsigned long long)sd[i].data);
                 dm_backtrace((uint64_t)__builtin_frame_address(0));
             }
         }
@@ -1048,7 +1097,9 @@ NVN(nvnCommandBufferSetViewports, void, NVNcommandBuffer *c, int first, int n, c
 NVN(nvnCommandBufferSetScissor, void, NVNcommandBuffer *c, int x, int y, int w, int h) { *REC(c, OP_SCISSOR, p_scissor) = (p_scissor){x, y, w, h}; }
 NVN(nvnCommandBufferSetDepthRange, void, NVNcommandBuffer *c, float n, float f) { *REC(c, OP_DEPTH_RANGE, p_depth_range) = (p_depth_range){n, f}; }
 NVN(nvnCommandBufferBindProgram, void, NVNcommandBuffer *c, const NVNprogram *p, int stages) {
-    *REC(c, OP_BIND_PROGRAM, p_bind_program) = (p_bind_program){(const prog_t *)p, stages};
+    const prog_t *snapshot = pk_snapshot((const prog_t *)p);
+    *REC(c, OP_BIND_PROGRAM, p_bind_program) = (p_bind_program){snapshot, stages};
+    CB(c)->last_program = snapshot; CB(c)->last_program_stages = stages;
 }
 static void bind_state(NVNcommandBuffer *c, int kind, const void *st, size_t n) { p_bind_state *r = rec(c, OP_BIND_STATE, offsetof(p_bind_state, bytes) + n); r->kind = kind; memcpy(r->bytes, st, n); }   // only the state's own bytes (nvn_obj.h p_bind_state)
 NVN(nvnCommandBufferBindBlendState, void, NVNcommandBuffer *c, const NVNblendState *st) { bind_state(c, 0, st, sizeof(blend_st)); }
@@ -2137,7 +2188,7 @@ _Static_assert(sizeof(map_req) == 0x28, "NVNmappingRequest");
 // mapping) and the later mappings were refused (`[RED] MapVirtual: non-contiguous mapping`). A pool larger than the application pool is sparse from the start
 enum { NVRUN = 1024, VPT_LEAF = 512 };   // a page-table leaf covers 2 MB
 typedef struct { const uint8_t *phys; uint64_t gen; } vpte;
-struct vpool { const pool_t *pool; uint8_t *base; uint64_t len, size, top; int nrun; struct { uint64_t lo, hi; } run[NVRUN]; vpte **pt; };   // len: reserved; size: the pool's; top: highest mapped end so far (logged per 128 MB)
+struct vpool { const pool_t *pool; uint8_t *base; uint64_t len, size, top; int nrun; struct { uint64_t lo, hi; } run[NVRUN]; vpte **pt; _Atomic uint64_t gen; };   // len: reserved; size: the pool's; top: highest mapped end so far (logged per 128 MB); gen: its latest mapping's
 static struct vpool **g_vp; static int g_nvp, g_cvp;   // the pools with a range of their own, under g_vp_mu
 static pthread_mutex_t g_vp_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_vp_gen;   // bumped per mapping request
@@ -2191,7 +2242,7 @@ static void vrun_set(struct vpool *v, uint64_t lo, uint64_t hi, int mapped) {
 // Page table of a sparse pool (see above). Caller holds g_vp_mu
 static const vpte *vpt_get(const struct vpool *v, uint64_t o) { const vpte *l = v->pt[o >> 21]; return l ? &l[(o >> 12) & (VPT_LEAF - 1)] : NULL; }
 static void vpt_set(struct vpool *v, uint64_t voff, uint64_t size, const uint8_t *phys) {
-    uint64_t gen = atomic_fetch_add(&g_vp_gen, 1) + 1;
+    uint64_t gen = atomic_fetch_add(&g_vp_gen, 1) + 1; atomic_store(&v->gen, gen);
     for (uint64_t o = 0; o < size; o += 0x1000) {
         vpte **l = &v->pt[(voff + o) >> 21];
         if (!*l && !phys) continue;   // never mapped: stays unmapped
@@ -2581,14 +2632,36 @@ static void push_const(NVNcommandBuffer *c, int compute, uint64_t w, uint64_t of
     if (off + n > DMSH_PUSH_SIZE || !data) { static int k; if (k++ < 8) LOG("[RED] push constants at %#llx + %#llx: beyond the host's %#x-byte block, dropped", (unsigned long long)off, (unsigned long long)n, DMSH_PUSH_SIZE); return; }
     p_push_const *r = RECN(c, OP_PUSH_CONST, p_push_const, data, n); r->compute = (uint16_t)compute; r->offset = (uint16_t)off; r->size = (uint32_t)n; memcpy(r->data, data, n);
 }
-NVN_NOPROTO(nvnCommandBufferPushGraphicsConstants, void, NVNcommandBuffer *c, uint64_t w, uint64_t off, uint64_t n, const void *data) { push_const(c, 0, w, off, n, data); }
+static int compact_bound_program(const cmd_t *c) {
+    if (!c->last_program) return 0;
+    for (unsigned i = 0; i < c->last_program->nstage; i++) if (prog_stage(c->last_program, i) >= 0) return 1;
+    return 0;
+}
+NVN_NOPROTO(nvnCommandBufferPushGraphicsConstants, void, NVNcommandBuffer *c, uint64_t w, uint64_t off, uint64_t n, const void *data) {
+    if (!compact_bound_program(CB(c))) { push_const(c, 0, w, off, n, data); return; }
+    if (w >= 8 || off + n > 256 || !data || n > 256) {
+        static int shown; if (shown++ < 8) LOG("[RED] compact NVN2 graphics constants table=%llu offset=%llu size=%llu", (unsigned long long)w, (unsigned long long)off, (unsigned long long)n);
+        return;
+    }
+    uint32_t size = (uint32_t)n & ~3u; if (!size) return;
+    p_push_gfx_const *r = rec(c, OP_PUSH_GFX_CONST, (uint32_t)offsetof(p_push_gfx_const, data) + size);
+    r->table = (uint16_t)w; r->offset = (uint16_t)off; r->size = (uint16_t)size; r->reserved = 0;
+    memcpy(r->data, data, size);
+}
 NVN_NOPROTO(nvnCommandBufferPushComputeConstants, void, NVNcommandBuffer *c, uint64_t w, uint64_t off, uint64_t n, const void *data) { push_const(c, 1, w, off, n, data); }
 // NVN2 command buffer modes Donkey Kong Bananza sets on every command buffer it begins: they tune how the GPU's front end runs the commands (whether compute may overlap the next
 // work, how geometry is processed, how commands are recorded), not what they produce. The host records and replays every command in order on Metal, so none changes its result.
 // Logged once each with the first value; open: what the values select on the console
 NVN_NOPROTO(nvnCommandBufferSetRecordingMode, void, NVNcommandBuffer *c, int mode) { (void)c; ONCE_LOG("nvnCommandBufferSetRecordingMode %d: the host records every command buffer alike", mode); }
-NVN_NOPROTO(nvnCommandBufferSetGeometryProcessingMode, void, NVNcommandBuffer *c, int mode) { (void)c; ONCE_LOG("nvnCommandBufferSetGeometryProcessingMode %d: no effect on Metal", mode); }
+NVN_NOPROTO(nvnCommandBufferSetGeometryProcessingMode, void, NVNcommandBuffer *c, int mode) { CB(c)->geometry_mode = mode; }
 NVN_NOPROTO(nvnCommandBufferSetComputeOverlapMode, void, NVNcommandBuffer *c, int mode) { (void)c; ONCE_LOG("nvnCommandBufferSetComputeOverlapMode %d: the host runs compute in submission order", mode); }
+NVN_NOPROTO(nvnCommandBufferDrawMeshTasks, void, NVNcommandBuffer *c, int first, int count) {
+    if (CB(c)->magic != MAGIC('C', 'M', 'D', 'B') || first < 0 || count < 0)
+        die("[RED] invalid NVN2 mesh-task draw first=%d count=%d", first, count);
+    *(p_draw_mesh *)rec(c, OP_DRAW_MESH, sizeof(p_draw_mesh)) = (p_draw_mesh){
+        CB(c)->last_program, CB(c)->last_program_stages, CB(c)->geometry_mode, first, count
+    };
+}
 
 // nvnProgramSetSampleShading (NVN 53+): whether the program's fragment shader runs once per sample of a multisampled target. Metroid Prime Remastered sets it on its programs
 // (modes 0, 1 and 2, from CGraphicsDeviceContext's sample shading state). Metal has no such switch: a fragment function runs per sample when it reads the sample index ([[sample_id]],
@@ -2668,6 +2741,7 @@ static struct vpool *vpool_at(const void *pool, uint64_t a) {   // caller holds 
 }
 int nvn_sparse_pool(const void *pool) { return pool && ((const pool_t *)pool)->vp; }   // no lock: set at Initialize, cleared at the first mapping (an aliased pool) or Finalize; called per texture lookup
 uint64_t nvn_sparse_gen(void) { return atomic_load(&g_vp_gen); }
+uint64_t nvn_sparse_pool_gen(const void *pool) { const struct vpool *v = pool ? ((const pool_t *)pool)->vp : NULL; return v ? atomic_load(&v->gen) : 0; }   // no lock, as nvn_sparse_pool
 uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t a, uint64_t n) {
     pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a); uint64_t miss = 0;
     if (!v) { pthread_mutex_unlock(&g_vp_mu); memset(dst, 0, n); return n; }
@@ -2679,15 +2753,18 @@ uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t a, uint64_t n) {
     }
     pthread_mutex_unlock(&g_vp_mu); return miss;
 }
-// Runs of consecutive physical pages behind [a, a+n): fn on each (nonzero stops the walk and is returned), or 1 at the first page mapped after gen (gen ~0 = do not look)
+// Runs of consecutive physical pages behind [a, a+n): fn on each (nonzero stops the walk and is returned), or 1 at the first page mapped after gen (gen ~0 = do not look).
+// A null callback checks mappings only, without inspecting physical contents.
 static int vpt_walk(const void *pool, uint64_t a, uint64_t n, uint64_t gen, int (*fn)(const uint8_t *, uint64_t, uint64_t), uint64_t arg) {
     pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a); int r = 0;
     if (!v) { pthread_mutex_unlock(&g_vp_mu); return 1; }
+    if (!fn && gen == nvn_sparse_gen()) { pthread_mutex_unlock(&g_vp_mu); return 0; }
     const uint8_t *rs = NULL, *re = NULL; uint64_t o = a - (uint64_t)(uintptr_t)v->base;
     for (uint64_t at = o & ~0xFFFull; at < o + n && at < v->size && !r; at += 0x1000) {
         const vpte *e = vpt_get(v, at);
         if (!e) { at |= (2u << 20) - 1; at -= 0xFFF; continue; }   // a leaf never mapped: skip its 2 MB
         if (gen != ~0ull && e->gen > gen) { r = 1; break; }
+        if (!fn) continue;
         if (!e->phys) continue;
         if (rs && e->phys == re) { re += 0x1000; continue; }
         if (rs) r = fn(rs, (uint64_t)(re - rs), arg);
@@ -2699,11 +2776,52 @@ static int vpt_walk(const void *pool, uint64_t a, uint64_t n, uint64_t gen, int 
 static _Thread_local const void *t_rw_span;   // the dirty tracker's range of the last run (nvn_dirty_since_cached)
 static int run_written(const uint8_t *p, uint64_t n, uint64_t stamp) { return nvn_dirty_since_cached(&t_rw_span, p, n, stamp); }
 static int run_protect(const uint8_t *p, uint64_t n, uint64_t unused) { (void)unused; nvn_dirty_protect(p, n); return 0; }
-int nvn_sparse_since(const void *pool, uint64_t a, uint64_t n, uint64_t gen, uint64_t stamp) { return vpt_walk(pool, a, n, gen, run_written, stamp); }
+int nvn_sparse_since(const void *pool, uint64_t a, uint64_t n, uint64_t gen, uint64_t stamp) {
+    // A pending GPU mirror asks only whether the mapping changed. Until the
+    // global mapping clock moves, no physical-page walk can find such a change.
+    return vpt_walk(pool, a, n, gen, stamp == UINT64_MAX ? NULL : run_written, stamp);
+}
 int nvn_sparse_mapped(const void *pool, uint64_t a, uint64_t n) {   // every page of [a, a+n) has memory behind it
     pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a); int ok = v != NULL;
     for (uint64_t o = v ? (a - (uint64_t)(uintptr_t)v->base) & ~0xFFFull : 0, end = v ? a - (uint64_t)(uintptr_t)v->base + n : 0; ok && o < end; o += 0x1000) { const vpte *e = o < v->size ? vpt_get(v, o) : NULL; ok = e && e->phys; }
     pthread_mutex_unlock(&g_vp_mu); return ok;
+}
+uint64_t nvn_sparse_mapped_bytes(const void *pool, uint64_t a, uint64_t n) {
+    pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a); uint64_t bytes = 0;
+    uint64_t base = v ? a - (uint64_t)(uintptr_t)v->base : 0, end = base + n;
+    for (uint64_t at = base & ~0xFFFull; v && at < end && at < v->size; at += 0x1000) {
+        const vpte *e = vpt_get(v, at); if (!e || !e->phys) continue;
+        uint64_t lo = at > base ? at : base, hi = at + 0x1000 < end ? at + 0x1000 : end;
+        bytes += hi - lo;
+    }
+    pthread_mutex_unlock(&g_vp_mu); return bytes;
+}
+uint64_t nvn_sparse_tilemap(const void *pool, uint64_t a, uint64_t n, uint64_t tile, uint8_t *map, uint64_t map_n) {
+    if (!tile || !map || map_n < (n + tile - 1) / tile) return 0;
+    memset(map, 0, map_n); pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a); uint64_t count = 0;
+    uint64_t base = v ? a - (uint64_t)(uintptr_t)v->base : 0, end = base + n;
+    for (uint64_t at = base & ~0xFFFull; v && at < end && at < v->size; at += 0x1000) {
+        const vpte *e = vpt_get(v, at); if (!e || !e->phys) continue;
+        uint64_t index = (at - base) / tile;
+        if (index < map_n && !map[index]) { map[index] = 1; count++; }
+    }
+    pthread_mutex_unlock(&g_vp_mu); return count;
+}
+// The physical memory behind the 64 KiB at a when all sixteen guest pages are
+// one contiguous run. Sparse texture tiles that alias this run may share one
+// Metal placement-heap page.
+uint64_t nvn_sparse_backing(const void *pool, uint64_t a) {
+    pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a); const uint8_t *p0 = NULL;
+    if (v) {
+        uint64_t o = a - (uint64_t)(uintptr_t)v->base;
+        const vpte *e = (o & 0xFFF) || o + 0x10000 > v->size ? NULL : vpt_get(v, o);
+        p0 = e ? e->phys : NULL;
+        for (unsigned i = 1; p0 && i < 16; i++) {
+            const vpte *f = vpt_get(v, o + i * 0x1000ull);
+            if (!f || f->phys != p0 + i * 0x1000) p0 = NULL;
+        }
+    }
+    pthread_mutex_unlock(&g_vp_mu); return (uint64_t)(uintptr_t)p0;
 }
 void nvn_sparse_protect(const void *pool, uint64_t a, uint64_t n) { vpt_walk(pool, a, n, ~0ull, run_protect, 0); }
 NVN(nvnCommandBufferDrawElementsIndirect, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, NVNbufferAddress ib, NVNbufferAddress ind) {
@@ -2782,19 +2900,104 @@ NVN(nvnCommandBufferDownsampleTextureView, void, NVNcommandBuffer *c, const NVNt
 // Write protection is lifted and the range marked dirty first, so the replay layer re-uploads it the next time it is used
 // Non-3D textures: only the bytes inside the region are written, by block-linear address, without decoding the whole level. Metroid Dread's minimap (main+0x160e80) calls WriteTexels once per texel (a 1×1 region);
 // previously every call decoded, patched and re-encoded the whole level, and after a few minutes the main thread spent whole frames there (frames stopped from 175 s). Returns −1 when the region is out of range or the format unsupported, falling back to the whole-level path
-static int write_region_bl(const tex_t *t, unsigned level, unsigned layer, const NVNcopyRegion *r, const uint8_t *src, size_t row, int bw, int bh, int bpb) {
+static int copy_region_bl(const tex_t *t, unsigned level, unsigned layer, const NVNcopyRegion *r, uint8_t *linear, size_t row, int bw, int bh, int bpb, int write) {
     uint32_t row_bytes, rows, slices, gbpb; uint64_t base; unsigned th, td;
     if (nvn_deswizzle_geom(&t->d, level, layer, &row_bytes, &rows, &slices, &base, &th, &td, &gbpb) || (int)gbpb != bpb || r->xoffset < 0 || r->yoffset < 0) return -1;
     uint32_t x0 = (uint32_t)(r->xoffset / bw) * (uint32_t)bpb, y0 = (uint32_t)(r->yoffset / bh);
     size_t wb = (size_t)((r->width + bw - 1) / bw) * (size_t)bpb, hb = (size_t)((r->height + bh - 1) / bh);
     if (x0 + wb > row_bytes || y0 + hb > rows) return -1;
     uint32_t lb = nvn_tex_level_gobs(&t->d, level) * 64; if (lb < row_bytes) lb = row_bytes;   // the row as laid out (padded in a sparse texture's tiled levels)
-    for (size_t y = 0; y < hb; y++)
+    int sparse = nvn_sparse_pool(t->pool); struct vpool *vp = NULL;
+    if (sparse) { pthread_mutex_lock(&g_vp_mu); vp = vpool_at(t->pool, (uint64_t)(uintptr_t)t->mem); }
+    uint64_t page = UINT64_MAX, prepared = UINT64_MAX; uint8_t *physical = NULL;
+    const uintptr_t host_page_mask = ~((uintptr_t)getpagesize() - 1);
+    // Block-linear rows revisit the same pages. Prepare each changed virtual
+    // page only once per region, instead of once per 16-byte segment/row.
+    uint64_t level_end = (uint64_t)layer * t->L.layer_size
+        + (level + 1 < t->d.levels ? nvn_tex_level_offset(&t->d, level + 1) : t->L.layer_size);
+    uint64_t first_page = ((uint64_t)(uintptr_t)t->mem + base) >> 12;
+    uint64_t page_count = (((uint64_t)(uintptr_t)t->mem + level_end + 4095) >> 12) - first_page;
+    uint8_t *prepared_pages = sparse && write ? calloc((size_t)((page_count + 7) >> 3), 1) : NULL;
+    const uint32_t x16 = nvn_gob_switch2 ? 64 : 32;
+    const uint64_t block = 512ull << (th + td);
+    // Whole GOBs are contiguous in physical memory. Visit one 64-byte by
+    // 8-row GOB at a time so large atlas readbacks resolve each physical page
+    // once per GOB, instead of once per row/segment across the entire image.
+    if (sparse && !(x0 & 63) && !(y0 & 7) && !(wb & 63) && !(hb & 7)
+        && !(((uint64_t)(uintptr_t)t->mem + base) & 511)) {
+        uint8_t gob[512];
+        for (size_t y = 0; y < hb; y += 8) for (size_t x = 0; x < wb; x += 64) {
+            uint64_t off = base + nvn_bl_offset(x0 + (uint32_t)x, y0 + (uint32_t)y, 0, lb, rows, th, td);
+            uint64_t address = (uint64_t)(uintptr_t)t->mem + off;
+            uint64_t at = vp ? address - (uint64_t)(uintptr_t)vp->base : UINT64_MAX;
+            const vpte *e = vp && at < vp->size ? vpt_get(vp, at) : NULL;
+            uint8_t *p = e && e->phys ? (uint8_t *)e->phys + (at & 0xfff) : NULL;
+            if (write && !p) continue;
+            if (!write) { if (p) memcpy(gob, p, 512); else memset(gob, 0, 512); }
+            for (unsigned gy = 0; gy < 8; gy++) {
+                unsigned yo = nvn_gob_switch2 ? (gy >> 2) * 128 + ((gy >> 1) & 1) * 32 + (gy & 1) * 16 : (gy >> 1) * 64 + (gy & 1) * 16;
+                uint8_t *q = linear + (y + gy) * row + x;
+                if (write) {
+                    memcpy(gob + yo, q, 16); memcpy(gob + yo + x16, q + 16, 16);
+                    memcpy(gob + yo + 256, q + 32, 16); memcpy(gob + yo + 256 + x16, q + 48, 16);
+                } else {
+                    memcpy(q, gob + yo, 16); memcpy(q + 16, gob + yo + x16, 16);
+                    memcpy(q + 32, gob + yo + 256, 16); memcpy(q + 48, gob + yo + 256 + x16, 16);
+                }
+            }
+            if (write && memcmp(p, gob, 512)) {
+                uint64_t index = (address >> 12) - first_page;
+                if (prepared_pages && index < page_count) {
+                    uint8_t mask = (uint8_t)(1u << (index & 7));
+                    if (!(prepared_pages[index >> 3] & mask)) { dm_guest_write_prepare(p, 512); prepared_pages[index >> 3] |= mask; }
+                } else dm_guest_write_prepare(p, 512);
+                memcpy(p, gob, 512);
+            }
+        }
+        pthread_mutex_unlock(&g_vp_mu); free(prepared_pages); return 0;
+    }
+    for (size_t y = 0; y < hb; y++) {
+        uint64_t yoff = base + nvn_bl_offset(0, y0 + (uint32_t)y, 0, lb, rows, th, td);
         for (size_t x = 0; x < wb;) {   // 16-byte runs are contiguous within a GOB
             uint32_t bx = x0 + (uint32_t)x; size_t n = 16 - bx % 16; if (n > wb - x) n = wb - x;
-            memcpy(t->mem + base + nvn_bl_offset(bx, y0 + (uint32_t)y, 0, lb, rows, th, td), src + y * row + x, n); x += n;
+            uint64_t off = yoff + (bx >> 6) * block + (bx & 32 ? 256 : 0) + (bx & 16 ? x16 : 0) + (bx & 15);
+            uint8_t *p = t->mem + off, *q = linear + y * row + x;
+            if (sparse) {
+                uint64_t at = vp ? (uint64_t)(uintptr_t)p - (uint64_t)(uintptr_t)vp->base : UINT64_MAX;
+                if ((at & ~0xfffull) != page) {
+                    const vpte *e = vp && at < vp->size ? vpt_get(vp, at) : NULL;
+                    page = at & ~0xfffull; physical = e ? e->phys : NULL;
+                }
+                p = physical ? physical + (at & 0xfff) : NULL;
+            }
+            if (write && p) {
+                // A sparse render readback can contain unchanged texels (a clear
+                // of an already-clear atlas). Dirty only physical pages whose
+                // bytes change, or every alias is needlessly uploaded again.
+                if (sparse) {
+                    int same = n == 16 ? !memcmp(p, q, 16) : !memcmp(p, q, n);
+                    if (same) { x += n; continue; }
+                    uintptr_t host_page = (uintptr_t)p & host_page_mask;
+                    uint64_t index = (((uint64_t)(uintptr_t)t->mem + off) >> 12) - first_page;
+                    if (prepared_pages && index < page_count) {
+                        uint8_t mask = (uint8_t)(1u << (index & 7));
+                        if (!(prepared_pages[index >> 3] & mask)) { dm_guest_write_prepare(p, n); prepared_pages[index >> 3] |= mask; }
+                    } else if (host_page != prepared) { dm_guest_write_prepare(p, n); prepared = host_page; }
+                }
+                if (n == 16) memcpy(p, q, 16); else memcpy(p, q, n);
+            } else if (!write) {
+                if (p) { if (n == 16) memcpy(q, p, 16); else memcpy(q, p, n); }
+                else memset(q, 0, n);
+            }
+            x += n;
         }
+    }
+    if (sparse) pthread_mutex_unlock(&g_vp_mu);
+    free(prepared_pages);
     return 0;
+}
+static int write_region_bl(const tex_t *t, unsigned level, unsigned layer, const NVNcopyRegion *r, const uint8_t *src, size_t row, int bw, int bh, int bpb) {
+    return copy_region_bl(t, level, layer, r, (uint8_t *)src, row, bw, bh, bpb, 1);
 }
 static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, const uint8_t *src, size_t row, size_t img) {
     if (!t->mem) { LOG("[RED] WriteTexels: texture has no storage"); return; }
@@ -2842,7 +3045,9 @@ NVN(nvnTextureWriteTexelsStrided, void, const NVNtexture *t, const NVNtextureVie
 static int mirror_prepare(const tex_t *t, unsigned level, unsigned layer) {   // unprotect (and mark written) the storage of one level of one layer
     uint64_t lo = nvn_tex_level_offset(&t->d, level), hi = level + 1 < t->d.levels ? nvn_tex_level_offset(&t->d, level + 1) : t->L.layer_size;
     if (hi <= lo || hi > t->L.layer_size || (uint64_t)layer * t->L.layer_size + hi > t->L.size) return -1;
-    dm_guest_write_prepare(t->mem + (uint64_t)layer * t->L.layer_size + lo, hi - lo);
+    uint8_t *p = t->mem + (uint64_t)layer * t->L.layer_size + lo;
+    if (nvn_sparse_pool(t->pool)) return 0;   // copy_region_bl prepares only physical pages whose bytes change
+    dm_guest_write_prepare(p, hi - lo);
     return 0;
 }
 int nvn_tex_mirror_b2t(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, const uint8_t *src, size_t row, size_t img) {
@@ -2866,7 +3071,11 @@ int nvn_tex_mirror_t2t(const tex_t *s, unsigned sl, unsigned ss, const NVNcopyRe
     int nz = sr->depth ? sr->depth : 1, ok = 1;
     for (int z = 0; z < nz && ok; z++) {
         unsigned layer = ds + (unsigned)(dr->zoffset + z);
-        ok = !nvn_deswizzle(&s->d, sl, ss + (unsigned)(sr->zoffset + z), s->mem, lin, lp) && !mirror_prepare(d, dl, layer) && !write_region_bl(d, dl, layer, dr, lin + y0 * lp + x0, lp, bw, bh, bpb);
+        NVNcopyRegion whole = {0, 0, 0, (int)lw, (int)lh, 1};
+        int read = nvn_sparse_pool(s->pool)
+            ? copy_region_bl(s, sl, ss + (unsigned)(sr->zoffset + z), &whole, lin, lp, bw, bh, bpb, 0)
+            : nvn_deswizzle(&s->d, sl, ss + (unsigned)(sr->zoffset + z), s->mem, lin, lp);
+        ok = !read && !mirror_prepare(d, dl, layer) && !write_region_bl(d, dl, layer, dr, lin + y0 * lp + x0, lp, bw, bh, bpb);
     }
     free(lin);
     return ok ? 0 : -1;

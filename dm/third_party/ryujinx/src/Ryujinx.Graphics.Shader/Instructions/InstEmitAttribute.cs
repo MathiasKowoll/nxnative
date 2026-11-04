@@ -245,6 +245,94 @@ namespace Ryujinx.Graphics.Shader.Instructions
             context.Copy(GetDest(op.Dest), GetSrcReg(context, op.SrcA));
         }
 
+        private const int Nvn2IsbeStorageCbSlot = 0xff;
+        private const int Nvn2IsbeStorageCbOffset = 0xfffc;
+        private const int Nvn2IsbeSpaceStride = 0x10000;
+        private const int Nvn2IsbeFirstMeshOutputSpace = 2;
+        private const int Nvn2IsbeLastMeshOutputSpace = 4;
+        private const int Nvn2IsbeMeshGroupStride = 0x30000;
+        private const int Nvn2IsbeMeshGroupIndexSpace = 5;
+        private const int Nvn2IsbeTaskGroupIndexSpace = 6;
+        private const int Nvn2IsbeObjectBaseWord = 0x10000;
+
+        private static int GetNvn2IsbeBinding(EmitterContext context, bool write)
+        {
+            if (!context.ResourceManager.TryGetStorageBufferBinding(
+                Nvn2IsbeStorageCbSlot,
+                Nvn2IsbeStorageCbOffset,
+                write,
+                out int binding))
+            {
+                throw new System.InvalidOperationException("NVN2 ISBE scratch binding is unavailable");
+            }
+
+            return binding;
+        }
+
+        private static Operand GetNvn2IsbeOffset(EmitterContext context, int srcA, int immediateOffset, int space)
+        {
+            // Each logical ISBE byte receives one uint. This prevents adjacent
+            // u8 mesh-index lanes from racing while retaining the exact packed
+            // address calculated by the original shader.
+            Operand offset = context.IAdd(GetSrcReg(context, srcA), Const(immediateOffset));
+            offset = context.IAdd(offset, Const(space * Nvn2IsbeSpaceStride));
+            if (space >= Nvn2IsbeFirstMeshOutputSpace && space <= Nvn2IsbeLastMeshOutputSpace)
+            {
+                Operand group = context.Load(StorageKind.Input, IoVariable.CtaId, null, Const(0));
+                offset = context.IAdd(offset, context.IMultiply(group, Const(Nvn2IsbeMeshGroupStride)));
+            }
+
+            return offset;
+        }
+
+        private static Operand MaskNvn2IsbeValue(EmitterContext context, Operand value, int width)
+        {
+            return width switch
+            {
+                1 => context.BitwiseAnd(value, Const(0xff)),
+                2 => context.BitwiseAnd(value, Const(0xffff)),
+                4 => value,
+                _ => throw new System.InvalidOperationException($"unsupported NVN2 ISBE width {width}"),
+            };
+        }
+
+        public static void Nvn2IsbeRead(EmitterContext context)
+        {
+            InstNvn2IsbeRead op = context.GetOp<InstNvn2IsbeRead>();
+            if (op.Space == Nvn2IsbeMeshGroupIndexSpace || op.Space == Nvn2IsbeTaskGroupIndexSpace)
+            {
+                if (op.SrcA != RegisterConsts.RegisterZeroIndex || op.ImmediateOffset != 0 || op.Width != 4)
+                {
+                    throw new System.InvalidOperationException("invalid NVN2 mesh group-index operation");
+                }
+
+                Operand group = context.Load(StorageKind.Input, IoVariable.CtaId, null, Const(0));
+                if (op.Space == Nvn2IsbeTaskGroupIndexSpace)
+                {
+                    int scratchBinding = GetNvn2IsbeBinding(context, write: false);
+                    Operand first = context.Load(StorageKind.StorageBuffer, scratchBinding, Const(0), Const(Nvn2IsbeObjectBaseWord));
+                    group = context.IAdd(group, first);
+                }
+
+                context.Copy(GetDest(op.Dest), group);
+                return;
+            }
+
+            int binding = GetNvn2IsbeBinding(context, write: false);
+            Operand offset = GetNvn2IsbeOffset(context, op.SrcA, op.ImmediateOffset, op.Space);
+            Operand value = context.Load(StorageKind.StorageBuffer, binding, Const(0), offset);
+            context.Copy(GetDest(op.Dest), MaskNvn2IsbeValue(context, value, op.Width));
+        }
+
+        public static void Nvn2IsbeWrite(EmitterContext context)
+        {
+            InstNvn2IsbeWrite op = context.GetOp<InstNvn2IsbeWrite>();
+            int binding = GetNvn2IsbeBinding(context, write: true);
+            Operand offset = GetNvn2IsbeOffset(context, op.SrcA, op.ImmediateOffset, op.Space);
+            Operand value = MaskNvn2IsbeValue(context, GetSrcReg(context, op.SrcB), op.Width);
+            context.Store(StorageKind.StorageBuffer, binding, Const(0), offset, value);
+        }
+
         public static void OutR(EmitterContext context)
         {
             InstOutR op = context.GetOp<InstOutR>();

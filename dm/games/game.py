@@ -150,6 +150,8 @@ def header(g):
     if tds not in ('on', 'off'): sys.exit(f'{g.id}: tex_dyn_slots must be on or off: {tds}')
     tgl = g.get('texture_gob_layout', 'nx1')   # intra-GOB byte ordering of block-linear textures: Tegra X1 / Switch 1, or the native Switch 2 ordering
     if tgl not in ('nx1', 'nx2'): sys.exit(f'{g.id}: texture_gob_layout must be nx1 or nx2: {tgl}')
+    nsp = g.get('native_sparse', 'off')   # sampled textures in sparse virtual pools use Metal's native 64 KiB sparse backing instead of a full allocation: on / off
+    if nsp not in ('on', 'off'): sys.exit(f'{g.id}: native_sparse must be on or off: {nsp}')
     sabi = g.get('shader_abi', 'nvn1')   # shader control / binding ABI: classic NVN, or compact NVN2 (kept explicit so captures from the two generations cannot share a profile)
     if sabi not in ('nvn1', 'nvn2'): sys.exit(f'{g.id}: shader_abi must be nvn1 or nvn2: {sabi}')
     if sabi == 'nvn2' and tgl != 'nx2': sys.exit(f'{g.id}: shader_abi nvn2 needs texture_gob_layout nx2')
@@ -210,6 +212,7 @@ def header(g):
          f'#define DM_GAME_TEX_DIRTY_UPLOAD {int(tdu == "on")}',
          f'#define DM_GAME_TEX_DYN_SLOTS {int(tds == "on")}',
          f'#define DM_GAME_TEX_GOB_NX2 {int(tgl == "nx2")}',
+         f'#define DM_GAME_NATIVE_SPARSE {int(nsp == "on")}',
          f'#define DM_GAME_SHADER_ABI_NVN2 {int(sabi == "nvn2")}',
          f'#define DM_GAME_GPU_TS_SEGMENT {int(gts == "segment")}',
          f'#define DM_GAME_UPSCALER_KEYS {q(",".join(ups))}', f'#define DM_GAME_UPSCALER_N {len(ups)}',

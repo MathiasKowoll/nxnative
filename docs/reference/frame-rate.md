@@ -361,6 +361,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Found on:** Batman: Arkham Knight (`0100ACD0163D0000`; profile not present here), reported in [PR #321](https://github.com/seedds/nxnative/pull/321). The author's gameplay measurements have not been independently reproduced here.
 - **Check:** on an M4 Pro, three runs of one million misses with 6,442 consecutive serials and the same mutex took 1,693–1,707 ms with the callback-free CFSet and 9.6–10.0 ms with `nvn_hmap`. `t_cpu_tex` checks membership, duplicates, release, late dirty-page marking, pool cleanup and lookup cost without a GPU; `--metal` also records a texture-to-buffer copy and descriptor registration, writes before or after recording, finalizes and overwrites the API object, and verifies the pixels on replay. The PR's unconditional deletion failed four pixel checks; preserving retired classification passes them.
 
+### Sparse texture checks repeatedly scan every memory pool
+
+- **Symptom:** sparse render readbacks and texture resolution consume much more CPU time than the GPU spends drawing; `sample` repeatedly finds `find_span` inside `nvn_dirty_protect` and `nvn_sparse_since` inside texture resolution.
+- **Cause:** each run of physical pages scans every registered pool to locate its dirty-page metadata. Pending texture mirrors also walk every mapped page just to ask whether mappings changed, even when the global mapping generation is unchanged.
+- **Fix:** `find_span` retains the last range per thread and rechecks its live flag and bounds before reusing it; range slots never move, and retired/reused slots are still validated. Mapping-only sparse checks validate the virtual pool under its mutex and return immediately when its mapping generation is current. They do not inspect physical dirty stamps when only mapping changes were requested. Actual CPU writes and changed mappings still invalidate textures.
+- **Check:** `t_dirty_slots`, `t_dirty_race`, `t_dirty_retire_race` and `t_sparse_texture_mirror` exercise retirement, reused/overlapping ranges, write publication, unrelated mapping changes and later physical writes. Game-specific measurements are in the linked note.
+- **Found on:** [Mario Kart World, experimental bring-up](../investigations/mario-kart-world.md#current-metal-validation-2026-11-02).
+
 ### Geometry boundaries submit prepared work early
 
 - **Symptom:** several milliseconds of CPU translation and geometry preparation separate one frame's GPU end from the next frame's GPU start, even though the frame already contains complete geometry passes.

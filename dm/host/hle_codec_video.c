@@ -2,7 +2,8 @@
 // does not serve: nn::codec::video::Initialize crashed in it (Donkey Kong Bananza, sdk+0x2de99c, after its first punch, when the guide movie starts). The SDK's protocol, read from
 // its implementation (sdk 20.5.19 Ounce):
 //   - the client makes one image pool per output picture (MakeDecodeImagePreference → CalculateDecoderImagePoolBuffer → InitializeDecoderImagePool) and registers each with the
-//     decoder under an index (RegisterVp9DecoderBuffer). Registering puts the index in the decoder's queue of acquirable buffers (8 deep), with a sync handle already signalled.
+//     decoder under an index (RegisterVp9DecoderBuffer). Registering puts the index in both the acquirable and fill queues (8 deep): its first sync handle signals when the first
+//     picture has been written.
 //   - Acquire takes the oldest index and its sync handle (description 3604 when the queue is empty); ReleaseVp9DecoderOutputBuffer gives the buffer to the decoder to fill and puts
 //     it back in the queue at once, with a new sync handle that signals when the decoder has written a picture into it. The client polls nn::gs::TryWaitNativeSync on that handle,
 //     then reads the picture's properties (description 3604 until it is filled) and the picture (ReadDecoderOutputImageRgba / Nv12, the CPU route; Bananza's player takes that one)
@@ -27,7 +28,8 @@
 #define CV_SYNC 0x53436d44u         // 'DmCS': a sync handle the host made (dec id, index, generation)
 #define CV_BUFS 32
 #define CV_HOLD 4                   // decoded pictures waiting for a released buffer
-#define CV_EVENT_OFF 0x100          // the submission-ready SystemEventType inside the decoder type
+#define CV_EVENT_OFF20 8            // the submission-ready SystemEventType inside the SDK 20 decoder type
+#define CV_EVENT_OFF22 0x100        // room reserved for the host event in SDK 22's larger decoder type
 #define CV_R(desc) ((Result)(0x6f | ((desc) << 9)))   // nn::codec results (module 111)
 #define CV_BUSY CV_R(3603)          // the decoder cannot take the packet now
 #define CV_NONE CV_R(3604)          // no buffer to acquire / no picture in the buffer yet
@@ -213,7 +215,7 @@ static void cv_open(cv_dec *d) {   // (re)creates the codec state: a new stream 
     d->vpx_ok = vpx_codec_dec_init(&d->vpx, d->codec == CV_VP8 ? vpx_codec_vp8_dx() : vpx_codec_vp9_dx(), &cfg, 0) == VPX_CODEC_OK;
     if (!d->vpx_ok) LOG("[RED] nn::codec %s decoder: libvpx init failed", k_cv_name[d->codec]);
 }
-static Result cv_dec_init(void *t, int codec, uint16_t w, uint16_t h, uint32_t in, uint32_t out, const void *csd, uint64_t csd_n) {
+static Result cv_dec_init(void *t, int codec, uint16_t w, uint16_t h, uint32_t in, uint32_t out, const void *csd, uint64_t csd_n, size_t event_off) {
     cv_dec *d = calloc(1, sizeof *d);
     d->magic = CV_MAGIC; d->codec = codec; d->w = w; d->h = h; pthread_mutex_init(&d->mu, NULL);
     if (csd && csd_n && csd_n < (1u << 20)) { d->csd = malloc((size_t)csd_n); memcpy(d->csd, csd, (size_t)csd_n); d->csd_n = (size_t)csd_n; }
@@ -222,7 +224,7 @@ static Result cv_dec_init(void *t, int codec, uint16_t w, uint16_t h, uint32_t i
     for (int i = 0; i < 16; i++) if (!g_cv[i]) { g_cv[i] = d; d->id = (uint32_t)i + 1; break; }
     pthread_mutex_unlock(&g_cv_mu);
     if (!d->id) die("nn::codec: more than 16 video decoders");
-    d->event = (uint8_t *)t + CV_EVENT_OFF; hle_bind_system_event(d->event, 0); hle_signal_system_event(d->event);
+    d->event = (uint8_t *)t + event_off; hle_bind_system_event(d->event, 1); hle_clear_system_event(d->event);
     *(cv_dec **)t = d;
     LOG("[codec] %s decoder %u: %ux%u, input format %u, output format %u%s (%s on the host)", k_cv_name[codec], d->id, w, h, in, out,
         d->csd_n ? ", with parameter sets" : "", codec == CV_AV1 ? mav1_backend(d->av1) : codec == CV_H264 ? "VideoToolbox" : "libvpx");
@@ -246,7 +248,8 @@ static Result cv_dec_fin(void *t) {
 static Result cv_dec_reg(void *t, uint32_t i, void *pool, uint32_t pidx) {
     cv_dec *d = cv_of(t); if (!d || i >= CV_BUFS) { LOG("[RED] nn::codec::Register…DecoderBuffer index %u", i); return CV_R(2004); }
     pthread_mutex_lock(&d->mu);
-    d->buf[i].pool = pool_of(pool); d->buf[i].pidx = pidx; d->buf[i].reg = 1; d->buf[i].filled = 0; d->buf[i].gen = 0; d->buf[i].filled_gen = 0;
+    d->buf[i].pool = pool_of(pool); d->buf[i].pidx = pidx; d->buf[i].reg = 1; d->buf[i].filled = 0; d->buf[i].gen = 1; d->buf[i].filled_gen = 0;
+    if (d->pcount < CV_BUFS) { d->pend[(d->phead + d->pcount) % CV_BUFS] = i; d->pcount++; }
     if (d->fcount < 8) { d->fifo[(d->fhead + d->fcount) % 8] = i; d->fcount++; } else LOG("[RED] nn::codec: acquirable queue full at register %u", i);
     pthread_mutex_unlock(&d->mu);
     return 0;
@@ -273,6 +276,11 @@ static Result cv_dec_reset(void *t) {   // Stop / Flush: pictures not yet given 
     cv_open(d);
     if (d->event) hle_signal_system_event(d->event);
     pthread_mutex_unlock(&d->mu);
+    return 0;
+}
+static Result cv_dec_start(void *t) {
+    cv_dec *d = cv_of(t); if (!d) return CV_R(2004);
+    hle_signal_system_event(d->event);
     return 0;
 }
 static Result cv_dec_event(void **out, void *t) { cv_dec *d = cv_of(t); *out = d ? d->event : NULL; return d ? 0 : CV_R(2004); }
@@ -352,16 +360,23 @@ static Result cv_dec_props(uint16_t *w, uint16_t *h, uint16_t *cw, uint16_t *ch,
     pthread_mutex_unlock(&d->mu);
     return ok ? 0 : CV_NONE;
 }
+// SDK 20.5's original property entry points also return movie::ColorSpace before the timestamp. Later SDKs removed it from the ABI. The old SDK writes 0 for the
+// 8-bit YUV pictures served here; keep both forms so games built against either SDK stay on the host decoder instead of opening the real codec service.
+static Result cv_dec_props20(uint16_t *w, uint16_t *h, uint16_t *cw, uint16_t *ch, uint32_t *color, int64_t *ts, bool *eos, void *t, uint32_t i) {
+    Result r = cv_dec_props(w, h, cw, ch, ts, eos, t, i);
+    if (!r && color) *color = 0;
+    return r;
+}
 static Result cv_dec_encrypted(void) { static int once; if (!once++) LOG("[RED] nn::codec: an encrypted input buffer: protected streams are not served"); return CV_R(2004); }
 // Each decoder type's entry points, by their names in the SDK (the work buffer, the two Initialize overloads without the H.264 parameter sets, …)
 #define CV_FAMILY(tag, codec, s_work, s_init, s_init2, s_fin, s_reg, s_unreg, s_start, s_stop, s_flush, s_ev, s_sub, s_enc, s_acq, s_rel, s_props) \
     HLE_FORCE(s_work, "the host decoder needs no work memory", Result, h_cv_##tag##work, uint64_t *size, uint64_t *align, uint64_t bs, uint16_t w, uint16_t h) { (void)bs; (void)w; (void)h; *size = 0x1000; *align = 0x1000; return 0; } \
-    HLE_FORCE(s_init, "decoded on the host", Result, h_cv_##tag##init, void *t, void *work, uint64_t wsize, uint64_t bs, uint16_t w, uint16_t h, uint32_t refs, uint32_t in, uint32_t out) { (void)work; (void)wsize; (void)bs; (void)refs; return cv_dec_init(t, codec, w, h, in, out, NULL, 0); } \
-    HLE_FORCE(s_init2, "decoded on the host", Result, h_cv_##tag##init2, void *t, uint64_t bs, uint16_t w, uint16_t h, uint32_t refs, uint32_t in, uint32_t out) { (void)bs; (void)refs; return cv_dec_init(t, codec, w, h, in, out, NULL, 0); } \
+    HLE_FORCE(s_init, "decoded on the host", Result, h_cv_##tag##init, void *t, void *work, uint64_t wsize, uint64_t bs, uint16_t w, uint16_t h, uint32_t refs, uint32_t in, uint32_t out) { (void)work; (void)wsize; (void)bs; (void)refs; return cv_dec_init(t, codec, w, h, in, out, NULL, 0, CV_EVENT_OFF20); } \
+    HLE_FORCE(s_init2, "decoded on the host", Result, h_cv_##tag##init2, void *t, uint64_t bs, uint16_t w, uint16_t h, uint32_t refs, uint32_t in, uint32_t out) { (void)bs; (void)refs; return cv_dec_init(t, codec, w, h, in, out, NULL, 0, CV_EVENT_OFF20); } \
     HLE_FORCE(s_fin, "frees the host decoder", Result, h_cv_##tag##fin, void *t) { return cv_dec_fin(t); } \
     HLE_FORCE(s_reg, "a buffer of the host decoder, acquirable at once", Result, h_cv_##tag##reg, void *t, uint32_t i, void *pool, uint32_t pidx) { return cv_dec_reg(t, i, pool, pidx); } \
     HLE_FORCE(s_unreg, "the buffer leaves the host decoder", Result, h_cv_##tag##unreg, void *t, uint32_t i) { return cv_dec_unreg(t, i); } \
-    HLE_FORCE(s_start, "the host decoder decodes on submission", Result, h_cv_##tag##start, void *t) { (void)t; return 0; } \
+    HLE_FORCE(s_start, "signals that the host decoder accepts packets", Result, h_cv_##tag##start, void *t) { return cv_dec_start(t); } \
     HLE_FORCE(s_stop, "drops undelivered pictures", Result, h_cv_##tag##stop, void *t) { return cv_dec_reset(t); } \
     HLE_FORCE(s_flush, "drops undelivered pictures", Result, h_cv_##tag##flush, void *t) { return cv_dec_reset(t); } \
     HLE_FORCE(s_ev, "signalled while the host decoder takes packets", Result, h_cv_##tag##event, void **out, void *t) { return cv_dec_event(out, t); } \
@@ -412,16 +427,47 @@ CV_FAMILY(av1, CV_AV1, "_ZN2nn5codec29CalculateAv1DecoderWorkBufferEPmS1_mtt",
     "_ZN2nn5codec29AcquireAv1DecoderOutputBufferEPjPNS_2gs16NativeSyncHandleEPNS0_14Av1DecoderTypeE", "_ZN2nn5codec29ReleaseAv1DecoderOutputBufferEPNS0_14Av1DecoderTypeEjNS_2gs16NativeSyncHandleE",
     "_ZN2nn5codec35GetAv1DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_8TimeSpanEPbPNS0_14Av1DecoderTypeEj")
 #undef CV_FAMILY
+
+// SDK 20.5 compatibility. Its remote-memory initializers carry two size_t values before width and height (the newer overload above carries one), and its property calls include
+// movie::ColorSpace. Mario Kart World imports these exact forms; leaving them in the SDK reaches nx2:codec through SVC SendSyncRequest after the first decoded picture.
+#define CV_SDK20_COMPAT(tag, codec, s_init, s_props) \
+    HLE_FORCE(s_init, "decoded on the host (SDK 20.5 remote-memory form)", Result, h_cv_##tag##init20, void *t, uint64_t a, uint64_t b, uint16_t w, uint16_t h, uint32_t refs, uint32_t in, uint32_t out) { \
+        (void)a; (void)b; (void)refs; return cv_dec_init(t, codec, w, h, in, out, NULL, 0, CV_EVENT_OFF20); \
+    } \
+    HLE_FORCE(s_props, "the filled buffer's picture size, color space, time and end of stream (SDK 20.5 form)", Result, h_cv_##tag##props20, \
+              uint16_t *w, uint16_t *h, uint16_t *cw, uint16_t *ch, uint32_t *color, int64_t *ts, bool *eos, void *t, uint32_t i) { \
+        return cv_dec_props20(w, h, cw, ch, color, ts, eos, t, i); \
+    }
+CV_SDK20_COMPAT(vp9, CV_VP9,
+    "_ZN2nn5codec20InitializeVp9DecoderEPNS0_14Vp9DecoderTypeEmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatE",
+    "_ZN2nn5codec35GetVp9DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_14Vp9DecoderTypeEj")
+CV_SDK20_COMPAT(vp8, CV_VP8,
+    "_ZN2nn5codec20InitializeVp8DecoderEPNS0_14Vp8DecoderTypeEmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatE",
+    "_ZN2nn5codec35GetVp8DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_14Vp8DecoderTypeEj")
+CV_SDK20_COMPAT(av1, CV_AV1,
+    "_ZN2nn5codec20InitializeAv1DecoderEPNS0_14Av1DecoderTypeEmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatE",
+    "_ZN2nn5codec35GetAv1DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_14Av1DecoderTypeEj")
+#undef CV_SDK20_COMPAT
+HLE_FORCE("_ZN2nn5codec21InitializeH264DecoderEPNS0_15H264DecoderTypeEmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatEPKvm",
+          "decoded with VideoToolbox on the host (SDK 20.5 remote-memory form)", Result, h_cv_h264init20, void *t, uint64_t a, uint64_t b, uint16_t w, uint16_t h,
+          uint32_t refs, uint32_t in, uint32_t out, const void *csd, uint64_t csd_n) {
+    (void)a; (void)b; (void)refs; return cv_dec_init(t, CV_H264, w, h, in, out, csd, csd_n, CV_EVENT_OFF20);
+}
+HLE_FORCE("_ZN2nn5codec36GetH264DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_15H264DecoderTypeEj",
+          "the filled buffer's picture size, color space, time and end of stream (SDK 20.5 form)", Result, h_cv_h264props20,
+          uint16_t *w, uint16_t *h, uint16_t *cw, uint16_t *ch, uint32_t *color, int64_t *ts, bool *eos, void *t, uint32_t i) {
+    return cv_dec_props20(w, h, cw, ch, color, ts, eos, t, i);
+}
 HLE_FORCE("_ZN2nn5codec21InitializeH264DecoderEPNS0_15H264DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeEPKvm",
           "decoded with VideoToolbox on the host", Result, h_cv_h264init3, void *t, void *work, uint64_t wsize, uint64_t bs, uint64_t w, uint64_t h, uint32_t refs, uint32_t in, uint64_t out,
           uint64_t mode, const void *csd, uint64_t csd_n) {   // past the registers: 8-byte slots, as the SDK 22 forms below
-    (void)work; (void)wsize; (void)bs; (void)refs; (void)mode; return cv_dec_init(t, CV_H264, (uint16_t)w, (uint16_t)h, in, (uint32_t)out, csd, csd_n);
+    (void)work; (void)wsize; (void)bs; (void)refs; (void)mode; return cv_dec_init(t, CV_H264, (uint16_t)w, (uint16_t)h, in, (uint32_t)out, csd, csd_n, CV_EVENT_OFF22);
 }
 // SDK 22's forms of the entry points (the movie module's), for every codec. ByTransferMemory has ten arguments and ByRemoteMemory eight (H.264 two more: the parameter sets): past the eight registers
 // the guest's AAPCS64 gives each its own 8-byte slot where Apple's arm64 packs them, so those are declared 64 bits wide; the 16-bit size arguments are masked, as the guest does not extend them
 #define CV_SDK22(tag, codec, s_tm, s_rm, s_ev) \
-    HLE_FORCE(s_tm, "decoded on the host", Result, h_cv_##tag##tm, void *t, void *work, uint64_t wsize, uint64_t bs, uint64_t w, uint64_t h, uint32_t refs, uint32_t in, uint64_t out, uint64_t mode) { (void)work; (void)wsize; (void)bs; (void)refs; (void)mode; return cv_dec_init(t, codec, (uint16_t)w, (uint16_t)h, in, (uint32_t)out, NULL, 0); } \
-    HLE_FORCE(s_rm, "decoded on the host", Result, h_cv_##tag##rm, void *t, uint64_t bs, uint64_t w, uint64_t h, uint32_t refs, uint32_t in, uint32_t out, uint32_t mode) { (void)bs; (void)refs; (void)mode; return cv_dec_init(t, codec, (uint16_t)w, (uint16_t)h, in, out, NULL, 0); } \
+    HLE_FORCE(s_tm, "decoded on the host", Result, h_cv_##tag##tm, void *t, void *work, uint64_t wsize, uint64_t bs, uint64_t w, uint64_t h, uint32_t refs, uint32_t in, uint64_t out, uint64_t mode) { (void)work; (void)wsize; (void)bs; (void)refs; (void)mode; return cv_dec_init(t, codec, (uint16_t)w, (uint16_t)h, in, (uint32_t)out, NULL, 0, CV_EVENT_OFF22); } \
+    HLE_FORCE(s_rm, "decoded on the host", Result, h_cv_##tag##rm, void *t, uint64_t bs, uint64_t w, uint64_t h, uint32_t refs, uint32_t in, uint32_t out, uint32_t mode) { (void)bs; (void)refs; (void)mode; return cv_dec_init(t, codec, (uint16_t)w, (uint16_t)h, in, out, NULL, 0, CV_EVENT_OFF22); } \
     HLE_FORCE(s_ev, "signalled while the host decoder takes packets", void *, h_cv_##tag##ev22, void *t) { cv_dec *d = cv_of(t); return d ? d->event : NULL; }
 CV_SDK22(vp9, CV_VP9, "_ZN2nn5codec36InitializeVp9DecoderByTransferMemoryEPNS0_14Vp9DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE",
     "_ZN2nn5codec34InitializeVp9DecoderByRemoteMemoryEPNS0_14Vp9DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE",
@@ -435,11 +481,11 @@ CV_SDK22(av1, CV_AV1, "_ZN2nn5codec36InitializeAv1DecoderByTransferMemoryEPNS0_1
 #undef CV_SDK22
 HLE_FORCE("_ZN2nn5codec37InitializeH264DecoderByTransferMemoryEPNS0_15H264DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeEPKvm",
           "decoded with VideoToolbox on the host", Result, h_cv_h264tm, void *t, void *work, uint64_t wsize, uint64_t bs, uint64_t w, uint64_t h, uint32_t refs, uint32_t in, uint64_t out, uint64_t mode, const void *csd, uint64_t csd_n) {
-    (void)work; (void)wsize; (void)bs; (void)refs; (void)mode; return cv_dec_init(t, CV_H264, (uint16_t)w, (uint16_t)h, in, (uint32_t)out, csd, csd_n);
+    (void)work; (void)wsize; (void)bs; (void)refs; (void)mode; return cv_dec_init(t, CV_H264, (uint16_t)w, (uint16_t)h, in, (uint32_t)out, csd, csd_n, CV_EVENT_OFF22);
 }
 HLE_FORCE("_ZN2nn5codec35InitializeH264DecoderByRemoteMemoryEPNS0_15H264DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeEPKvm",
           "decoded with VideoToolbox on the host", Result, h_cv_h264rm, void *t, uint64_t bs, uint64_t w, uint64_t h, uint32_t refs, uint32_t in, uint32_t out, uint32_t mode, const void *csd, uint64_t csd_n) {
-    (void)bs; (void)refs; (void)mode; return cv_dec_init(t, CV_H264, (uint16_t)w, (uint16_t)h, in, out, csd, csd_n);
+    (void)bs; (void)refs; (void)mode; return cv_dec_init(t, CV_H264, (uint16_t)w, (uint16_t)h, in, out, csd, csd_n, CV_EVENT_OFF22);
 }
 HLE_FORCE("_ZN2nn5codec34GetH264DecoderSubmissionReadyEventEPNS0_15H264DecoderTypeE", "signalled while the host decoder takes packets", void *, h_cv_h264ev22, void *t) { cv_dec *d = cv_of(t); return d ? d->event : NULL; }
 // The host's sync handles signal when their buffer holds the picture of that release; a handle the host did not make (another nn::gs user) reads as signalled
@@ -460,6 +506,11 @@ HLE_FORCE("_ZN2nn6syncpt3sdk20CreateSyncPointEventEPNS1_18SyncPointEventTypeE", 
     memset(e, 0, 0x58); hle_bind_system_event(e, 0); SPT(e)->magic = CV_SYNC;
     return 0;
 }
+HLE_FORCE("_ZN2nn6syncpt3sdk21TryWaitSyncPointEventEPKNS1_18SyncPointEventTypeE", "the host-bound SystemEvent state", bool, h_spt_trywait, const void *e) {
+    static bool (*trywait)(void *);
+    if (!trywait && !(trywait = guest_sym("_ZN2nn2os18TryWaitSystemEventEPNS0_15SystemEventTypeE"))) die("nn::os::TryWaitSystemEvent missing");
+    return trywait((void *)e);
+}
 HLE_FORCE("_ZN2nn6syncpt3sdk25InitializeMultiWaitHolderEPNS_2os19MultiWaitHolderTypeEPNS1_18SyncPointEventTypeE", "links the event's SystemEvent", void, h_spt_holder, void *holder, void *e) {
     static void (*init)(void *, void *); if (!init && !(init = guest_sym("_ZN2nn2os25InitializeMultiWaitHolderEPNS0_19MultiWaitHolderTypeEPNS0_15SystemEventTypeE"))) die("nn::os::InitializeMultiWaitHolder(SystemEventType) missing");
     init(holder, e);
@@ -473,7 +524,7 @@ HLE_FORCE("_ZN2nn6syncpt3sdk21RequestSyncPointEventEPNS1_18SyncPointEventTypeERK
     if (sync_reached(s)) { spt_unarm(e); hle_signal_system_event(e); }
     return 0;
 }
-HLE_FORCE("_ZN2nn6syncpt3sdk20CancelSyncPointEventEPNS1_18SyncPointEventTypeE", "disarms the event", void, h_spt_cancel, void *e) { spt_unarm(e); hle_clear_system_event(e); }
+HLE_FORCE("_ZN2nn6syncpt3sdk20CancelSyncPointEventEPNS1_18SyncPointEventTypeE", "disarms and signals the event, as the sync point service does", void, h_spt_cancel, void *e) { spt_unarm(e); hle_signal_system_event(e); }
 HLE_FORCE("_ZN2nn6syncpt3sdk21DestroySyncPointEventEPNS1_18SyncPointEventTypeE", "destroys the event's SystemEvent", void, h_spt_destroy, void *e) {
     spt_unarm(e);
     static void (*destroy)(void *); if (!destroy && !(destroy = guest_sym("_ZN2nn2os18DestroySystemEventEPNS0_15SystemEventTypeE"))) die("nn::os::DestroySystemEvent missing");

@@ -277,6 +277,13 @@ namespace Ryujinx.Graphics.Shader.Instructions
             int hb = sb + 0x10 * ssbos;
             int ib = hb + 8 * textures;
 
+            // Native launch counts occupy c0[4, 8, 12]; the host's canonical
+            // compute table stores those three words at 0x200 (DMSH_C0_DISPATCH).
+            if (offset >= 4 && offset < 0x10)
+            {
+                return (0, 0x200 + offset - 4);
+            }
+
             if (offset >= 0x10 && offset < ub)
             {
                 return (24, offset - 0x10);

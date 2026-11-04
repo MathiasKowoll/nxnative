@@ -29,7 +29,7 @@ class HostMSL(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        for name in ('dm/host/Makefile', 'dm/mac/min_os.mk', 'dm/gfx/tests/Makefile', 'dm/gfx/tools/host_msl.py', f'dm/games/{GAME}/game.tsv'):
+        for name in ('dm/host/Makefile', 'dm/mac/min_os.mk', 'dm/gfx/tests/Makefile', 'dm/gfx/tools/host_msl.py', 'dm/gfx/nvn/dmsh_chain.h', f'dm/games/{GAME}/game.tsv'):
             dst = self.root / name
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(REPO / name, dst)
@@ -172,9 +172,10 @@ class HostMSL(unittest.TestCase):
             else:
                 self.assertTrue(self.header.is_file(), 'direct clang needs the header before its first compile')
                 builds.append(cmd)
-                out.write_bytes(b'host executable')
+                out.write_text('host executable ' + nsp.chain_of(self.root))
 
         def command(cmd, **kw):
+            if cmd[0] == '/usr/bin/strings': return NS(returncode=0, stdout=nsp.chain_of(self.root) + '\n', stderr='')
             return NS(returncode=0, stdout='clang -o dmhost main.c\n' if cmd[0] == 'make' else 'test toolchain', stderr='')
 
         with patch.object(nsp, 'apple_silicon', return_value=True), patch.object(nsp, 'run', side_effect=run), patch.object(nsp.subprocess, 'run', side_effect=command):
@@ -200,8 +201,9 @@ class HostMSL(unittest.TestCase):
         def run(cmd, log, env=None, cwd=None):
             if cmd[0] != 'make':
                 builds.append(cmd)
-                out.write_bytes(f'host {len(builds)}'.encode())
+                out.write_text(f'host {len(builds)} {nsp.chain_of(self.root)}')
         def command(cmd, **kw):
+            if cmd[0] == '/usr/bin/strings': return NS(returncode=0, stdout=nsp.chain_of(self.root) + '\n', stderr='')
             return NS(returncode=0, stdout='clang -o dmhost main.c\n' if cmd[0] == 'make' else toolchain[0], stderr='')
         with patch.object(nsp, 'apple_silicon', return_value=True), patch.object(nsp, 'run', side_effect=run), patch.object(nsp.subprocess, 'run', side_effect=command):
             def build(): return nsp.build_mac_host(self.root, out, self.env, logs, NS(id=GAME))
