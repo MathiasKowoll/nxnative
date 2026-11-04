@@ -140,6 +140,11 @@ class Main(Base):
         with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), self.assertRaisesRegex(nsp.BuildError, 'which holds'):
             nsp.main(nsp.parse_args([str(self.dump), '--title-id', '0100000000010000']))
 
+    def test_missing_icon_override_is_refused_before_build(self):
+        missing = self.dump.parent / 'missing-icon.png'
+        with mock.patch.object(nsp, 'find_repo', return_value=REPO), self.assertRaisesRegex(nsp.BuildError, 'no app icon file'):
+            nsp.main(nsp.parse_args([str(self.dump), '--icon', str(missing)]))
+
     def test_no_profile_refused(self):
         d = self.dump.parent / 'unknown'; version(d / 'base', tid=0x0400000000000000)
         with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), self.assertRaisesRegex(nsp.BuildError, 'has none'):
