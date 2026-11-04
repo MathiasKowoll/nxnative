@@ -138,8 +138,8 @@ struct ConsoleCommandBar: View {
                 if model.gamepad.showsControllerPrompts {
                     HStack(spacing: 16) {
                         Text("Cruceta / stick: elegir y cambiar")
+                        Text(model.gamepad.family.triggers + " · cambiar vista")
                         command(model.gamepad.primaryPrompt, key: "↩", title: "Aceptar")
-                        command(model.gamepad.configurationPrompt, key: "T", title: "Vista del Taller")
                     }
                     .font(.caption).foregroundStyle(.secondary)
                 } else {

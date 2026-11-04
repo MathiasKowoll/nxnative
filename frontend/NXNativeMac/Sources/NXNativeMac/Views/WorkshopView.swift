@@ -115,7 +115,7 @@ struct WorkshopView: View {
             Spacer()
             VStack(alignment: .trailing, spacing: 3) {
                 Text("\(model.builds.pendingCount) en cola / en curso")
-                Text(model.builds.memoryPressure ? "Esperando: presión de memoria" : "1 build a la vez · hasta 2 trabajadores")
+                Text(model.builds.memoryPressure ? "Esperando: presión de memoria" : "1 build a la vez · hasta 6 trabajadores")
                     .foregroundStyle(model.builds.memoryPressure ? .orange : .secondary)
                 Text(model.gamepad.showsControllerPrompts ? "\(model.gamepad.family.triggers) · cambiar sección" : "T · cambiar sección")
                     .foregroundStyle(.secondary)

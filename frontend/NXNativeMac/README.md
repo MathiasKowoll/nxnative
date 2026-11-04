@@ -208,8 +208,9 @@ explicit retry. **Herramientas** adds source folders and keys, rescans, and open
 the existing advanced installer/profile/save workflows.
 
 The D-pad or left stick moves between rows; left/right changes a row's value;
-the confirmation button activates it. Triangle / Switch X / Xbox Y cycles the
-three Workshop views. The keyboard uses arrows, Enter, T and Esc. Mouse users
+the confirmation button activates it. L2/R2, ZL/ZR or LT/RT move backward and
+forward through the three Workshop views. The top face button remains a forward
+shortcut. The keyboard uses arrows, Enter, T and Esc. Mouse users
 can activate rows, adjustment buttons and tabs directly. macOS file selectors
 and the legacy advanced forms retain their native keyboard/mouse interaction.
 Build, retry and cancellation confirmations start on Back and are operable with

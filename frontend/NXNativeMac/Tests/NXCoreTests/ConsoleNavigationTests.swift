@@ -66,4 +66,20 @@ struct ConsoleNavigationTests {
         #expect(xbox.primary == "A")
         #expect(!xbox.confirmOnRight)
     }
+
+    @Test func analogueTriggerEmitsOncePerPull() {
+        var latch = ConsoleTriggerLatch()
+        let idle = latch.update(value: 0.2, pressed: false)
+        let pulled = latch.update(value: 0.7, pressed: false)
+        let held = latch.update(value: 0.5, pressed: false)
+        let released = latch.update(value: 0.3, pressed: false)
+        let pressedFallback = latch.update(value: 0.0, pressed: true)
+        let finalRelease = latch.update(value: 0.0, pressed: false)
+        #expect(!idle)
+        #expect(pulled)
+        #expect(!held)
+        #expect(!released)
+        #expect(pressedFallback)
+        #expect(!finalRelease)
+    }
 }

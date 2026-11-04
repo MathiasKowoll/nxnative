@@ -3,6 +3,21 @@ public enum ConsoleAction: Equatable, Sendable {
     case left, right, up, down, primary, configure, back, previousTab, nextTab, previousSection, nextSection, closeGame
 }
 
+/// Turns an analogue trigger into one action per pull. Some controllers do not
+/// reliably change GCControllerButtonInput.isPressed, but do report their value.
+public struct ConsoleTriggerLatch: Sendable {
+    private var held = false
+    public init() {}
+
+    public mutating func update(value: Float, pressed: Bool) -> Bool {
+        // Separate pull and release thresholds prevent an analogue trigger
+        // hovering around its midpoint from changing section more than once.
+        let next = pressed || value >= (held ? 0.35 : 0.55)
+        defer { held = next }
+        return next && !held
+    }
+}
+
 public enum ConsolePage: String, CaseIterable, Identifiable, Sendable {
     case games, settings, log, saves, advanced, environment, developer, tools
     public var id: Self { self }

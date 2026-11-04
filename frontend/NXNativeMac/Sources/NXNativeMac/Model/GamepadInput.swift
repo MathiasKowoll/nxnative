@@ -109,8 +109,8 @@ final class GamepadInput {
             bind(button: pad.buttonY, action: .configure, controller: controller)
             bind(button: pad.leftShoulder, action: .previousTab, controller: controller)
             bind(button: pad.rightShoulder, action: .nextTab, controller: controller)
-            bind(button: pad.leftTrigger, action: .previousSection, controller: controller)
-            bind(button: pad.rightTrigger, action: .nextSection, controller: controller)
+            bind(trigger: pad.leftTrigger, action: .previousSection, controller: controller)
+            bind(trigger: pad.rightTrigger, action: .nextSection, controller: controller)
             bind(comboButton: pad.buttonOptions, role: .select, controller: controller)
             bind(comboButton: pad.buttonMenu, role: .start, controller: controller)
             if let dualSense = pad as? GCDualSenseGamepad {
@@ -142,6 +142,17 @@ final class GamepadInput {
     private func bind(button: GCControllerButtonInput, action: Action, controller: GCController) {
         button.pressedChangedHandler = { [weak self, weak controller] _, _, pressed in
             guard pressed else { return }
+            Task { @MainActor in
+                if let controller { self?.updatePrompts(controller) }
+                self?.emit(action)
+            }
+        }
+    }
+
+    private func bind(trigger: GCControllerButtonInput, action: Action, controller: GCController) {
+        var latch = ConsoleTriggerLatch()
+        trigger.valueChangedHandler = { [weak self, weak controller] _, value, pressed in
+            guard latch.update(value: value, pressed: pressed) else { return }
             Task { @MainActor in
                 if let controller { self?.updatePrompts(controller) }
                 self?.emit(action)
